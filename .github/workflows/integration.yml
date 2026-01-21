@@ -16,6 +16,8 @@ jobs:
         image: triliumnext/notes:latest
         ports:
           - 37740:8080
+        env:
+          TRILIUM_GENERAL_NOAUTHENTICATION: true
         options: >-
           --health-cmd "wget --spider -q http://localhost:8080/api/health-check || exit 1"
           --health-interval 10s
@@ -50,12 +52,15 @@ jobs:
             sleep 2
           done
 
+      - name: Initialize Trilium database
+        run: |
+          echo "Initializing Trilium database..."
+          curl -X POST http://localhost:37740/api/setup/new-document \
+            -H "Content-Type: application/json" \
+            -d '{}' || echo "Database may already be initialized"
+          sleep 2
+
       - name: Run integration tests
         run: npm run test:integration
         env:
           TRILIUM_URL: http://localhost:37740/etapi
-          # Note: TRILIUM_TOKEN needs to be set up in Trilium first
-          # For CI, we'd need to either:
-          # 1. Use a pre-configured Trilium image
-          # 2. Set up the token via Trilium's API
-          TRILIUM_TOKEN: ${{ secrets.TRILIUM_TEST_TOKEN }}

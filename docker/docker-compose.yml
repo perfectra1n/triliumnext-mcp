@@ -10,6 +10,7 @@ services:
       - trilium-data:/home/node/trilium-data
     environment:
       - TRILIUM_DATA_DIR=/home/node/trilium-data
+      - TRILIUM_GENERAL_NOAUTHENTICATION=true
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/health-check"]
       interval: 10s

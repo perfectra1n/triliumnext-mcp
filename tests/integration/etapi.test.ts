@@ -1,0 +1,592 @@
+import { describe, it, expect, beforeAll } from 'vitest';
+import { TriliumClient } from '../../src/client/trilium.js';
+import { setupIntegrationTests } from './setup.js';
+
+describe('TriliumNext ETAPI Integration Tests', () => {
+  let client: TriliumClient;
+
+  beforeAll(async () => {
+    client = await setupIntegrationTests();
+  });
+
+  describe('Notes', () => {
+    let createdNoteId: string;
+    let createdBranchId: string;
+
+    it('create_note - should create a note under root', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Integration Test Note',
+        type: 'text',
+        content: '<p>Hello from integration test!</p>',
+      });
+
+      expect(result.note).toBeDefined();
+      expect(result.note.noteId).toBeDefined();
+      expect(result.note.title).toBe('Integration Test Note');
+      expect(result.note.type).toBe('text');
+      expect(result.branch).toBeDefined();
+      expect(result.branch.parentNoteId).toBe('root');
+
+      createdNoteId = result.note.noteId;
+      createdBranchId = result.branch.branchId;
+    });
+
+    it('create_note - should create code note with mime type', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'JavaScript Code Note',
+        type: 'code',
+        content: 'console.log("Hello, World!");',
+        mime: 'application/javascript',
+      });
+
+      expect(result.note.type).toBe('code');
+      expect(result.note.mime).toBe('application/javascript');
+    });
+
+    it('create_note - should handle special characters in title', async () => {
+      const specialTitle = 'Test Note: "Quotes" & <Brackets>';
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: specialTitle,
+        type: 'text',
+        content: '<p>Content</p>',
+      });
+
+      expect(result.note.title).toBe(specialTitle);
+    });
+
+    it('create_note - should handle empty content', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Empty Content Note',
+        type: 'text',
+        content: '',
+      });
+
+      const content = await client.getNoteContent(result.note.noteId);
+      expect(content).toBe('');
+    });
+
+    it('get_note - should retrieve note metadata', async () => {
+      const note = await client.getNote(createdNoteId);
+
+      expect(note.noteId).toBe(createdNoteId);
+      expect(note.title).toBe('Integration Test Note');
+      expect(note.type).toBe('text');
+      expect(note.parentNoteIds).toContain('root');
+    });
+
+    it('get_note_content - should retrieve note content', async () => {
+      const content = await client.getNoteContent(createdNoteId);
+
+      expect(content).toBe('<p>Hello from integration test!</p>');
+    });
+
+    it('update_note - should update note title', async () => {
+      const updated = await client.updateNote(createdNoteId, {
+        title: 'Updated Test Note',
+      });
+
+      expect(updated.noteId).toBe(createdNoteId);
+      expect(updated.title).toBe('Updated Test Note');
+    });
+
+    it('update_note - should update note type and mime', async () => {
+      // Create a note specifically for type change testing
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Type Change Test',
+        type: 'text',
+        content: 'print("hello")',
+      });
+
+      const updated = await client.updateNote(result.note.noteId, {
+        type: 'code',
+        mime: 'text/x-python',
+      });
+
+      expect(updated.type).toBe('code');
+      expect(updated.mime).toBe('text/x-python');
+    });
+
+    it('update_note_content - should update note content', async () => {
+      await client.updateNoteContent(createdNoteId, '<p>Updated content!</p>');
+
+      const content = await client.getNoteContent(createdNoteId);
+      expect(content).toBe('<p>Updated content!</p>');
+    });
+
+    it('update_note_content - should handle large content', async () => {
+      const largeContent = '<p>' + 'Lorem ipsum dolor sit amet. '.repeat(1000) + '</p>';
+      await client.updateNoteContent(createdNoteId, largeContent);
+
+      const content = await client.getNoteContent(createdNoteId);
+      expect(content).toBe(largeContent);
+    });
+
+    it('delete_note - should delete the note', async () => {
+      // Create a note specifically for deletion
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note to Delete',
+        type: 'text',
+        content: '<p>This will be deleted</p>',
+      });
+
+      await client.deleteNote(result.note.noteId);
+
+      // Verify note is deleted (should throw)
+      await expect(client.getNote(result.note.noteId)).rejects.toThrow();
+    });
+  });
+
+  describe('Search', () => {
+    let searchableNoteId: string;
+    let searchableNoteWithLabel: string;
+    let parentForSubtreeSearch: string;
+
+    beforeAll(async () => {
+      // Create a note to search for
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Searchable Unique Test Note',
+        type: 'text',
+        content: '<p>This note contains unique searchable content xyz123</p>',
+      });
+      searchableNoteId = result.note.noteId;
+
+      // Create a parent for subtree search
+      const parent = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Search Subtree Parent',
+        type: 'text',
+        content: '<p>Parent</p>',
+      });
+      parentForSubtreeSearch = parent.note.noteId;
+
+      // Create child note with label for filtered search
+      const labeledNote = await client.createNote({
+        parentNoteId: parentForSubtreeSearch,
+        title: 'Labeled Search Note',
+        type: 'text',
+        content: '<p>Has a label</p>',
+      });
+      searchableNoteWithLabel = labeledNote.note.noteId;
+
+      // Add a label to the note
+      await client.createAttribute({
+        noteId: searchableNoteWithLabel,
+        type: 'label',
+        name: 'searchTestLabel',
+        value: 'searchValue',
+      });
+    });
+
+    it('search_notes - should find notes by title', async () => {
+      const result = await client.searchNotes({
+        search: 'Searchable Unique Test Note',
+      });
+
+      expect(result.results).toBeDefined();
+      expect(result.results.length).toBeGreaterThan(0);
+      expect(result.results.some((n) => n.noteId === searchableNoteId)).toBe(true);
+    });
+
+    it('search_notes - should search with fastSearch', async () => {
+      const result = await client.searchNotes({
+        search: 'Searchable Unique',
+        fastSearch: true,
+      });
+
+      expect(result.results).toBeDefined();
+    });
+
+    it('search_notes - should search by label', async () => {
+      const result = await client.searchNotes({
+        search: '#searchTestLabel',
+      });
+
+      expect(result.results).toBeDefined();
+      expect(result.results.some((n) => n.noteId === searchableNoteWithLabel)).toBe(true);
+    });
+
+    it('search_notes - should search within ancestor subtree', async () => {
+      const result = await client.searchNotes({
+        search: 'Labeled Search Note',
+        ancestorNoteId: parentForSubtreeSearch,
+      });
+
+      expect(result.results).toBeDefined();
+      expect(result.results.length).toBeGreaterThan(0);
+      expect(result.results.some((n) => n.noteId === searchableNoteWithLabel)).toBe(true);
+    });
+
+    it('search_notes - should limit results', async () => {
+      // Create multiple notes
+      for (let i = 0; i < 3; i++) {
+        await client.createNote({
+          parentNoteId: 'root',
+          title: `Limit Test Note ${i}`,
+          type: 'text',
+          content: '<p>Testing limit</p>',
+        });
+      }
+
+      const result = await client.searchNotes({
+        search: 'Limit Test Note',
+        limit: 2,
+      });
+
+      expect(result.results.length).toBeLessThanOrEqual(2);
+    });
+
+    it('search_notes - should order results', async () => {
+      // Test that orderBy parameter is accepted
+      const result = await client.searchNotes({
+        search: 'Limit Test Note',
+        orderBy: 'title',
+        orderDirection: 'asc',
+      });
+
+      expect(result.results).toBeDefined();
+      // Note: Trilium's ordering may not always be deterministic for similar titles
+    });
+
+    it('get_note_tree - should get children of root', async () => {
+      const note = await client.getNote('root');
+
+      expect(note.noteId).toBe('root');
+      expect(note.childNoteIds).toBeDefined();
+      expect(Array.isArray(note.childNoteIds)).toBe(true);
+      expect(note.childNoteIds.length).toBeGreaterThan(0);
+    });
+
+    it('get_note_tree - should get children of parent note', async () => {
+      const note = await client.getNote(parentForSubtreeSearch);
+
+      expect(note.childNoteIds).toContain(searchableNoteWithLabel);
+    });
+  });
+
+  describe('Organization', () => {
+    let parentNote1Id: string;
+    let parentNote2Id: string;
+    let childNote1Id: string;
+    let childNote1BranchId: string;
+    let childNote2Id: string;
+    let childNote2BranchId: string;
+
+    beforeAll(async () => {
+      // Create two parent notes
+      const parent1 = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Org Test Parent 1',
+        type: 'text',
+        content: '<p>Parent 1</p>',
+      });
+      parentNote1Id = parent1.note.noteId;
+
+      const parent2 = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Org Test Parent 2',
+        type: 'text',
+        content: '<p>Parent 2</p>',
+      });
+      parentNote2Id = parent2.note.noteId;
+
+      // Create two children under parent 1 for reorder testing
+      const child1 = await client.createNote({
+        parentNoteId: parentNote1Id,
+        title: 'Child Note 1',
+        type: 'text',
+        content: '<p>Child 1</p>',
+      });
+      childNote1Id = child1.note.noteId;
+      childNote1BranchId = child1.branch.branchId;
+
+      const child2 = await client.createNote({
+        parentNoteId: parentNote1Id,
+        title: 'Child Note 2',
+        type: 'text',
+        content: '<p>Child 2</p>',
+      });
+      childNote2Id = child2.note.noteId;
+      childNote2BranchId = child2.branch.branchId;
+    });
+
+    it('clone_note - should clone note to second parent', async () => {
+      // Clone child1 to parent2
+      const branch = await client.createBranch({
+        noteId: childNote1Id,
+        parentNoteId: parentNote2Id,
+      });
+
+      expect(branch.noteId).toBe(childNote1Id);
+      expect(branch.parentNoteId).toBe(parentNote2Id);
+
+      // Verify the note now has two parents
+      const note = await client.getNote(childNote1Id);
+      expect(note.parentNoteIds).toContain(parentNote1Id);
+      expect(note.parentNoteIds).toContain(parentNote2Id);
+    });
+
+    it('clone_note - should clone with prefix', async () => {
+      const branch = await client.createBranch({
+        noteId: childNote2Id,
+        parentNoteId: parentNote2Id,
+        prefix: 'Reference',
+      });
+
+      expect(branch.prefix).toBe('Reference');
+      expect(branch.parentNoteId).toBe(parentNote2Id);
+    });
+
+    it('move_note - should move note to different parent', async () => {
+      // Create a note to move
+      const noteToMove = await client.createNote({
+        parentNoteId: parentNote1Id,
+        title: 'Note to Move',
+        type: 'text',
+        content: '<p>Moving this note</p>',
+      });
+
+      // Move it: create new branch first, then delete old one
+      // (If we delete first, note would be deleted when last branch is removed)
+      const newBranch = await client.createBranch({
+        noteId: noteToMove.note.noteId,
+        parentNoteId: parentNote2Id,
+      });
+      await client.deleteBranch(noteToMove.branch.branchId);
+
+      expect(newBranch.parentNoteId).toBe(parentNote2Id);
+
+      // Verify new parent
+      const movedNote = await client.getNote(noteToMove.note.noteId);
+      expect(movedNote.parentNoteIds).toContain(parentNote2Id);
+      expect(movedNote.parentNoteIds).not.toContain(parentNote1Id);
+    });
+
+    it('move_note - should move with prefix', async () => {
+      const noteToMove = await client.createNote({
+        parentNoteId: parentNote1Id,
+        title: 'Note to Move with Prefix',
+        type: 'text',
+        content: '<p>Moving with prefix</p>',
+      });
+
+      const newBranch = await client.createBranch({
+        noteId: noteToMove.note.noteId,
+        parentNoteId: parentNote2Id,
+        prefix: 'Archived',
+      });
+      await client.deleteBranch(noteToMove.branch.branchId);
+
+      expect(newBranch.prefix).toBe('Archived');
+    });
+
+    it('reorder_notes - should change note positions', async () => {
+      // Get initial positions
+      const branch1Before = await client.getBranch(childNote1BranchId);
+      const branch2Before = await client.getBranch(childNote2BranchId);
+
+      // Swap positions: put child2 before child1
+      await client.updateBranch(childNote1BranchId, { notePosition: 200 });
+      await client.updateBranch(childNote2BranchId, { notePosition: 100 });
+      await client.refreshNoteOrdering(parentNote1Id);
+
+      // Verify positions changed
+      const branch1After = await client.getBranch(childNote1BranchId);
+      const branch2After = await client.getBranch(childNote2BranchId);
+
+      expect(branch2After.notePosition).toBeLessThan(branch1After.notePosition);
+    });
+  });
+
+  describe('Attributes', () => {
+    let testNoteId: string;
+    let createdAttributeId: string;
+    let inheritableAttributeId: string;
+
+    beforeAll(async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Attribute Test Note',
+        type: 'text',
+        content: '<p>Testing attributes</p>',
+      });
+      testNoteId = result.note.noteId;
+    });
+
+    it('set_attribute - should add a label to note', async () => {
+      const attribute = await client.createAttribute({
+        noteId: testNoteId,
+        type: 'label',
+        name: 'testLabel',
+        value: 'testValue',
+      });
+
+      expect(attribute.noteId).toBe(testNoteId);
+      expect(attribute.type).toBe('label');
+      expect(attribute.name).toBe('testLabel');
+      expect(attribute.value).toBe('testValue');
+
+      createdAttributeId = attribute.attributeId;
+    });
+
+    it('set_attribute - should create inheritable label', async () => {
+      const attribute = await client.createAttribute({
+        noteId: testNoteId,
+        type: 'label',
+        name: 'inheritableLabel',
+        value: 'inherited',
+        isInheritable: true,
+      });
+
+      expect(attribute.isInheritable).toBe(true);
+      inheritableAttributeId = attribute.attributeId;
+    });
+
+    it('set_attribute - should create relation attribute', async () => {
+      // Create a target note for the relation
+      const targetNote = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Relation Target',
+        type: 'text',
+        content: '<p>Target</p>',
+      });
+
+      const attribute = await client.createAttribute({
+        noteId: testNoteId,
+        type: 'relation',
+        name: 'relatedTo',
+        value: targetNote.note.noteId,
+      });
+
+      expect(attribute.type).toBe('relation');
+      expect(attribute.name).toBe('relatedTo');
+      expect(attribute.value).toBe(targetNote.note.noteId);
+    });
+
+    it('get_attributes - should list attributes on note', async () => {
+      const note = await client.getNote(testNoteId);
+
+      const testAttr = note.attributes.find((a) => a.name === 'testLabel');
+      expect(testAttr).toBeDefined();
+      expect(testAttr?.type).toBe('label');
+      expect(testAttr?.value).toBe('testValue');
+
+      // Verify inheritable attribute
+      const inheritableAttr = note.attributes.find((a) => a.name === 'inheritableLabel');
+      expect(inheritableAttr).toBeDefined();
+      expect(inheritableAttr?.isInheritable).toBe(true);
+
+      // Verify relation
+      const relationAttr = note.attributes.find((a) => a.name === 'relatedTo');
+      expect(relationAttr).toBeDefined();
+      expect(relationAttr?.type).toBe('relation');
+    });
+
+    it('set_attribute - should update existing attribute', async () => {
+      const updated = await client.updateAttribute(createdAttributeId, {
+        value: 'updatedValue',
+      });
+
+      expect(updated.value).toBe('updatedValue');
+    });
+
+    it('delete_attribute - should remove attribute', async () => {
+      await client.deleteAttribute(createdAttributeId);
+
+      const note = await client.getNote(testNoteId);
+      const deletedAttr = note.attributes.find((a) => a.attributeId === createdAttributeId);
+      expect(deletedAttr).toBeUndefined();
+    });
+  });
+
+  describe('Calendar', () => {
+    it("get_day_note - should get or create today's daily note", async () => {
+      const today = new Date().toISOString().split('T')[0];
+      const dayNote = await client.getDayNote(today);
+
+      expect(dayNote).toBeDefined();
+      expect(dayNote.noteId).toBeDefined();
+      expect(dayNote.type).toBe('text');
+    });
+
+    it('get_day_note - should get specific date note', async () => {
+      const date = '2024-06-15';
+      const dayNote = await client.getDayNote(date);
+
+      expect(dayNote).toBeDefined();
+      expect(dayNote.noteId).toBeDefined();
+    });
+
+    it('get_inbox_note - should get inbox note', async () => {
+      const today = new Date().toISOString().split('T')[0];
+      const inboxNote = await client.getInboxNote(today);
+
+      expect(inboxNote).toBeDefined();
+      expect(inboxNote.noteId).toBeDefined();
+    });
+
+    it('get_inbox_note - should get inbox for specific date', async () => {
+      const date = '2024-06-15';
+      const inboxNote = await client.getInboxNote(date);
+
+      expect(inboxNote).toBeDefined();
+      expect(inboxNote.noteId).toBeDefined();
+    });
+  });
+
+  describe('App Info', () => {
+    it('should get application info', async () => {
+      const info = await client.getAppInfo();
+
+      expect(info).toBeDefined();
+      expect(info.appVersion).toBeDefined();
+      expect(info.dbVersion).toBeDefined();
+      expect(typeof info.appVersion).toBe('string');
+    });
+
+    it('should have expected info properties', async () => {
+      const info = await client.getAppInfo();
+
+      expect(info.syncVersion).toBeDefined();
+      expect(info.buildDate).toBeDefined();
+      expect(info.dataDirectory).toBeDefined();
+    });
+  });
+
+  describe('Error Handling', () => {
+    it('should throw error for non-existent note', async () => {
+      await expect(client.getNote('nonexistent123')).rejects.toThrow();
+    });
+
+    it('should throw error for invalid parent note', async () => {
+      await expect(
+        client.createNote({
+          parentNoteId: 'nonexistent123',
+          title: 'Test',
+          type: 'text',
+          content: 'content',
+        })
+      ).rejects.toThrow();
+    });
+
+    it('should handle deleting non-existent note gracefully', async () => {
+      // Trilium's ETAPI returns success for idempotent DELETE operations
+      await expect(client.deleteNote('nonexistent123')).resolves.not.toThrow();
+    });
+
+    it('should throw error for non-existent branch', async () => {
+      await expect(client.getBranch('nonexistent123')).rejects.toThrow();
+    });
+
+    it('should handle deleting non-existent attribute gracefully', async () => {
+      // Trilium's ETAPI returns success for idempotent DELETE operations
+      await expect(client.deleteAttribute('nonexistent123')).resolves.not.toThrow();
+    });
+  });
+});

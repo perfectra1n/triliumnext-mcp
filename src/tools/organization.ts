@@ -88,17 +88,18 @@ export async function handleOrganizationTool(
       // Get the note to find its current branch
       const note = await client.getNote(parsed.noteId);
 
-      // Delete the first branch (primary location)
-      if (note.parentBranchIds.length > 0) {
-        await client.deleteBranch(note.parentBranchIds[0]);
-      }
-
-      // Create a new branch under the new parent
+      // Create a new branch under the new parent FIRST
+      // (If we delete the old branch first, the note would be deleted when last branch is removed)
       const newBranch = await client.createBranch({
         noteId: parsed.noteId,
         parentNoteId: parsed.newParentNoteId,
         prefix: parsed.prefix,
       });
+
+      // Delete the first branch (primary location)
+      if (note.parentBranchIds.length > 0) {
+        await client.deleteBranch(note.parentBranchIds[0]);
+      }
 
       return {
         content: [{ type: 'text', text: JSON.stringify({ success: true, branch: newBranch }, null, 2) }],
