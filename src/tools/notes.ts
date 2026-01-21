@@ -10,6 +10,13 @@ const createNoteSchema = z.object({
   type: z.enum(['text', 'code', 'file', 'image', 'search', 'book', 'relationMap', 'render']).describe('Type of the note'),
   content: z.string().describe('Content of the note (HTML for text notes)'),
   mime: z.string().optional().describe('MIME type (required for code, file, image notes)'),
+  notePosition: z.number().optional().describe('Position in parent (10, 20, 30...). Lower = earlier in list'),
+  prefix: z.string().optional().describe('Branch-specific title prefix shown before the note title'),
+  isExpanded: z.boolean().optional().describe('Whether this note should appear expanded in the tree'),
+  noteId: z.string().optional().describe('Force a specific note ID (for imports/migrations)'),
+  branchId: z.string().optional().describe('Force a specific branch ID (for imports/migrations)'),
+  dateCreated: z.string().optional().describe('Creation date (format: "2024-01-15 10:30:00.000+0100")'),
+  utcDateCreated: z.string().optional().describe('UTC creation date (format: "2024-01-15 09:30:00.000Z")'),
 });
 
 const getNoteSchema = z.object({
@@ -40,19 +47,26 @@ export function registerNoteTools(): Tool[] {
   return [
     {
       name: 'create_note',
-      description: 'Create a new note with title, content, type, and parent. Returns the created note and its branch.',
+      description: 'Create a new note with title, content, type, and parent. Returns the created note and its branch. Supports positioning, tree display, and date options.',
       inputSchema: {
         type: 'object',
         properties: {
-          parentNoteId: { type: 'string', description: 'ID of the parent note' },
+          parentNoteId: { type: 'string', description: 'ID of the parent note (use "root" for top-level)' },
           title: { type: 'string', description: 'Title of the new note' },
           type: {
             type: 'string',
             enum: ['text', 'code', 'file', 'image', 'search', 'book', 'relationMap', 'render'],
             description: 'Type of the note',
           },
-          content: { type: 'string', description: 'Content of the note (HTML for text notes)' },
-          mime: { type: 'string', description: 'MIME type (required for code, file, image notes)' },
+          content: { type: 'string', description: 'Content of the note (HTML for text notes, raw code for code notes)' },
+          mime: { type: 'string', description: 'MIME type (required for code, file, image notes). Examples: application/javascript, text/x-python, text/markdown' },
+          notePosition: { type: 'number', description: 'Position in parent (10, 20, 30...). Use 5 for first position, 1000000 for last' },
+          prefix: { type: 'string', description: 'Branch-specific title prefix (e.g., "Archive:", "Draft:")' },
+          isExpanded: { type: 'boolean', description: 'Whether this note (as a folder) should appear expanded in the tree' },
+          noteId: { type: 'string', description: 'Force a specific note ID (for imports/migrations). Must be 4-32 alphanumeric chars.' },
+          branchId: { type: 'string', description: 'Force a specific branch ID (for imports/migrations). Must be 4-32 alphanumeric chars.' },
+          dateCreated: { type: 'string', description: 'Set creation date for backdating. Format: "2024-01-15 10:30:00.000+0100"' },
+          utcDateCreated: { type: 'string', description: 'Set UTC creation date. Format: "2024-01-15 09:30:00.000Z"' },
         },
         required: ['parentNoteId', 'title', 'type', 'content'],
       },
@@ -137,6 +151,13 @@ export async function handleNoteTool(
         type: parsed.type as NoteType,
         content: parsed.content,
         mime: parsed.mime,
+        notePosition: parsed.notePosition,
+        prefix: parsed.prefix,
+        isExpanded: parsed.isExpanded,
+        noteId: parsed.noteId,
+        branchId: parsed.branchId,
+        dateCreated: parsed.dateCreated,
+        utcDateCreated: parsed.utcDateCreated,
       });
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],

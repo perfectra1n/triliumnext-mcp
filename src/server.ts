@@ -12,6 +12,7 @@ import { registerSearchTools, handleSearchTool } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from './tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
+import { registerSystemTools, handleSystemTool } from './tools/system.js';
 
 export async function createServer(config: Config): Promise<void> {
   const client = new TriliumClient(config.triliumUrl, config.triliumToken);
@@ -35,6 +36,7 @@ export async function createServer(config: Config): Promise<void> {
     ...registerOrganizationTools(),
     ...registerAttributeTools(),
     ...registerCalendarTools(),
+    ...registerSystemTools(),
   ];
 
   // Handle list tools request
@@ -61,6 +63,9 @@ export async function createServer(config: Config): Promise<void> {
       if (result !== null) return result;
 
       result = await handleCalendarTool(client, name, args);
+      if (result !== null) return result;
+
+      result = await handleSystemTool(client, name, args);
       if (result !== null) return result;
 
       return {

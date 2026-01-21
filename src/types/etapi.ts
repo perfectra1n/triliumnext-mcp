@@ -71,6 +71,11 @@ export interface CreateNoteDef {
 }
 
 /**
+ * Format for note export/revision
+ */
+export type ExportFormat = 'html' | 'markdown';
+
+/**
  * Request body for patching a note
  */
 export interface PatchNoteDef {

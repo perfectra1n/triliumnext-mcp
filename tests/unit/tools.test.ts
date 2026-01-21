@@ -4,6 +4,7 @@ import { registerSearchTools, handleSearchTool } from '../../src/tools/search.js
 import { registerOrganizationTools, handleOrganizationTool } from '../../src/tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from '../../src/tools/calendar.js';
+import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
 import type { TriliumClient } from '../../src/client/trilium.js';
 
 // Mock client factory
@@ -31,6 +32,9 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     getYearNote: vi.fn(),
     getInboxNote: vi.fn(),
     getAppInfo: vi.fn(),
+    createRevision: vi.fn(),
+    createBackup: vi.fn(),
+    exportNote: vi.fn(),
     ...overrides,
   } as unknown as TriliumClient;
 }
@@ -100,6 +104,151 @@ describe('Note Tools', () => {
           type: 'text',
           content: '<p>Hello</p>',
           mime: undefined,
+          notePosition: undefined,
+          prefix: undefined,
+          isExpanded: undefined,
+          noteId: undefined,
+          branchId: undefined,
+          dateCreated: undefined,
+          utcDateCreated: undefined,
+        });
+      });
+
+      it('should create note with notePosition', async () => {
+        const mockResult = {
+          note: { noteId: 'new123' },
+          branch: { branchId: 'branch123', notePosition: 5 },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'First Note',
+          type: 'text',
+          content: '<p>Content</p>',
+          notePosition: 5,
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ notePosition: 5 })
+        );
+      });
+
+      it('should create note with prefix', async () => {
+        const mockResult = {
+          note: { noteId: 'new123' },
+          branch: { branchId: 'branch123', prefix: 'Draft' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'My Note',
+          type: 'text',
+          content: '<p>Content</p>',
+          prefix: 'Draft',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ prefix: 'Draft' })
+        );
+      });
+
+      it('should create note with isExpanded', async () => {
+        const mockResult = {
+          note: { noteId: 'new123' },
+          branch: { branchId: 'branch123', isExpanded: true },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Folder Note',
+          type: 'text',
+          content: '<p>Content</p>',
+          isExpanded: true,
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ isExpanded: true })
+        );
+      });
+
+      it('should create note with dateCreated for backdating', async () => {
+        const mockResult = {
+          note: { noteId: 'new123', dateCreated: '2023-06-15 10:30:00.000+0100' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Backdated Note',
+          type: 'text',
+          content: '<p>From the past</p>',
+          dateCreated: '2023-06-15 10:30:00.000+0100',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ dateCreated: '2023-06-15 10:30:00.000+0100' })
+        );
+      });
+
+      it('should create note with forced noteId', async () => {
+        const mockResult = {
+          note: { noteId: 'customId123' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Custom ID Note',
+          type: 'text',
+          content: '<p>Content</p>',
+          noteId: 'customId123',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ noteId: 'customId123' })
+        );
+      });
+
+      it('should create note with all optional parameters', async () => {
+        const mockResult = {
+          note: { noteId: 'full123' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Full Note',
+          type: 'code',
+          content: 'print("hello")',
+          mime: 'text/x-python',
+          notePosition: 100,
+          prefix: 'Archive',
+          isExpanded: false,
+          noteId: 'customNote',
+          branchId: 'customBranch',
+          dateCreated: '2023-01-01 00:00:00.000+0000',
+          utcDateCreated: '2023-01-01 00:00:00.000Z',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith({
+          parentNoteId: 'root',
+          title: 'Full Note',
+          type: 'code',
+          content: 'print("hello")',
+          mime: 'text/x-python',
+          notePosition: 100,
+          prefix: 'Archive',
+          isExpanded: false,
+          noteId: 'customNote',
+          branchId: 'customBranch',
+          dateCreated: '2023-01-01 00:00:00.000+0000',
+          utcDateCreated: '2023-01-01 00:00:00.000Z',
         });
       });
 
@@ -1106,16 +1255,135 @@ describe('Calendar Tools', () => {
   });
 });
 
+describe('System Tools', () => {
+  describe('registerSystemTools', () => {
+    it('should register 3 system tools', () => {
+      const tools = registerSystemTools();
+      expect(tools).toHaveLength(3);
+      expect(tools.map((t) => t.name)).toEqual(['create_revision', 'create_backup', 'export_note']);
+    });
+
+    it('should have correct input schemas', () => {
+      const tools = registerSystemTools();
+      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
+
+      expect(toolMap['create_revision'].inputSchema.required).toEqual(['noteId']);
+      expect(toolMap['create_backup'].inputSchema.required).toEqual(['backupName']);
+      expect(toolMap['export_note'].inputSchema.required).toEqual(['noteId']);
+    });
+  });
+
+  describe('handleSystemTool', () => {
+    let mockClient: TriliumClient;
+
+    beforeEach(() => {
+      mockClient = createMockClient();
+    });
+
+    describe('create_revision', () => {
+      it('should create revision with default format', async () => {
+        vi.mocked(mockClient.createRevision).mockResolvedValue(undefined);
+
+        const result = await handleSystemTool(mockClient, 'create_revision', {
+          noteId: 'abc123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.createRevision).toHaveBeenCalledWith('abc123', 'html');
+        expect(result!.content[0].text).toContain('Revision created');
+      });
+
+      it('should create revision with markdown format', async () => {
+        vi.mocked(mockClient.createRevision).mockResolvedValue(undefined);
+
+        await handleSystemTool(mockClient, 'create_revision', {
+          noteId: 'abc123',
+          format: 'markdown',
+        });
+
+        expect(mockClient.createRevision).toHaveBeenCalledWith('abc123', 'markdown');
+      });
+
+      it('should reject invalid format', async () => {
+        await expect(
+          handleSystemTool(mockClient, 'create_revision', {
+            noteId: 'abc123',
+            format: 'invalid',
+          })
+        ).rejects.toThrow();
+      });
+    });
+
+    describe('create_backup', () => {
+      it('should create backup with given name', async () => {
+        vi.mocked(mockClient.createBackup).mockResolvedValue(undefined);
+
+        const result = await handleSystemTool(mockClient, 'create_backup', {
+          backupName: 'before-migration',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.createBackup).toHaveBeenCalledWith('before-migration');
+        expect(result!.content[0].text).toContain('Backup created');
+        expect(result!.content[0].text).toContain('backup-before-migration.db');
+      });
+
+      it('should reject missing backupName', async () => {
+        await expect(handleSystemTool(mockClient, 'create_backup', {})).rejects.toThrow();
+      });
+    });
+
+    describe('export_note', () => {
+      it('should export note with default format', async () => {
+        const mockData = new Uint8Array([80, 75, 3, 4]).buffer; // ZIP magic bytes
+        vi.mocked(mockClient.exportNote).mockResolvedValue(mockData);
+
+        const result = await handleSystemTool(mockClient, 'export_note', {
+          noteId: 'abc123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.exportNote).toHaveBeenCalledWith('abc123', 'html');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed.noteId).toBe('abc123');
+        expect(parsed.format).toBe('html');
+        expect(parsed.sizeBytes).toBe(4);
+        expect(parsed.base64Data).toBeDefined();
+      });
+
+      it('should export note with markdown format', async () => {
+        const mockData = new Uint8Array([80, 75, 3, 4]).buffer;
+        vi.mocked(mockClient.exportNote).mockResolvedValue(mockData);
+
+        const result = await handleSystemTool(mockClient, 'export_note', {
+          noteId: 'root',
+          format: 'markdown',
+        });
+
+        expect(mockClient.exportNote).toHaveBeenCalledWith('root', 'markdown');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed.format).toBe('markdown');
+      });
+    });
+
+    it('should return null for unknown tool', async () => {
+      const result = await handleSystemTool(mockClient, 'unknown_tool', {});
+      expect(result).toBeNull();
+    });
+  });
+});
+
 describe('Tool count verification', () => {
-  it('should have exactly 16 tools total', () => {
+  it('should have exactly 19 tools total', () => {
     const allTools = [
       ...registerNoteTools(),
       ...registerSearchTools(),
       ...registerOrganizationTools(),
       ...registerAttributeTools(),
       ...registerCalendarTools(),
+      ...registerSystemTools(),
     ];
-    expect(allTools).toHaveLength(16);
+    expect(allTools).toHaveLength(19);
   });
 
   it('all tools should have descriptions', () => {
@@ -1125,6 +1393,7 @@ describe('Tool count verification', () => {
       ...registerOrganizationTools(),
       ...registerAttributeTools(),
       ...registerCalendarTools(),
+      ...registerSystemTools(),
     ];
     allTools.forEach((tool) => {
       expect(tool.description).toBeDefined();
@@ -1139,6 +1408,7 @@ describe('Tool count verification', () => {
       ...registerOrganizationTools(),
       ...registerAttributeTools(),
       ...registerCalendarTools(),
+      ...registerSystemTools(),
     ];
     allTools.forEach((tool) => {
       expect(tool.inputSchema).toBeDefined();

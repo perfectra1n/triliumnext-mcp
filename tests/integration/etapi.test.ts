@@ -559,6 +559,99 @@ describe('TriliumNext ETAPI Integration Tests', () => {
     });
   });
 
+  describe('System Operations', () => {
+    it('create_revision - should create a revision snapshot', async () => {
+      // Create a note to revision
+      const note = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note for Revision',
+        type: 'text',
+        content: '<p>Original content</p>',
+      });
+
+      // Create a revision - should not throw
+      await client.createRevision(note.note.noteId, 'html');
+    });
+
+    it('create_backup - should create a database backup', async () => {
+      const backupName = `test-${Date.now()}`;
+      await client.createBackup(backupName);
+      // Should not throw - backup was created
+    });
+
+    it('export_note - should export note as ZIP', async () => {
+      // Create a note to export
+      const note = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note to Export',
+        type: 'text',
+        content: '<p>Export me!</p>',
+      });
+
+      const data = await client.exportNote(note.note.noteId, 'html');
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(data.byteLength).toBeGreaterThan(0);
+
+      // Check ZIP magic bytes
+      const bytes = new Uint8Array(data);
+      expect(bytes[0]).toBe(0x50); // P
+      expect(bytes[1]).toBe(0x4b); // K
+    });
+
+    it('export_note - should export as markdown format', async () => {
+      const note = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Markdown Export Note',
+        type: 'text',
+        content: '<p>Export as markdown</p>',
+      });
+
+      const data = await client.exportNote(note.note.noteId, 'markdown');
+
+      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(data.byteLength).toBeGreaterThan(0);
+    });
+  });
+
+  describe('Enhanced create_note', () => {
+    it('should create note with notePosition', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Positioned Note',
+        type: 'text',
+        content: '<p>At specific position</p>',
+        notePosition: 5,
+      });
+
+      expect(result.branch.notePosition).toBeDefined();
+    });
+
+    it('should create note with prefix', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Prefixed Note',
+        type: 'text',
+        content: '<p>With prefix</p>',
+        prefix: 'Draft',
+      });
+
+      expect(result.branch.prefix).toBe('Draft');
+    });
+
+    it('should create note with isExpanded', async () => {
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Expanded Folder',
+        type: 'text',
+        content: '<p>Folder that starts expanded</p>',
+        isExpanded: true,
+      });
+
+      expect(result.branch.isExpanded).toBe(true);
+    });
+  });
+
   describe('Error Handling', () => {
     it('should throw error for non-existent note', async () => {
       await expect(client.getNote('nonexistent123')).rejects.toThrow();

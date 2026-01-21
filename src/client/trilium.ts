@@ -218,4 +218,36 @@ export class TriliumClient {
   async getAppInfo(): Promise<AppInfo> {
     return this.request<AppInfo>('GET', '/app-info');
   }
+
+  // ==================== Revisions ====================
+
+  async createRevision(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<void> {
+    await this.request<undefined>('POST', `/notes/${noteId}/revision`, {
+      query: { format },
+    });
+  }
+
+  // ==================== Backup ====================
+
+  async createBackup(backupName: string): Promise<void> {
+    await this.request<undefined>('PUT', `/backup/${backupName}`);
+  }
+
+  // ==================== Export ====================
+
+  async exportNote(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<ArrayBuffer> {
+    const url = `${this.baseUrl}/notes/${noteId}/export?format=${format}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Authorization: this.token,
+      },
+    });
+
+    if (!response.ok) {
+      throw new TriliumClientError(response.status, 'EXPORT_ERROR', `Failed to export note: ${response.statusText}`);
+    }
+
+    return response.arrayBuffer();
+  }
 }
