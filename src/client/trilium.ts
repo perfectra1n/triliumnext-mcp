@@ -1,0 +1,221 @@
+import type {
+  Note,
+  NoteWithBranch,
+  CreateNoteDef,
+  PatchNoteDef,
+  Branch,
+  CreateBranchDef,
+  PatchBranchDef,
+  Attribute,
+  CreateAttributeDef,
+  PatchAttributeDef,
+  SearchResponse,
+  SearchParams,
+  AppInfo,
+  EtapiError,
+  EntityId,
+} from '../types/etapi.js';
+
+export class TriliumClientError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'TriliumClientError';
+  }
+}
+
+export class TriliumClient {
+  private readonly baseUrl: string;
+  private readonly token: string;
+
+  constructor(baseUrl: string, token: string) {
+    // Remove trailing slash if present
+    this.baseUrl = baseUrl.replace(/\/$/, '');
+    this.token = token;
+  }
+
+  private async request<T>(
+    method: string,
+    path: string,
+    options: {
+      body?: unknown;
+      query?: Record<string, string | number | boolean | undefined>;
+      contentType?: string;
+      responseType?: 'json' | 'text';
+    } = {}
+  ): Promise<T> {
+    const { body, query, contentType = 'application/json', responseType = 'json' } = options;
+
+    let url = `${this.baseUrl}${path}`;
+
+    if (query) {
+      const params = new URLSearchParams();
+      for (const [key, value] of Object.entries(query)) {
+        if (value !== undefined) {
+          params.append(key, String(value));
+        }
+      }
+      const queryString = params.toString();
+      if (queryString) {
+        url += `?${queryString}`;
+      }
+    }
+
+    const headers: Record<string, string> = {
+      Authorization: this.token,
+    };
+
+    if (body !== undefined) {
+      headers['Content-Type'] = contentType;
+    }
+
+    const response = await fetch(url, {
+      method,
+      headers,
+      body: body !== undefined ? (contentType === 'application/json' ? JSON.stringify(body) : String(body)) : undefined,
+    });
+
+    if (!response.ok) {
+      let errorData: EtapiError;
+      try {
+        errorData = (await response.json()) as EtapiError;
+      } catch {
+        errorData = {
+          status: response.status,
+          code: 'UNKNOWN_ERROR',
+          message: response.statusText,
+        };
+      }
+      throw new TriliumClientError(errorData.status, errorData.code, errorData.message);
+    }
+
+    // Handle 204 No Content
+    if (response.status === 204) {
+      return undefined as T;
+    }
+
+    if (responseType === 'text') {
+      return (await response.text()) as T;
+    }
+
+    return (await response.json()) as T;
+  }
+
+  // ==================== Notes ====================
+
+  async createNote(def: CreateNoteDef): Promise<NoteWithBranch> {
+    return this.request<NoteWithBranch>('POST', '/create-note', { body: def });
+  }
+
+  async getNote(noteId: EntityId): Promise<Note> {
+    return this.request<Note>('GET', `/notes/${noteId}`);
+  }
+
+  async getNoteContent(noteId: EntityId): Promise<string> {
+    return this.request<string>('GET', `/notes/${noteId}/content`, { responseType: 'text' });
+  }
+
+  async updateNote(noteId: EntityId, patch: PatchNoteDef): Promise<Note> {
+    return this.request<Note>('PATCH', `/notes/${noteId}`, { body: patch });
+  }
+
+  async updateNoteContent(noteId: EntityId, content: string): Promise<void> {
+    await this.request<undefined>('PUT', `/notes/${noteId}/content`, {
+      body: content,
+      contentType: 'text/plain',
+    });
+  }
+
+  async deleteNote(noteId: EntityId): Promise<void> {
+    await this.request<undefined>('DELETE', `/notes/${noteId}`);
+  }
+
+  // ==================== Search ====================
+
+  async searchNotes(params: SearchParams): Promise<SearchResponse> {
+    return this.request<SearchResponse>('GET', '/notes', {
+      query: {
+        search: params.search,
+        fastSearch: params.fastSearch,
+        includeArchivedNotes: params.includeArchivedNotes,
+        ancestorNoteId: params.ancestorNoteId,
+        ancestorDepth: params.ancestorDepth,
+        orderBy: params.orderBy,
+        orderDirection: params.orderDirection,
+        limit: params.limit,
+        debug: params.debug,
+      },
+    });
+  }
+
+  // ==================== Branches ====================
+
+  async createBranch(def: CreateBranchDef): Promise<Branch> {
+    return this.request<Branch>('POST', '/branches', { body: def });
+  }
+
+  async getBranch(branchId: EntityId): Promise<Branch> {
+    return this.request<Branch>('GET', `/branches/${branchId}`);
+  }
+
+  async updateBranch(branchId: EntityId, patch: PatchBranchDef): Promise<Branch> {
+    return this.request<Branch>('PATCH', `/branches/${branchId}`, { body: patch });
+  }
+
+  async deleteBranch(branchId: EntityId): Promise<void> {
+    await this.request<undefined>('DELETE', `/branches/${branchId}`);
+  }
+
+  async refreshNoteOrdering(parentNoteId: EntityId): Promise<void> {
+    await this.request<undefined>('POST', `/refresh-note-ordering/${parentNoteId}`);
+  }
+
+  // ==================== Attributes ====================
+
+  async createAttribute(def: CreateAttributeDef): Promise<Attribute> {
+    return this.request<Attribute>('POST', '/attributes', { body: def });
+  }
+
+  async getAttribute(attributeId: EntityId): Promise<Attribute> {
+    return this.request<Attribute>('GET', `/attributes/${attributeId}`);
+  }
+
+  async updateAttribute(attributeId: EntityId, patch: PatchAttributeDef): Promise<Attribute> {
+    return this.request<Attribute>('PATCH', `/attributes/${attributeId}`, { body: patch });
+  }
+
+  async deleteAttribute(attributeId: EntityId): Promise<void> {
+    await this.request<undefined>('DELETE', `/attributes/${attributeId}`);
+  }
+
+  // ==================== Calendar ====================
+
+  async getDayNote(date: string): Promise<Note> {
+    return this.request<Note>('GET', `/calendar/days/${date}`);
+  }
+
+  async getWeekNote(week: string): Promise<Note> {
+    return this.request<Note>('GET', `/calendar/weeks/${week}`);
+  }
+
+  async getMonthNote(month: string): Promise<Note> {
+    return this.request<Note>('GET', `/calendar/months/${month}`);
+  }
+
+  async getYearNote(year: string): Promise<Note> {
+    return this.request<Note>('GET', `/calendar/years/${year}`);
+  }
+
+  async getInboxNote(date: string): Promise<Note> {
+    return this.request<Note>('GET', `/inbox/${date}`);
+  }
+
+  // ==================== App Info ====================
+
+  async getAppInfo(): Promise<AppInfo> {
+    return this.request<AppInfo>('GET', '/app-info');
+  }
+}

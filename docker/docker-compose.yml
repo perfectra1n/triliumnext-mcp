@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  trilium:
+    image: triliumnext/notes:latest
+    container_name: trilium-dev
+    ports:
+      - "37740:8080"
+    volumes:
+      - trilium-data:/home/node/trilium-data
+    environment:
+      - TRILIUM_DATA_DIR=/home/node/trilium-data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8080/api/health-check"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  mcp-server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: triliumnext-mcp
+    depends_on:
+      trilium:
+        condition: service_healthy
+    environment:
+      - TRILIUM_URL=http://trilium:8080/etapi
+      - TRILIUM_TOKEN=${TRILIUM_TOKEN}
+    command: ["--transport", "http", "--port", "3000"]
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  trilium-data:
