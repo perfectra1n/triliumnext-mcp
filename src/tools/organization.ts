@@ -1,93 +1,55 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import { defineTool } from './schemas.js';
+import { positionSchema } from './validators.js';
 
 const moveNoteSchema = z.object({
-  noteId: z.string().describe('ID of the note to move'),
-  newParentNoteId: z.string().describe('ID of the new parent note'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to move'),
+  newParentNoteId: z.string().min(1, 'New parent note ID is required').describe('ID of the new parent note'),
   prefix: z.string().optional().describe('Optional prefix for the note in its new location'),
 });
 
 const cloneNoteSchema = z.object({
-  noteId: z.string().describe('ID of the note to clone'),
-  parentNoteId: z.string().describe('ID of the parent note for the clone'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to clone'),
+  parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note for the clone'),
   prefix: z.string().optional().describe('Optional prefix for the cloned note'),
 });
 
 const reorderNotesSchema = z.object({
-  parentNoteId: z.string().describe('ID of the parent note'),
+  parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note'),
   notePositions: z.array(z.object({
-    branchId: z.string().describe('ID of the branch to reorder'),
-    notePosition: z.number().describe('New position (10, 20, 30...)'),
-  })).describe('Array of branch positions'),
+    branchId: z.string().min(1, 'Branch ID is required').describe('ID of the branch to reorder'),
+    notePosition: positionSchema.describe('New position (10, 20, 30...)'),
+  })).describe('Array of branch positions to update'),
 });
 
 const deleteBranchSchema = z.object({
-  branchId: z.string().describe('ID of the branch to delete'),
+  branchId: z.string().min(1, 'Branch ID is required').describe('ID of the branch to delete (not the note ID)'),
 });
 
 export function registerOrganizationTools(): Tool[] {
   return [
-    {
-      name: 'move_note',
-      description: 'Move a note to a different parent. This deletes the old branch and creates a new one under the target parent.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          noteId: { type: 'string', description: 'ID of the note to move' },
-          newParentNoteId: { type: 'string', description: 'ID of the new parent note' },
-          prefix: { type: 'string', description: 'Optional prefix for the note in its new location' },
-        },
-        required: ['noteId', 'newParentNoteId'],
-      },
-    },
-    {
-      name: 'clone_note',
-      description: 'Clone a note to appear in multiple locations. Creates a new branch pointing to the same note.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          noteId: { type: 'string', description: 'ID of the note to clone' },
-          parentNoteId: { type: 'string', description: 'ID of the parent note for the clone' },
-          prefix: { type: 'string', description: 'Optional prefix for the cloned note' },
-        },
-        required: ['noteId', 'parentNoteId'],
-      },
-    },
-    {
-      name: 'reorder_notes',
-      description: 'Change the order of notes within a parent. Update notePosition on branches to control display order.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          parentNoteId: { type: 'string', description: 'ID of the parent note' },
-          notePositions: {
-            type: 'array',
-            items: {
-              type: 'object',
-              properties: {
-                branchId: { type: 'string', description: 'ID of the branch to reorder' },
-                notePosition: { type: 'number', description: 'New position (10, 20, 30...)' },
-              },
-              required: ['branchId', 'notePosition'],
-            },
-            description: 'Array of branch positions to update',
-          },
-        },
-        required: ['parentNoteId', 'notePositions'],
-      },
-    },
-    {
-      name: 'delete_branch',
-      description: 'Delete a specific branch (parent-child link) without deleting the note itself. Use this to remove a note from one location while keeping it in others. WARNING: If you delete the last branch of a note, the note itself will be deleted.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          branchId: { type: 'string', description: 'ID of the branch to delete (not the note ID)' },
-        },
-        required: ['branchId'],
-      },
-    },
+    defineTool(
+      'move_note',
+      'Move a note to a different parent. This deletes the old branch and creates a new one under the target parent.',
+      moveNoteSchema
+    ),
+    defineTool(
+      'clone_note',
+      'Clone a note to appear in multiple locations. Creates a new branch pointing to the same note.',
+      cloneNoteSchema
+    ),
+    defineTool(
+      'reorder_notes',
+      'Change the order of notes within a parent. Update notePosition on branches to control display order.',
+      reorderNotesSchema
+    ),
+    defineTool(
+      'delete_branch',
+      'Delete a specific branch (parent-child link) without deleting the note itself. Use this to remove a note from one location while keeping it in others. WARNING: If you delete the last branch of a note, the note itself will be deleted.',
+      deleteBranchSchema
+    ),
   ];
 }
 

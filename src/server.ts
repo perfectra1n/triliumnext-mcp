@@ -4,8 +4,15 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
+import { ZodError } from 'zod';
 
-import { TriliumClient } from './client/trilium.js';
+import { TriliumClient, TriliumClientError } from './client/trilium.js';
+import {
+  formatTriliumError,
+  formatZodError,
+  formatUnknownError,
+  formatErrorForMCP,
+} from './errors/index.js';
 import type { Config } from './config.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool } from './tools/search.js';
@@ -73,11 +80,16 @@ export async function createServer(config: Config): Promise<void> {
         isError: true,
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return {
-        content: [{ type: 'text', text: `Error: ${message}` }],
-        isError: true,
-      };
+      // Format errors with structured information and actionable guidance
+      let structured;
+      if (error instanceof TriliumClientError) {
+        structured = formatTriliumError(error);
+      } else if (error instanceof ZodError) {
+        structured = formatZodError(error, name);
+      } else {
+        structured = formatUnknownError(error);
+      }
+      return formatErrorForMCP(structured);
     }
   });
 

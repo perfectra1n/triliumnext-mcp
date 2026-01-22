@@ -1,72 +1,40 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import { defineTool } from './schemas.js';
+import { exportFormatSchema, backupNameSchema } from './validators.js';
 
 const createRevisionSchema = z.object({
-  noteId: z.string().describe('ID of the note to create a revision for'),
-  format: z.enum(['html', 'markdown']).optional().describe('Format of the revision content'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to create a revision for'),
+  format: exportFormatSchema.optional().describe('Format of the revision content (default: html)'),
 });
 
 const createBackupSchema = z.object({
-  backupName: z.string().describe('Name for the backup file (will create backup-{name}.db)'),
+  backupName: backupNameSchema.describe('Name for the backup (e.g., "before-migration", "daily-2024-01-15")'),
 });
 
 const exportNoteSchema = z.object({
-  noteId: z.string().describe('ID of the note to export (use "root" for entire database)'),
-  format: z.enum(['html', 'markdown']).optional().describe('Export format'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to export (use "root" to export entire database)'),
+  format: exportFormatSchema.optional().describe('Export format - markdown is recommended for LLM processing (default: html)'),
 });
 
 export function registerSystemTools(): Tool[] {
   return [
-    {
-      name: 'create_revision',
-      description: 'Create a revision (snapshot) of a note. Useful before making significant edits to preserve the current state. Revisions can be viewed and restored in Trilium.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          noteId: { type: 'string', description: 'ID of the note to create a revision for' },
-          format: {
-            type: 'string',
-            enum: ['html', 'markdown'],
-            description: 'Format of the revision content (default: html)',
-          },
-        },
-        required: ['noteId'],
-      },
-    },
-    {
-      name: 'create_backup',
-      description: 'Create a full database backup. The backup file will be named backup-{backupName}.db and stored in the Trilium data directory. Use before major operations for safety.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          backupName: {
-            type: 'string',
-            description: 'Name for the backup (e.g., "before-migration", "daily-2024-01-15")',
-          },
-        },
-        required: ['backupName'],
-      },
-    },
-    {
-      name: 'export_note',
-      description: 'Export a note and its subtree as a ZIP file. Returns the export as base64-encoded data. Use format=markdown for LLM-friendly output.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          noteId: {
-            type: 'string',
-            description: 'ID of the note to export (use "root" to export entire database)',
-          },
-          format: {
-            type: 'string',
-            enum: ['html', 'markdown'],
-            description: 'Export format - markdown is recommended for LLM processing (default: html)',
-          },
-        },
-        required: ['noteId'],
-      },
-    },
+    defineTool(
+      'create_revision',
+      'Create a revision (snapshot) of a note. Useful before making significant edits to preserve the current state. Revisions can be viewed and restored in Trilium.',
+      createRevisionSchema
+    ),
+    defineTool(
+      'create_backup',
+      'Create a full database backup. The backup file will be named backup-{backupName}.db and stored in the Trilium data directory. Use before major operations for safety.',
+      createBackupSchema
+    ),
+    defineTool(
+      'export_note',
+      'Export a note and its subtree as a ZIP file. Returns the export as base64-encoded data. Use format=markdown for LLM-friendly output.',
+      exportNoteSchema
+    ),
   ];
 }
 

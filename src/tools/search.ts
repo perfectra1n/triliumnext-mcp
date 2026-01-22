@@ -1,51 +1,35 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import { defineTool } from './schemas.js';
+import { orderDirectionSchema, searchLimitSchema } from './validators.js';
 
 const searchNotesSchema = z.object({
-  query: z.string().describe('Search query string'),
-  fastSearch: z.boolean().optional().describe('Enable fast search (fulltext doesn\'t look into content)'),
-  includeArchivedNotes: z.boolean().optional().describe('Include archived notes in results'),
+  query: z.string().min(1, 'Search query is required').describe('Search query string. Use #label for labels, ~relation for relations.'),
+  fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
+  includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
   ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
-  orderBy: z.string().optional().describe('Property to order results by (title, dateCreated, dateModified)'),
-  orderDirection: z.enum(['asc', 'desc']).optional().describe('Order direction'),
-  limit: z.number().optional().describe('Maximum number of results'),
+  orderBy: z.string().optional().describe('Property to order by (title, dateCreated, dateModified)'),
+  orderDirection: orderDirectionSchema.optional().describe('Order direction'),
+  limit: searchLimitSchema.optional().describe('Maximum number of results'),
 });
 
 const getNoteTreeSchema = z.object({
-  noteId: z.string().describe('ID of the parent note'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the parent note (use "root" for the root note)'),
 });
 
 export function registerSearchTools(): Tool[] {
   return [
-    {
-      name: 'search_notes',
-      description: 'Search notes using full-text search and/or attribute filters. Supports Trilium search syntax including #label and ~relation filters.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          query: { type: 'string', description: 'Search query string. Use #label for labels, ~relation for relations.' },
-          fastSearch: { type: 'boolean', description: 'Enable fast search (skips content search)' },
-          includeArchivedNotes: { type: 'boolean', description: 'Include archived notes' },
-          ancestorNoteId: { type: 'string', description: 'Search only in subtree of this note' },
-          orderBy: { type: 'string', description: 'Property to order by (title, dateCreated, dateModified)' },
-          orderDirection: { type: 'string', enum: ['asc', 'desc'], description: 'Order direction' },
-          limit: { type: 'number', description: 'Maximum number of results' },
-        },
-        required: ['query'],
-      },
-    },
-    {
-      name: 'get_note_tree',
-      description: 'Get children of a note for tree navigation. Returns the note with its childNoteIds populated.',
-      inputSchema: {
-        type: 'object',
-        properties: {
-          noteId: { type: 'string', description: 'ID of the parent note (use "root" for the root note)' },
-        },
-        required: ['noteId'],
-      },
-    },
+    defineTool(
+      'search_notes',
+      'Search notes using full-text search and/or attribute filters. Supports Trilium search syntax including #label and ~relation filters.',
+      searchNotesSchema
+    ),
+    defineTool(
+      'get_note_tree',
+      'Get children of a note for tree navigation. Returns the note with its childNoteIds populated.',
+      getNoteTreeSchema
+    ),
   ];
 }
 
