@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { TriliumClient } from '../../src/client/trilium.js';
+import { handleNoteTool } from '../../src/tools/notes.js';
 import { setupIntegrationTests, stopTriliumContainer } from './setup.js';
 
 describe('TriliumNext ETAPI Integration Tests', () => {
@@ -879,6 +880,202 @@ describe('TriliumNext ETAPI Integration Tests', () => {
     it('should handle deleting non-existent attribute gracefully', async () => {
       // Trilium's ETAPI returns success for idempotent DELETE operations
       await expect(client.deleteAttribute('nonexistent123')).resolves.not.toThrow();
+    });
+  });
+
+  describe('Markdown Content Support', () => {
+    it('create_note - should convert markdown to HTML when format is markdown', async () => {
+      const markdownContent = `# Hello World
+
+This is a **bold** text and this is *italic*.
+
+- Item 1
+- Item 2
+- Item 3
+
+\`\`\`javascript
+console.log("Hello");
+\`\`\`
+`;
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Markdown Test Note',
+        type: 'text',
+        content: markdownContent,
+        format: 'markdown',
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+      expect(parsed.note.noteId).toBeDefined();
+
+      // Verify the content was converted to HTML
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toContain('<h1>Hello World</h1>');
+      expect(content).toContain('<strong>bold</strong>');
+      expect(content).toContain('<em>italic</em>');
+      expect(content).toContain('<li>Item 1</li>');
+      expect(content).toContain('<li>Item 2</li>');
+      expect(content).toContain('<code');
+    });
+
+    it('create_note - should pass HTML unchanged when format is html', async () => {
+      const htmlContent = '<div class="custom"><p>Already HTML</p></div>';
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'HTML Format Test Note',
+        type: 'text',
+        content: htmlContent,
+        format: 'html',
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toBe(htmlContent);
+    });
+
+    it('create_note - should pass content unchanged when format is not specified (default)', async () => {
+      const htmlContent = '<p>Default behavior is HTML</p>';
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Default Format Test Note',
+        type: 'text',
+        content: htmlContent,
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toBe(htmlContent);
+    });
+
+    it('update_note_content - should convert markdown to HTML when format is markdown', async () => {
+      // Create a note first
+      const createResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note for Markdown Update',
+        type: 'text',
+        content: '<p>Initial content</p>',
+      });
+
+      const markdownUpdate = `## Updated Heading
+
+Here is a [link](https://example.com) and some \`inline code\`.
+
+1. First item
+2. Second item
+`;
+
+      await handleNoteTool(client, 'update_note_content', {
+        noteId: createResult.note.noteId,
+        content: markdownUpdate,
+        format: 'markdown',
+      });
+
+      const content = await client.getNoteContent(createResult.note.noteId);
+      expect(content).toContain('<h2>Updated Heading</h2>');
+      expect(content).toContain('<a href="https://example.com">link</a>');
+      expect(content).toContain('<code>inline code</code>');
+      expect(content).toContain('<li>First item</li>');
+      expect(content).toContain('<li>Second item</li>');
+    });
+
+    it('update_note_content - should pass HTML unchanged when format is not specified', async () => {
+      const createResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note for HTML Update',
+        type: 'text',
+        content: '<p>Initial content</p>',
+      });
+
+      const htmlUpdate = '<article><h1>HTML Update</h1><p>Unchanged</p></article>';
+
+      await handleNoteTool(client, 'update_note_content', {
+        noteId: createResult.note.noteId,
+        content: htmlUpdate,
+      });
+
+      const content = await client.getNoteContent(createResult.note.noteId);
+      expect(content).toBe(htmlUpdate);
+    });
+
+    it('create_note - should handle complex markdown with tables', async () => {
+      const markdownWithTable = `# Data Table
+
+| Column 1 | Column 2 | Column 3 |
+|----------|----------|----------|
+| A1       | B1       | C1       |
+| A2       | B2       | C2       |
+
+> This is a blockquote
+`;
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Table Markdown Note',
+        type: 'text',
+        content: markdownWithTable,
+        format: 'markdown',
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toContain('<h1>Data Table</h1>');
+      expect(content).toContain('<table>');
+      expect(content).toContain('<th>Column 1</th>');
+      expect(content).toContain('<td>A1</td>');
+      expect(content).toContain('<blockquote>');
+    });
+
+    it('create_note - should handle markdown with special characters', async () => {
+      const markdownWithSpecialChars = `# Special Characters Test
+
+This has <angle brackets> and "quotes" & ampersands.
+
+\`\`\`html
+<div class="test">HTML in code block</div>
+\`\`\`
+`;
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Special Characters Markdown Note',
+        type: 'text',
+        content: markdownWithSpecialChars,
+        format: 'markdown',
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+      expect(parsed.note.noteId).toBeDefined();
+
+      // Content was successfully stored
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toContain('<h1>Special Characters Test</h1>');
+    });
+
+    it('create_note - should handle empty markdown', async () => {
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Empty Markdown Note',
+        type: 'text',
+        content: '',
+        format: 'markdown',
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+
+      const content = await client.getNoteContent(parsed.note.noteId);
+      expect(content).toBe('');
     });
   });
 });

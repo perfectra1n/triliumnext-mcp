@@ -140,8 +140,7 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
 
   const file = loadConfigFile();
 
-  const rawUrl =
-    cli.url ?? process.env.TRILIUM_URL ?? file.url ?? 'http://localhost:37740';
+  const rawUrl = cli.url ?? process.env.TRILIUM_URL ?? file.url ?? 'http://localhost:37740';
   const triliumUrl = normalizeServerUrl(rawUrl);
 
   const triliumToken = cli.token ?? process.env.TRILIUM_TOKEN ?? file.token ?? '';

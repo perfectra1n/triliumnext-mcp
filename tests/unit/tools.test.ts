@@ -73,12 +73,17 @@ describe('Note Tools', () => {
         'content',
       ]);
       expect(toolMap['create_note'].inputSchema.properties).toHaveProperty('mime');
+      expect(toolMap['create_note'].inputSchema.properties).toHaveProperty('format');
 
       // update_note schema - noteId required, others optional
       expect(toolMap['update_note'].inputSchema.required).toEqual(['noteId']);
       expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('title');
       expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('type');
       expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('mime');
+
+      // update_note_content schema - should have format option
+      expect(toolMap['update_note_content'].inputSchema.required).toEqual(['noteId', 'content']);
+      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('format');
     });
   });
 
@@ -326,6 +331,78 @@ describe('Note Tools', () => {
           })
         ).rejects.toThrow();
       });
+
+      it('should convert markdown to HTML when format is markdown', async () => {
+        const mockResult = {
+          note: { noteId: 'md123', title: 'Markdown Note' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Markdown Note',
+          type: 'text',
+          content: '# Hello\n\nThis is **bold** text.',
+          format: 'markdown',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringContaining('<h1>Hello</h1>'),
+          })
+        );
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: expect.stringContaining('<strong>bold</strong>'),
+          })
+        );
+      });
+
+      it('should pass content unchanged when format is html', async () => {
+        const mockResult = {
+          note: { noteId: 'html123' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        const htmlContent = '<p>Already HTML</p>';
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'HTML Note',
+          type: 'text',
+          content: htmlContent,
+          format: 'html',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: htmlContent,
+          })
+        );
+      });
+
+      it('should pass content unchanged when format is not specified (default)', async () => {
+        const mockResult = {
+          note: { noteId: 'default123' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        const htmlContent = '<p>Default HTML</p>';
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Default Format',
+          type: 'text',
+          content: htmlContent,
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({
+            content: htmlContent,
+          })
+        );
+      });
     });
 
     describe('get_note', () => {
@@ -489,6 +566,46 @@ describe('Note Tools', () => {
         });
 
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', largeContent);
+      });
+
+      it('should convert markdown to HTML when format is markdown', async () => {
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          content: '## Heading\n\n- Item 1\n- Item 2',
+          format: 'markdown',
+        });
+
+        const calledContent = vi.mocked(mockClient.updateNoteContent).mock.calls[0][1];
+        expect(calledContent).toContain('<h2>Heading</h2>');
+        expect(calledContent).toContain('<li>Item 1</li>');
+        expect(calledContent).toContain('<li>Item 2</li>');
+      });
+
+      it('should pass content unchanged when format is html', async () => {
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        const htmlContent = '<div>Raw HTML</div>';
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          content: htmlContent,
+          format: 'html',
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', htmlContent);
+      });
+
+      it('should pass content unchanged when format is not specified', async () => {
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        const htmlContent = '<span>Default</span>';
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          content: htmlContent,
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', htmlContent);
       });
     });
 

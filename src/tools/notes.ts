@@ -10,6 +10,18 @@ import {
   utcDateTimeSchema,
   positionSchema,
 } from './validators.js';
+import { marked } from 'marked';
+
+/**
+ * Convert markdown content to HTML if format is 'markdown'.
+ * Returns content unchanged if format is 'html' or undefined.
+ */
+async function convertContent(content: string, format?: 'html' | 'markdown'): Promise<string> {
+  if (format === 'markdown') {
+    return await marked.parse(content);
+  }
+  return content;
+}
 
 // Zod schemas for validation
 const createNoteSchema = z.object({
@@ -22,9 +34,17 @@ const createNoteSchema = z.object({
   content: z
     .string()
     .describe(
-      'Content of the note (HTML for text notes, raw code for code notes). ' +
+      'Content of the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+        'For code notes: provide raw code. ' +
         'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure ' +
         '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>.'
+    ),
+  format: z
+    .enum(['html', 'markdown'])
+    .optional()
+    .describe(
+      'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
+        'Defaults to "html". Only applies to text notes.'
     ),
   mime: z
     .string()
@@ -77,9 +97,17 @@ const updateNoteContentSchema = z.object({
   content: z
     .string()
     .describe(
-      'New content for the note. For text notes with code blocks, use ' +
+      'New content for the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+        'For text notes with code blocks, use ' +
         '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
         'The class must be on the <code> element, not <pre>.'
+    ),
+  format: z
+    .enum(['html', 'markdown'])
+    .optional()
+    .describe(
+      'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
+        'Defaults to "html". Only applies to text notes.'
     ),
 });
 
@@ -91,7 +119,7 @@ export function registerNoteTools(): Tool[] {
   return [
     defineTool(
       'create_note',
-      'Create a new note with title, content, type, and parent. Returns the created note and its branch. Supports positioning, tree display, and date options.',
+      'Create a new note with title, content, type, and parent. Returns the created note and its branch. Supports positioning, tree display, and date options. For text notes, content can be HTML (default) or markdown (set format to "markdown").',
       createNoteSchema
     ),
     defineTool(
@@ -111,7 +139,7 @@ export function registerNoteTools(): Tool[] {
     ),
     defineTool(
       'update_note_content',
-      'Update the content/body of a note. For text notes, provide HTML. For code notes, provide raw code.',
+      'Update the content/body of a note. For text notes, provide HTML (default) or markdown (set format to "markdown"). For code notes, provide raw code.',
       updateNoteContentSchema
     ),
     defineTool(
@@ -130,11 +158,12 @@ export async function handleNoteTool(
   switch (name) {
     case 'create_note': {
       const parsed = createNoteSchema.parse(args);
+      const content = await convertContent(parsed.content, parsed.format);
       const result = await client.createNote({
         parentNoteId: parsed.parentNoteId,
         title: parsed.title,
         type: parsed.type as NoteType,
-        content: parsed.content,
+        content,
         mime: parsed.mime,
         notePosition: parsed.notePosition,
         prefix: parsed.prefix,
@@ -179,7 +208,8 @@ export async function handleNoteTool(
 
     case 'update_note_content': {
       const parsed = updateNoteContentSchema.parse(args);
-      await client.updateNoteContent(parsed.noteId, parsed.content);
+      const content = await convertContent(parsed.content, parsed.format);
+      await client.updateNoteContent(parsed.noteId, content);
       return {
         content: [{ type: 'text', text: 'Note content updated successfully' }],
       };
