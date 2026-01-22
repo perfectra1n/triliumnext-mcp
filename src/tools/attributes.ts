@@ -3,32 +3,46 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import type { AttributeType } from '../types/etapi.js';
 import { defineTool } from './schemas.js';
-import {
-  attributeTypeSchema,
-  optionalEntityIdSchema,
-  positionSchema,
-} from './validators.js';
+import { attributeTypeSchema, optionalEntityIdSchema, positionSchema } from './validators.js';
 
 const getAttributesSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to get attributes from'),
+  noteId: z
+    .string()
+    .min(1, 'Note ID is required')
+    .describe('ID of the note to get attributes from'),
 });
 
 const getAttributeSchema = z.object({
-  attributeId: z.string().min(1, 'Attribute ID is required').describe('ID of the attribute to retrieve'),
+  attributeId: z
+    .string()
+    .min(1, 'Attribute ID is required')
+    .describe('ID of the attribute to retrieve'),
 });
 
 const setAttributeSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to set attribute on'),
   type: attributeTypeSchema.describe('Type of attribute'),
-  name: z.string().min(1, 'Attribute name is required').describe('Name of the attribute (without # or ~)'),
+  name: z
+    .string()
+    .min(1, 'Attribute name is required')
+    .describe('Name of the attribute (without # or ~)'),
   value: z.string().describe('Value (for labels) or target noteId (for relations)'),
   isInheritable: z.boolean().optional().describe('Whether inherited by child notes'),
-  position: positionSchema.optional().describe('Position for ordering (10, 20, 30...). Lower = earlier when multiple attributes share a name'),
-  attributeId: optionalEntityIdSchema.describe('Force a specific attribute ID (for imports/migrations). Must be 4-32 alphanumeric chars.'),
+  position: positionSchema
+    .optional()
+    .describe(
+      'Position for ordering (10, 20, 30...). Lower = earlier when multiple attributes share a name'
+    ),
+  attributeId: optionalEntityIdSchema.describe(
+    'Force a specific attribute ID (for imports/migrations). Must be 4-32 alphanumeric chars.'
+  ),
 });
 
 const deleteAttributeSchema = z.object({
-  attributeId: z.string().min(1, 'Attribute ID is required').describe('ID of the attribute to delete'),
+  attributeId: z
+    .string()
+    .min(1, 'Attribute ID is required')
+    .describe('ID of the attribute to delete'),
 });
 
 export function registerAttributeTools(): Tool[] {

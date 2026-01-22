@@ -9,6 +9,9 @@ import type {
   Attribute,
   CreateAttributeDef,
   PatchAttributeDef,
+  Attachment,
+  CreateAttachmentDef,
+  PatchAttachmentDef,
   SearchResponse,
   SearchParams,
   AppInfo,
@@ -75,7 +78,12 @@ export class TriliumClient {
     const response = await fetch(url, {
       method,
       headers,
-      body: body !== undefined ? (contentType === 'application/json' ? JSON.stringify(body) : String(body)) : undefined,
+      body:
+        body !== undefined
+          ? contentType === 'application/json'
+            ? JSON.stringify(body)
+            : String(body)
+          : undefined,
     });
 
     if (!response.ok) {
@@ -245,9 +253,44 @@ export class TriliumClient {
     });
 
     if (!response.ok) {
-      throw new TriliumClientError(response.status, 'EXPORT_ERROR', `Failed to export note: ${response.statusText}`);
+      throw new TriliumClientError(
+        response.status,
+        'EXPORT_ERROR',
+        `Failed to export note: ${response.statusText}`
+      );
     }
 
     return response.arrayBuffer();
+  }
+
+  // ==================== Attachments ====================
+
+  async createAttachment(def: CreateAttachmentDef): Promise<Attachment> {
+    return this.request<Attachment>('POST', '/attachments', { body: def });
+  }
+
+  async getAttachment(attachmentId: EntityId): Promise<Attachment> {
+    return this.request<Attachment>('GET', `/attachments/${attachmentId}`);
+  }
+
+  async updateAttachment(attachmentId: EntityId, patch: PatchAttachmentDef): Promise<Attachment> {
+    return this.request<Attachment>('PATCH', `/attachments/${attachmentId}`, { body: patch });
+  }
+
+  async deleteAttachment(attachmentId: EntityId): Promise<void> {
+    await this.request<undefined>('DELETE', `/attachments/${attachmentId}`);
+  }
+
+  async getAttachmentContent(attachmentId: EntityId): Promise<string> {
+    return this.request<string>('GET', `/attachments/${attachmentId}/content`, {
+      responseType: 'text',
+    });
+  }
+
+  async updateAttachmentContent(attachmentId: EntityId, content: string): Promise<void> {
+    await this.request<undefined>('PUT', `/attachments/${attachmentId}/content`, {
+      body: content,
+      contentType: 'text/plain',
+    });
   }
 }

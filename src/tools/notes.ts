@@ -13,18 +13,44 @@ import {
 
 // Zod schemas for validation
 const createNoteSchema = z.object({
-  parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note (use "root" for top-level)'),
+  parentNoteId: z
+    .string()
+    .min(1, 'Parent note ID is required')
+    .describe('ID of the parent note (use "root" for top-level)'),
   title: z.string().min(1, 'Title is required').describe('Title of the new note'),
   type: noteTypeSchema.describe('Type of the note'),
-  content: z.string().describe('Content of the note (HTML for text notes, raw code for code notes)'),
-  mime: z.string().optional().describe('MIME type (required for code, file, image notes). Examples: application/javascript, text/x-python, text/markdown'),
-  notePosition: positionSchema.optional().describe('Position in parent (10, 20, 30...). Use 5 for first position, 1000000 for last'),
-  prefix: z.string().optional().describe('Branch-specific title prefix (e.g., "Archive:", "Draft:")'),
-  isExpanded: z.boolean().optional().describe('Whether this note (as a folder) should appear expanded in the tree'),
-  noteId: optionalEntityIdSchema.describe('Force a specific note ID (for imports/migrations). Must be 4-32 alphanumeric chars.'),
-  branchId: optionalEntityIdSchema.describe('Force a specific branch ID (for imports/migrations). Must be 4-32 alphanumeric chars.'),
-  dateCreated: localDateTimeSchema.optional().describe('Set creation date for backdating. Format: "2024-01-15 10:30:00.000+0100"'),
-  utcDateCreated: utcDateTimeSchema.optional().describe('Set UTC creation date. Format: "2024-01-15 09:30:00.000Z"'),
+  content: z
+    .string()
+    .describe('Content of the note (HTML for text notes, raw code for code notes)'),
+  mime: z
+    .string()
+    .optional()
+    .describe(
+      'MIME type (required for code, file, image notes). Examples: application/javascript, text/x-python, text/markdown'
+    ),
+  notePosition: positionSchema
+    .optional()
+    .describe('Position in parent (10, 20, 30...). Use 5 for first position, 1000000 for last'),
+  prefix: z
+    .string()
+    .optional()
+    .describe('Branch-specific title prefix (e.g., "Archive:", "Draft:")'),
+  isExpanded: z
+    .boolean()
+    .optional()
+    .describe('Whether this note (as a folder) should appear expanded in the tree'),
+  noteId: optionalEntityIdSchema.describe(
+    'Force a specific note ID (for imports/migrations). Must be 4-32 alphanumeric chars.'
+  ),
+  branchId: optionalEntityIdSchema.describe(
+    'Force a specific branch ID (for imports/migrations). Must be 4-32 alphanumeric chars.'
+  ),
+  dateCreated: localDateTimeSchema
+    .optional()
+    .describe('Set creation date for backdating. Format: "2024-01-15 10:30:00.000+0100"'),
+  utcDateCreated: utcDateTimeSchema
+    .optional()
+    .describe('Set UTC creation date. Format: "2024-01-15 09:30:00.000Z"'),
 });
 
 const getNoteSchema = z.object({

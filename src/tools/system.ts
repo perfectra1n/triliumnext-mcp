@@ -5,17 +5,27 @@ import { defineTool } from './schemas.js';
 import { exportFormatSchema, backupNameSchema } from './validators.js';
 
 const createRevisionSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to create a revision for'),
+  noteId: z
+    .string()
+    .min(1, 'Note ID is required')
+    .describe('ID of the note to create a revision for'),
   format: exportFormatSchema.optional().describe('Format of the revision content (default: html)'),
 });
 
 const createBackupSchema = z.object({
-  backupName: backupNameSchema.describe('Name for the backup (e.g., "before-migration", "daily-2024-01-15")'),
+  backupName: backupNameSchema.describe(
+    'Name for the backup (e.g., "before-migration", "daily-2024-01-15")'
+  ),
 });
 
 const exportNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to export (use "root" to export entire database)'),
-  format: exportFormatSchema.optional().describe('Export format - markdown is recommended for LLM processing (default: html)'),
+  noteId: z
+    .string()
+    .min(1, 'Note ID is required')
+    .describe('ID of the note to export (use "root" to export entire database)'),
+  format: exportFormatSchema
+    .optional()
+    .describe('Export format - markdown is recommended for LLM processing (default: html)'),
 });
 
 export function registerSystemTools(): Tool[] {

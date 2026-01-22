@@ -6,26 +6,42 @@ import { positionSchema } from './validators.js';
 
 const moveNoteSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to move'),
-  newParentNoteId: z.string().min(1, 'New parent note ID is required').describe('ID of the new parent note'),
+  newParentNoteId: z
+    .string()
+    .min(1, 'New parent note ID is required')
+    .describe('ID of the new parent note'),
   prefix: z.string().optional().describe('Optional prefix for the note in its new location'),
 });
 
 const cloneNoteSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to clone'),
-  parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note for the clone'),
+  parentNoteId: z
+    .string()
+    .min(1, 'Parent note ID is required')
+    .describe('ID of the parent note for the clone'),
   prefix: z.string().optional().describe('Optional prefix for the cloned note'),
 });
 
 const reorderNotesSchema = z.object({
   parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note'),
-  notePositions: z.array(z.object({
-    branchId: z.string().min(1, 'Branch ID is required').describe('ID of the branch to reorder'),
-    notePosition: positionSchema.describe('New position (10, 20, 30...)'),
-  })).describe('Array of branch positions to update'),
+  notePositions: z
+    .array(
+      z.object({
+        branchId: z
+          .string()
+          .min(1, 'Branch ID is required')
+          .describe('ID of the branch to reorder'),
+        notePosition: positionSchema.describe('New position (10, 20, 30...)'),
+      })
+    )
+    .describe('Array of branch positions to update'),
 });
 
 const deleteBranchSchema = z.object({
-  branchId: z.string().min(1, 'Branch ID is required').describe('ID of the branch to delete (not the note ID)'),
+  branchId: z
+    .string()
+    .min(1, 'Branch ID is required')
+    .describe('ID of the branch to delete (not the note ID)'),
 });
 
 export function registerOrganizationTools(): Tool[] {
@@ -79,7 +95,9 @@ export async function handleOrganizationTool(
       }
 
       return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, branch: newBranch }, null, 2) }],
+        content: [
+          { type: 'text', text: JSON.stringify({ success: true, branch: newBranch }, null, 2) },
+        ],
       };
     }
 
@@ -114,7 +132,12 @@ export async function handleOrganizationTool(
       await client.refreshNoteOrdering(parsed.parentNoteId);
 
       return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, updatedBranches: results }, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, updatedBranches: results }, null, 2),
+          },
+        ],
       };
     }
 

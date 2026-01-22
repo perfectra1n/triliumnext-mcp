@@ -5,17 +5,26 @@ import { defineTool } from './schemas.js';
 import { orderDirectionSchema, searchLimitSchema } from './validators.js';
 
 const searchNotesSchema = z.object({
-  query: z.string().min(1, 'Search query is required').describe('Search query string. Use #label for labels, ~relation for relations.'),
+  query: z
+    .string()
+    .min(1, 'Search query is required')
+    .describe('Search query string. Use #label for labels, ~relation for relations.'),
   fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
   includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
   ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
-  orderBy: z.string().optional().describe('Property to order by (title, dateCreated, dateModified)'),
+  orderBy: z
+    .string()
+    .optional()
+    .describe('Property to order by (title, dateCreated, dateModified)'),
   orderDirection: orderDirectionSchema.optional().describe('Order direction'),
   limit: searchLimitSchema.optional().describe('Maximum number of results'),
 });
 
 const getNoteTreeSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the parent note (use "root" for the root note)'),
+  noteId: z
+    .string()
+    .min(1, 'Note ID is required')
+    .describe('ID of the parent note (use "root" for the root note)'),
 });
 
 export function registerSearchTools(): Tool[] {

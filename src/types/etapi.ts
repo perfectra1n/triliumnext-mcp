@@ -180,6 +180,29 @@ export interface Attachment {
 }
 
 /**
+ * Request body for creating an attachment
+ */
+export interface CreateAttachmentDef {
+  ownerId: EntityId;
+  role: string;
+  mime: string;
+  title: string;
+  content: string;
+  position?: number;
+}
+
+/**
+ * Request body for patching an attachment
+ * Only role, mime, title, and position can be patched
+ */
+export interface PatchAttachmentDef {
+  role?: string;
+  mime?: string;
+  title?: string;
+  position?: number;
+}
+
+/**
  * Search response
  */
 export interface SearchResponse {

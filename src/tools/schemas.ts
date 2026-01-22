@@ -18,7 +18,10 @@ export function defineTool(
   schema: z.ZodObject<z.ZodRawShape>
 ): Tool {
   // Use Zod 4's built-in JSON Schema conversion
-  const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any', reused: 'inline' }) as Record<string, unknown>;
+  const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any', reused: 'inline' }) as Record<
+    string,
+    unknown
+  >;
 
   // Remove $schema and additionalProperties to match MCP SDK expectations
   delete jsonSchema.$schema;
@@ -50,7 +53,5 @@ export function defineTools(
     schema: z.ZodObject<z.ZodRawShape>;
   }>
 ): Tool[] {
-  return tools.map(({ name, description, schema }) =>
-    defineTool(name, description, schema)
-  );
+  return tools.map(({ name, description, schema }) => defineTool(name, description, schema));
 }

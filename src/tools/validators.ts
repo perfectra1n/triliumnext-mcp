@@ -3,7 +3,16 @@ import { z } from 'zod';
 /**
  * Valid note types in Trilium
  */
-export const NOTE_TYPES = ['text', 'code', 'file', 'image', 'search', 'book', 'relationMap', 'render'] as const;
+export const NOTE_TYPES = [
+  'text',
+  'code',
+  'file',
+  'image',
+  'search',
+  'book',
+  'relationMap',
+  'render',
+] as const;
 
 /**
  * Valid attribute types in Trilium
@@ -96,10 +105,7 @@ export const utcDateTimeSchema = z
  */
 export const dateSchema = z
   .string()
-  .regex(
-    /^\d{4}-\d{2}-\d{2}$/,
-    'Invalid date format. Expected: "YYYY-MM-DD" (e.g., "2024-01-15")'
-  );
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format. Expected: "YYYY-MM-DD" (e.g., "2024-01-15")');
 
 /**
  * Week validator for calendar operations
@@ -107,10 +113,7 @@ export const dateSchema = z
  */
 export const weekSchema = z
   .string()
-  .regex(
-    /^\d{4}-W\d{2}$/,
-    'Invalid week format. Expected: "YYYY-Www" (e.g., "2024-W03")'
-  );
+  .regex(/^\d{4}-W\d{2}$/, 'Invalid week format. Expected: "YYYY-Www" (e.g., "2024-W03")');
 
 /**
  * Month validator for calendar operations
@@ -118,10 +121,7 @@ export const weekSchema = z
  */
 export const monthSchema = z
   .string()
-  .regex(
-    /^\d{4}-\d{2}$/,
-    'Invalid month format. Expected: "YYYY-MM" (e.g., "2024-01")'
-  );
+  .regex(/^\d{4}-\d{2}$/, 'Invalid month format. Expected: "YYYY-MM" (e.g., "2024-01")');
 
 /**
  * Year validator for calendar operations
@@ -129,10 +129,7 @@ export const monthSchema = z
  */
 export const yearSchema = z
   .string()
-  .regex(
-    /^\d{4}$/,
-    'Invalid year format. Expected: "YYYY" (e.g., "2024")'
-  );
+  .regex(/^\d{4}$/, 'Invalid year format. Expected: "YYYY" (e.g., "2024")');
 
 /**
  * Position validator (positive integer for ordering)
@@ -154,9 +151,7 @@ export const searchLimitSchema = z
 /**
  * Non-empty string validator
  */
-export const nonEmptyStringSchema = z
-  .string()
-  .min(1, 'Value cannot be empty');
+export const nonEmptyStringSchema = z.string().min(1, 'Value cannot be empty');
 
 /**
  * Backup name validator (alphanumeric and hyphens/underscores)

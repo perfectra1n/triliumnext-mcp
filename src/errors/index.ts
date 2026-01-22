@@ -16,15 +16,22 @@ export interface StructuredError {
  * Guidance map for common Trilium error codes
  */
 const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
-  NOTE_NOT_FOUND: 'The specified note ID does not exist. Use search_notes to find valid note IDs, or check for typos.',
-  NOTE_IS_PROTECTED: 'This note is protected. Choose a different note or unprotect it in Trilium first.',
-  BRANCH_NOT_FOUND: 'The specified branch ID does not exist. Use get_note to retrieve valid branch IDs from a note\'s parentBranch or childBranches.',
-  ATTRIBUTE_NOT_FOUND: 'The specified attribute ID does not exist. Use get_attributes to list valid attribute IDs for a note.',
+  NOTE_NOT_FOUND:
+    'The specified note ID does not exist. Use search_notes to find valid note IDs, or check for typos.',
+  NOTE_IS_PROTECTED:
+    'This note is protected. Choose a different note or unprotect it in Trilium first.',
+  BRANCH_NOT_FOUND:
+    "The specified branch ID does not exist. Use get_note to retrieve valid branch IDs from a note's parentBranch or childBranches.",
+  ATTRIBUTE_NOT_FOUND:
+    'The specified attribute ID does not exist. Use get_attributes to list valid attribute IDs for a note.',
+  ATTACHMENT_NOT_FOUND:
+    'The specified attachment ID does not exist. Use get_note to find attachments associated with a note.',
   ENTITY_NOT_FOUND: 'The specified entity does not exist. Verify the ID is correct.',
   INVALID_ENTITY_ID: 'The entity ID format is invalid. IDs must be 4-32 alphanumeric characters.',
   NOTE_IS_DELETED: 'This note has been deleted. It cannot be accessed or modified.',
   VALIDATION_ERROR: 'The request contains invalid data. Check the field requirements.',
-  ETAPI_TOKEN_INVALID: 'The API token is invalid or expired. Check your TRILIUM_TOKEN configuration.',
+  ETAPI_TOKEN_INVALID:
+    'The API token is invalid or expired. Check your TRILIUM_TOKEN configuration.',
 };
 
 /**
@@ -43,9 +50,10 @@ const STATUS_CODE_GUIDANCE: Record<number, string> = {
  * Format a TriliumClientError into a structured error with actionable guidance
  */
 export function formatTriliumError(error: TriliumClientError): StructuredError {
-  const suggestion = TRILIUM_ERROR_GUIDANCE[error.code]
-    ?? STATUS_CODE_GUIDANCE[error.status]
-    ?? 'An unexpected error occurred. Check the error details for more information.';
+  const suggestion =
+    TRILIUM_ERROR_GUIDANCE[error.code] ??
+    STATUS_CODE_GUIDANCE[error.status] ??
+    'An unexpected error occurred. Check the error details for more information.';
 
   return {
     message: error.message,
@@ -126,7 +134,9 @@ export function formatZodError(error: ZodError, toolName?: string): StructuredEr
     fieldErrors[path] = formatZodIssue(issue);
   }
 
-  const errorList = Object.values(fieldErrors).map(e => `  - ${e}`).join('\n');
+  const errorList = Object.values(fieldErrors)
+    .map((e) => `  - ${e}`)
+    .join('\n');
   const suggestion = `Check the following fields and correct them:\n${errorList}`;
 
   return {

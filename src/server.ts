@@ -1,9 +1,6 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import {
-  CallToolRequestSchema,
-  ListToolsRequestSchema,
-} from '@modelcontextprotocol/sdk/types.js';
+import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ZodError } from 'zod';
 
 import { TriliumClient, TriliumClientError } from './client/trilium.js';
@@ -20,6 +17,7 @@ import { registerOrganizationTools, handleOrganizationTool } from './tools/organ
 import { registerAttributeTools, handleAttributeTool } from './tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from './tools/system.js';
+import { registerAttachmentTools, handleAttachmentTool } from './tools/attachments.js';
 
 export async function createServer(config: Config): Promise<void> {
   const client = new TriliumClient(config.triliumUrl, config.triliumToken);
@@ -44,6 +42,7 @@ export async function createServer(config: Config): Promise<void> {
     ...registerAttributeTools(),
     ...registerCalendarTools(),
     ...registerSystemTools(),
+    ...registerAttachmentTools(),
   ];
 
   // Handle list tools request
@@ -73,6 +72,9 @@ export async function createServer(config: Config): Promise<void> {
       if (result !== null) return result;
 
       result = await handleSystemTool(client, name, args);
+      if (result !== null) return result;
+
+      result = await handleAttachmentTool(client, name, args);
       if (result !== null) return result;
 
       return {

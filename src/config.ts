@@ -124,10 +124,15 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
 
   const triliumToken = cli.token ?? process.env.TRILIUM_TOKEN ?? file.token ?? '';
 
-  const transportValue = cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
+  const transportValue =
+    cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
   const transport = transportValue === 'http' ? 'http' : 'stdio';
 
-  const httpPort = cli.port ?? (process.env.TRILIUM_HTTP_PORT ? parseInt(process.env.TRILIUM_HTTP_PORT, 10) : undefined) ?? file.httpPort ?? 3000;
+  const httpPort =
+    cli.port ??
+    (process.env.TRILIUM_HTTP_PORT ? parseInt(process.env.TRILIUM_HTTP_PORT, 10) : undefined) ??
+    file.httpPort ??
+    3000;
 
   if (!triliumToken) {
     console.error('Error: Trilium ETAPI token is required.');
