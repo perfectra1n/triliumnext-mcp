@@ -4,7 +4,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 
 ## Features
 
-- 16 focused tools for note management, search, organization, and metadata operations
+- 27 focused tools for note management, search, organization, attachments, and system operations
 - Support for both STDIO and HTTP transports
 - Flexible configuration via CLI, environment variables, or config file
 - TypeScript with full type safety
@@ -101,19 +101,21 @@ Or configure it in your Claude Code settings.
 | `search_notes` | Full-text and attribute search with filters |
 | `get_note_tree` | Get children of a note (for navigation) |
 
-### Organization (3 tools)
+### Organization (4 tools)
 
 | Tool | Description |
 |------|-------------|
 | `move_note` | Move a note to a different parent |
 | `clone_note` | Clone a note to appear in multiple locations |
 | `reorder_notes` | Change note positions within a parent |
+| `delete_branch` | Delete a branch without deleting the note |
 
-### Attributes & Labels (3 tools)
+### Attributes & Labels (4 tools)
 
 | Tool | Description |
 |------|-------------|
 | `get_attributes` | Get all attributes (labels/relations) of a note |
+| `get_attribute` | Get a single attribute by its ID |
 | `set_attribute` | Add or update an attribute on a note |
 | `delete_attribute` | Remove an attribute from a note |
 
@@ -123,6 +125,25 @@ Or configure it in your Claude Code settings.
 |------|-------------|
 | `get_day_note` | Get or create the daily note for a date |
 | `get_inbox_note` | Get the inbox note for quick capture |
+
+### System & Backup (3 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_revision` | Create a revision (snapshot) of a note |
+| `create_backup` | Create a full database backup |
+| `export_note` | Export a note and its subtree as a ZIP file |
+
+### Attachments (6 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_attachment` | Create a new attachment for a note |
+| `get_attachment` | Get attachment metadata by ID |
+| `update_attachment` | Update attachment metadata |
+| `delete_attachment` | Delete an attachment by ID |
+| `get_attachment_content` | Get the content/body of an attachment |
+| `update_attachment_content` | Update the content/body of an attachment |
 
 ## Development
 
