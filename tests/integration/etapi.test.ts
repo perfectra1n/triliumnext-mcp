@@ -658,6 +658,157 @@ describe('TriliumNext ETAPI Integration Tests', () => {
     });
   });
 
+  describe('Attachments', () => {
+    let testNoteId: string;
+    let createdAttachmentId: string;
+
+    beforeAll(async () => {
+      // Create a note to attach files to
+      const result = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Attachment Test Note',
+        type: 'text',
+        content: '<p>Testing attachments</p>',
+      });
+      testNoteId = result.note.noteId;
+    });
+
+    it('create_attachment - should create a text attachment', async () => {
+      const attachment = await client.createAttachment({
+        ownerId: testNoteId,
+        role: 'file',
+        mime: 'text/plain',
+        title: 'test-file.txt',
+        content: 'Hello, this is a test file content!',
+      });
+
+      expect(attachment.ownerId).toBe(testNoteId);
+      expect(attachment.role).toBe('file');
+      expect(attachment.mime).toBe('text/plain');
+      expect(attachment.title).toBe('test-file.txt');
+      expect(attachment.attachmentId).toBeDefined();
+
+      createdAttachmentId = attachment.attachmentId;
+    });
+
+    it('create_attachment - should create attachment with position', async () => {
+      const attachment = await client.createAttachment({
+        ownerId: testNoteId,
+        role: 'file',
+        mime: 'application/json',
+        title: 'config.json',
+        content: '{"key": "value"}',
+        position: 100,
+      });
+
+      expect(attachment.position).toBe(100);
+      expect(attachment.mime).toBe('application/json');
+    });
+
+    it('create_attachment - should create image attachment', async () => {
+      // Create a simple base64-encoded 1x1 PNG pixel
+      const attachment = await client.createAttachment({
+        ownerId: testNoteId,
+        role: 'image',
+        mime: 'image/png',
+        title: 'test-image.png',
+        content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      });
+
+      expect(attachment.role).toBe('image');
+      expect(attachment.mime).toBe('image/png');
+      expect(attachment.title).toBe('test-image.png');
+    });
+
+    it('get_attachment - should retrieve attachment metadata', async () => {
+      const attachment = await client.getAttachment(createdAttachmentId);
+
+      expect(attachment.attachmentId).toBe(createdAttachmentId);
+      expect(attachment.ownerId).toBe(testNoteId);
+      expect(attachment.title).toBe('test-file.txt');
+      expect(attachment.mime).toBe('text/plain');
+    });
+
+    it('get_attachment_content - should retrieve attachment content', async () => {
+      const content = await client.getAttachmentContent(createdAttachmentId);
+
+      expect(content).toBe('Hello, this is a test file content!');
+    });
+
+    it('update_attachment - should update attachment title', async () => {
+      const updated = await client.updateAttachment(createdAttachmentId, {
+        title: 'renamed-file.txt',
+      });
+
+      expect(updated.title).toBe('renamed-file.txt');
+      expect(updated.attachmentId).toBe(createdAttachmentId);
+    });
+
+    it('update_attachment - should update attachment mime type', async () => {
+      const updated = await client.updateAttachment(createdAttachmentId, {
+        mime: 'text/markdown',
+      });
+
+      expect(updated.mime).toBe('text/markdown');
+    });
+
+    it('update_attachment - should update attachment role', async () => {
+      const updated = await client.updateAttachment(createdAttachmentId, {
+        role: 'document',
+      });
+
+      expect(updated.role).toBe('document');
+    });
+
+    it('update_attachment - should update attachment position', async () => {
+      const updated = await client.updateAttachment(createdAttachmentId, {
+        position: 50,
+      });
+
+      expect(updated.position).toBe(50);
+    });
+
+    it('update_attachment_content - should update attachment content', async () => {
+      await client.updateAttachmentContent(createdAttachmentId, 'Updated content here!');
+
+      const content = await client.getAttachmentContent(createdAttachmentId);
+      expect(content).toBe('Updated content here!');
+    });
+
+    it('update_attachment_content - should handle large content', async () => {
+      const largeContent = 'Lorem ipsum dolor sit amet. '.repeat(1000);
+      await client.updateAttachmentContent(createdAttachmentId, largeContent);
+
+      const content = await client.getAttachmentContent(createdAttachmentId);
+      expect(content).toBe(largeContent);
+    });
+
+    it('delete_attachment - should delete the attachment', async () => {
+      // Create an attachment specifically for deletion
+      const attachment = await client.createAttachment({
+        ownerId: testNoteId,
+        role: 'file',
+        mime: 'text/plain',
+        title: 'to-delete.txt',
+        content: 'This will be deleted',
+      });
+
+      await client.deleteAttachment(attachment.attachmentId);
+
+      // Verify attachment is deleted (should throw)
+      await expect(client.getAttachment(attachment.attachmentId)).rejects.toThrow();
+    });
+
+    it('should handle deleting non-existent attachment gracefully', async () => {
+      // Trilium's ETAPI returns success for idempotent DELETE operations
+      await expect(client.deleteAttachment('nonexistent123')).resolves.not.toThrow();
+    });
+
+    it('should throw error for non-existent attachment', async () => {
+      await expect(client.getAttachment('nonexistent123')).rejects.toThrow();
+    });
+  });
+
   describe('Enhanced create_note', () => {
     it('should create note with notePosition', async () => {
       const result = await client.createNote({

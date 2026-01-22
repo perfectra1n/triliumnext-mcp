@@ -5,6 +5,7 @@ import { registerOrganizationTools, handleOrganizationTool } from '../../src/too
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from '../../src/tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
+import { registerAttachmentTools, handleAttachmentTool } from '../../src/tools/attachments.js';
 import type { TriliumClient } from '../../src/client/trilium.js';
 
 // Mock client factory
@@ -35,6 +36,12 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     createRevision: vi.fn(),
     createBackup: vi.fn(),
     exportNote: vi.fn(),
+    createAttachment: vi.fn(),
+    getAttachment: vi.fn(),
+    updateAttachment: vi.fn(),
+    deleteAttachment: vi.fn(),
+    getAttachmentContent: vi.fn(),
+    updateAttachmentContent: vi.fn(),
     ...overrides,
   } as unknown as TriliumClient;
 }
@@ -1484,8 +1491,316 @@ describe('System Tools', () => {
   });
 });
 
+describe('Attachment Tools', () => {
+  describe('registerAttachmentTools', () => {
+    it('should register 6 attachment tools', () => {
+      const tools = registerAttachmentTools();
+      expect(tools).toHaveLength(6);
+      expect(tools.map((t) => t.name)).toEqual([
+        'create_attachment',
+        'get_attachment',
+        'update_attachment',
+        'delete_attachment',
+        'get_attachment_content',
+        'update_attachment_content',
+      ]);
+    });
+
+    it('should have correct input schemas', () => {
+      const tools = registerAttachmentTools();
+      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
+
+      expect(toolMap['create_attachment'].inputSchema.required).toEqual([
+        'ownerId',
+        'role',
+        'mime',
+        'title',
+        'content',
+      ]);
+      expect(toolMap['create_attachment'].inputSchema.properties).toHaveProperty('position');
+
+      expect(toolMap['get_attachment'].inputSchema.required).toEqual(['attachmentId']);
+
+      expect(toolMap['update_attachment'].inputSchema.required).toEqual(['attachmentId']);
+      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('role');
+      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('mime');
+      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('title');
+      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('position');
+
+      expect(toolMap['delete_attachment'].inputSchema.required).toEqual(['attachmentId']);
+
+      expect(toolMap['get_attachment_content'].inputSchema.required).toEqual(['attachmentId']);
+
+      expect(toolMap['update_attachment_content'].inputSchema.required).toEqual([
+        'attachmentId',
+        'content',
+      ]);
+    });
+  });
+
+  describe('handleAttachmentTool', () => {
+    let mockClient: TriliumClient;
+
+    beforeEach(() => {
+      mockClient = createMockClient();
+    });
+
+    describe('create_attachment', () => {
+      it('should create attachment with required parameters', async () => {
+        const mockAttachment = {
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+        };
+        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
+
+        const result = await handleAttachmentTool(mockClient, 'create_attachment', {
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+          content: 'Hello World',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.createAttachment).toHaveBeenCalledWith({
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+          content: 'Hello World',
+          position: undefined,
+        });
+      });
+
+      it('should create attachment with position', async () => {
+        const mockAttachment = { attachmentId: 'attach123', position: 100 };
+        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'create_attachment', {
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'image/png',
+          title: 'image.png',
+          content: 'base64data',
+          position: 100,
+        });
+
+        expect(mockClient.createAttachment).toHaveBeenCalledWith(
+          expect.objectContaining({ position: 100 })
+        );
+      });
+
+      it('should reject missing required fields', async () => {
+        await expect(
+          handleAttachmentTool(mockClient, 'create_attachment', {
+            ownerId: 'note123',
+            role: 'file',
+          })
+        ).rejects.toThrow();
+      });
+    });
+
+    describe('get_attachment', () => {
+      it('should get attachment by ID', async () => {
+        const mockAttachment = {
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+        };
+        vi.mocked(mockClient.getAttachment).mockResolvedValue(mockAttachment as any);
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.getAttachment).toHaveBeenCalledWith('attach123');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed.attachmentId).toBe('attach123');
+      });
+
+      it('should reject missing attachmentId', async () => {
+        await expect(handleAttachmentTool(mockClient, 'get_attachment', {})).rejects.toThrow();
+      });
+    });
+
+    describe('update_attachment', () => {
+      it('should update attachment title', async () => {
+        const mockAttachment = { attachmentId: 'attach123', title: 'renamed.txt' };
+        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
+
+        const result = await handleAttachmentTool(mockClient, 'update_attachment', {
+          attachmentId: 'attach123',
+          title: 'renamed.txt',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
+          title: 'renamed.txt',
+        });
+      });
+
+      it('should update attachment role', async () => {
+        const mockAttachment = { attachmentId: 'attach123', role: 'document' };
+        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'update_attachment', {
+          attachmentId: 'attach123',
+          role: 'document',
+        });
+
+        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', { role: 'document' });
+      });
+
+      it('should update attachment mime type', async () => {
+        const mockAttachment = { attachmentId: 'attach123', mime: 'text/markdown' };
+        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'update_attachment', {
+          attachmentId: 'attach123',
+          mime: 'text/markdown',
+        });
+
+        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
+          mime: 'text/markdown',
+        });
+      });
+
+      it('should update attachment position', async () => {
+        const mockAttachment = { attachmentId: 'attach123', position: 50 };
+        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'update_attachment', {
+          attachmentId: 'attach123',
+          position: 50,
+        });
+
+        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', { position: 50 });
+      });
+
+      it('should update multiple properties at once', async () => {
+        const mockAttachment = {
+          attachmentId: 'attach123',
+          title: 'new.txt',
+          mime: 'application/json',
+        };
+        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'update_attachment', {
+          attachmentId: 'attach123',
+          title: 'new.txt',
+          mime: 'application/json',
+          position: 100,
+        });
+
+        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
+          title: 'new.txt',
+          mime: 'application/json',
+          position: 100,
+        });
+      });
+    });
+
+    describe('delete_attachment', () => {
+      it('should delete attachment by ID', async () => {
+        vi.mocked(mockClient.deleteAttachment).mockResolvedValue(undefined);
+
+        const result = await handleAttachmentTool(mockClient, 'delete_attachment', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.deleteAttachment).toHaveBeenCalledWith('attach123');
+        expect(result!.content[0].text).toContain('deleted successfully');
+      });
+
+      it('should reject missing attachmentId', async () => {
+        await expect(handleAttachmentTool(mockClient, 'delete_attachment', {})).rejects.toThrow();
+      });
+    });
+
+    describe('get_attachment_content', () => {
+      it('should get attachment content', async () => {
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('Hello World');
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
+        expect(result!.content[0].text).toBe('Hello World');
+      });
+
+      it('should handle empty content', async () => {
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('');
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result!.content[0].text).toBe('');
+      });
+
+      it('should reject missing attachmentId', async () => {
+        await expect(
+          handleAttachmentTool(mockClient, 'get_attachment_content', {})
+        ).rejects.toThrow();
+      });
+    });
+
+    describe('update_attachment_content', () => {
+      it('should update attachment content', async () => {
+        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
+
+        const result = await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          content: 'Updated content',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
+          'attach123',
+          'Updated content'
+        );
+        expect(result!.content[0].text).toContain('updated successfully');
+      });
+
+      it('should handle large content', async () => {
+        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
+        const largeContent = 'x'.repeat(100000);
+
+        await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          content: largeContent,
+        });
+
+        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith('attach123', largeContent);
+      });
+
+      it('should reject missing required fields', async () => {
+        await expect(
+          handleAttachmentTool(mockClient, 'update_attachment_content', {
+            attachmentId: 'attach123',
+          })
+        ).rejects.toThrow();
+      });
+    });
+
+    it('should return null for unknown tool', async () => {
+      const result = await handleAttachmentTool(mockClient, 'unknown_tool', {});
+      expect(result).toBeNull();
+    });
+  });
+});
+
 describe('Tool count verification', () => {
-  it('should have exactly 19 tools total', () => {
+  it('should have exactly 27 tools total', () => {
     const allTools = [
       ...registerNoteTools(),
       ...registerSearchTools(),
@@ -1493,8 +1808,9 @@ describe('Tool count verification', () => {
       ...registerAttributeTools(),
       ...registerCalendarTools(),
       ...registerSystemTools(),
+      ...registerAttachmentTools(),
     ];
-    expect(allTools).toHaveLength(21);
+    expect(allTools).toHaveLength(27);
   });
 
   it('all tools should have descriptions', () => {
@@ -1505,6 +1821,7 @@ describe('Tool count verification', () => {
       ...registerAttributeTools(),
       ...registerCalendarTools(),
       ...registerSystemTools(),
+      ...registerAttachmentTools(),
     ];
     allTools.forEach((tool) => {
       expect(tool.description).toBeDefined();
@@ -1520,6 +1837,7 @@ describe('Tool count verification', () => {
       ...registerAttributeTools(),
       ...registerCalendarTools(),
       ...registerSystemTools(),
+      ...registerAttachmentTools(),
     ];
     allTools.forEach((tool) => {
       expect(tool.inputSchema).toBeDefined();
