@@ -100,24 +100,23 @@ export async function createServer(config: Config): Promise<void> {
     const transport = new StdioServerTransport();
     await server.connect(transport);
   } else {
-    // HTTP transport - to be implemented
-    // For now, we'll use SSE transport from MCP SDK
     const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
     const http = await import('node:http');
 
+    // Store active transport to route POST messages
+    let activeTransport: InstanceType<typeof SSEServerTransport> | null = null;
+
     const httpServer = http.createServer(async (req, res) => {
       if (req.method === 'GET' && req.url === '/sse') {
-        const transport = new SSEServerTransport('/message', res);
-        await server.connect(transport);
-      } else if (req.method === 'POST' && req.url === '/message') {
-        // Handle incoming messages - SSE transport processes them internally
-        req.on('data', () => {
-          // Data consumed by SSE transport
-        });
-        req.on('end', () => {
-          res.writeHead(200);
-          res.end();
-        });
+        activeTransport = new SSEServerTransport('/message', res);
+        await server.connect(activeTransport);
+      } else if (req.method === 'POST' && req.url?.startsWith('/message')) {
+        if (activeTransport) {
+          await activeTransport.handlePostMessage(req, res);
+        } else {
+          res.writeHead(503);
+          res.end('No active SSE connection');
+        }
       } else {
         res.writeHead(404);
         res.end('Not found');
