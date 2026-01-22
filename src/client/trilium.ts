@@ -1,3 +1,4 @@
+import { fileTypeFromBuffer } from 'file-type';
 import type {
   Note,
   NoteWithBranch,
@@ -297,19 +298,11 @@ export class TriliumClient {
     });
     const bytes = new Uint8Array(buffer);
 
-    // Check if content is already base64-encoded (created via ETAPI)
-    // vs raw binary (created via Trilium UI)
-    // PNG starts with \x89PNG (0x89, 0x50, 0x4E, 0x47)
-    // JPEG starts with \xFF\xD8\xFF
-    // GIF starts with GIF8 (0x47, 0x49, 0x46, 0x38)
-    // WebP starts with RIFF (0x52, 0x49, 0x46, 0x46)
-    const isPngBinary = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
-    const isJpegBinary = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
-    const isGifBinary = bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38;
-    const isWebpBinary = bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46;
-    const isSvgBinary = bytes[0] === 0x3c; // < character for XML/SVG
+    // Use file-type library to detect if content is raw binary image
+    // vs already base64-encoded text (created via ETAPI)
+    const fileType = await fileTypeFromBuffer(bytes);
 
-    if (isPngBinary || isJpegBinary || isGifBinary || isWebpBinary || isSvgBinary) {
+    if (fileType && fileType.mime.startsWith('image/')) {
       // Content is raw binary - convert to base64
       let binary = '';
       for (let i = 0; i < bytes.byteLength; i++) {
