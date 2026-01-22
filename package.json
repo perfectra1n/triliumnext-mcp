@@ -41,6 +41,7 @@
     "@types/node": "^25.0.9",
     "eslint": "^9.39.2",
     "prettier": "^3.8.1",
+    "testcontainers": "^11.11.0",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.53.1",
     "vitest": "^4.0.17"

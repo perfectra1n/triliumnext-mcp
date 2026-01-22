@@ -62,20 +62,6 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
 
-    services:
-      trilium:
-        image: triliumnext/notes:latest
-        ports:
-          - 8080:8080
-        env:
-          TRILIUM_GENERAL_NOAUTHENTICATION: true
-        options: >-
-          --health-cmd "wget -q -O /dev/null http://localhost:8080/api/app-info || exit 1"
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 10
-          --health-start-period 30s
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -92,34 +78,8 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Debug network
-        run: |
-          echo "=== Environment variables (service related) ==="
-          env | grep -iE 'trilium|service|port|host' | sort || echo "No matching vars"
-          echo ""
-          echo "=== /etc/hosts ==="
-          cat /etc/hosts
-          echo ""
-          echo "=== Docker containers ==="
-          docker ps -a 2>&1 || echo "docker ps failed"
-          echo ""
-          echo "=== Try curl to various endpoints ==="
-          curl -sf http://localhost:8080/api/app-info && echo "localhost:8080 works!" || echo "localhost:8080 failed"
-          curl -sf http://127.0.0.1:8080/api/app-info && echo "127.0.0.1:8080 works!" || echo "127.0.0.1:8080 failed"
-          curl -sf http://host.docker.internal:8080/api/app-info && echo "host.docker.internal:8080 works!" || echo "host.docker.internal:8080 failed"
-
-      - name: Initialize Trilium database
-        run: |
-          echo "Initializing Trilium database..."
-          curl -X POST http://localhost:8080/api/setup/new-document \
-            -H "Content-Type: application/json" \
-            -d '{}' || echo "Database may already be initialized"
-          sleep 2
-
       - name: Run integration tests
         run: npm run test:integration
-        env:
-          TRILIUM_URL: http://localhost:8080/etapi
 
   docker:
     runs-on: ubuntu-latest

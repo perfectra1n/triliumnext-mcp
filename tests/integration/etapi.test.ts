@@ -1,12 +1,16 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { TriliumClient } from '../../src/client/trilium.js';
-import { setupIntegrationTests } from './setup.js';
+import { setupIntegrationTests, stopTriliumContainer } from './setup.js';
 
 describe('TriliumNext ETAPI Integration Tests', () => {
   let client: TriliumClient;
 
   beforeAll(async () => {
     client = await setupIntegrationTests();
+  }, 120000); // 2 minute timeout for container startup
+
+  afterAll(async () => {
+    await stopTriliumContainer();
   });
 
   describe('Notes', () => {
