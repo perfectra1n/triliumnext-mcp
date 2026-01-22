@@ -21,7 +21,11 @@ const createNoteSchema = z.object({
   type: noteTypeSchema.describe('Type of the note'),
   content: z
     .string()
-    .describe('Content of the note (HTML for text notes, raw code for code notes)'),
+    .describe(
+      'Content of the note (HTML for text notes, raw code for code notes). ' +
+        'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure ' +
+        '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>.'
+    ),
   mime: z
     .string()
     .optional()
@@ -70,7 +74,13 @@ const updateNoteSchema = z.object({
 
 const updateNoteContentSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to update'),
-  content: z.string().describe('New content for the note'),
+  content: z
+    .string()
+    .describe(
+      'New content for the note. For text notes with code blocks, use ' +
+        '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
+        'The class must be on the <code> element, not <pre>.'
+    ),
 });
 
 const deleteNoteSchema = z.object({
