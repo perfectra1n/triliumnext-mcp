@@ -37,7 +37,11 @@ const createNoteSchema = z.object({
       'Content of the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
         'For code notes: provide raw code. ' +
         'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure ' +
-        '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>.'
+        '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>. ' +
+        'For internal links to other notes, use: ' +
+        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
+        'The path should be the full note path from root (e.g., root/parentId/childId). ' +
+        "Use get_note to find a note's path via its parentNoteIds."
     ),
   format: z
     .enum(['html', 'markdown'])
@@ -100,7 +104,10 @@ const updateNoteContentSchema = z.object({
       'New content for the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
         'For text notes with code blocks, use ' +
         '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
-        'The class must be on the <code> element, not <pre>.'
+        'The class must be on the <code> element, not <pre>. ' +
+        'For internal links to other notes, use: ' +
+        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
+        "The path should be the full note path from root. Use get_note to find paths."
     ),
   format: z
     .enum(['html', 'markdown'])
