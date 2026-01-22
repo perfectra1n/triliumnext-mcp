@@ -61,11 +61,12 @@ jobs:
   integration-tests:
     runs-on: ubuntu-latest
     needs: build
-    container: node:22
 
     services:
       trilium:
         image: triliumnext/notes:latest
+        ports:
+          - 8080:8080
         env:
           TRILIUM_GENERAL_NOAUTHENTICATION: true
         options: >-
@@ -73,10 +74,17 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 10
+          --health-start-period 30s
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Setup Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
 
       - name: Install dependencies
         run: npm ci
@@ -86,43 +94,24 @@ jobs:
 
       - name: Debug network
         run: |
-          echo "=== All environment variables ==="
-          env | sort
+          echo "=== Environment variables (service related) ==="
+          env | grep -iE 'trilium|service|port|host' | sort || echo "No matching vars"
           echo ""
           echo "=== /etc/hosts ==="
           cat /etc/hosts
           echo ""
-          echo "=== /etc/resolv.conf ==="
-          cat /etc/resolv.conf
-          echo ""
-          echo "=== DNS resolution attempts ==="
-          getent hosts trilium || echo "getent failed for trilium"
-          getent hosts localhost || echo "getent failed for localhost"
-          host trilium 2>&1 || echo "host command failed"
-          nslookup trilium 2>&1 || echo "nslookup failed"
-          echo ""
-          echo "=== Network interfaces ==="
-          ip addr 2>/dev/null || ifconfig 2>/dev/null || echo "No network tools"
-          echo ""
-          echo "=== Route table ==="
-          ip route 2>/dev/null || route -n 2>/dev/null || echo "No route tools"
-          echo ""
-          echo "=== Try pinging common hostnames ==="
-          ping -c 1 trilium 2>&1 || echo "ping trilium failed"
-          ping -c 1 localhost 2>&1 || echo "ping localhost failed"
-          echo ""
-          echo "=== Check if docker is available ==="
-          which docker && docker ps 2>&1 || echo "docker not available or no permission"
+          echo "=== Docker containers ==="
+          docker ps -a 2>&1 || echo "docker ps failed"
           echo ""
           echo "=== Try curl to various endpoints ==="
-          curl -v http://trilium:8080/api/app-info 2>&1 || echo "curl to trilium:8080 failed"
-          curl -v http://localhost:8080/api/app-info 2>&1 || echo "curl to localhost:8080 failed"
-          curl -v http://127.0.0.1:8080/api/app-info 2>&1 || echo "curl to 127.0.0.1:8080 failed"
+          curl -sf http://localhost:8080/api/app-info && echo "localhost:8080 works!" || echo "localhost:8080 failed"
+          curl -sf http://127.0.0.1:8080/api/app-info && echo "127.0.0.1:8080 works!" || echo "127.0.0.1:8080 failed"
+          curl -sf http://host.docker.internal:8080/api/app-info && echo "host.docker.internal:8080 works!" || echo "host.docker.internal:8080 failed"
 
       - name: Initialize Trilium database
         run: |
           echo "Initializing Trilium database..."
-          curl -X POST http://trilium:8080/api/setup/new-document \
+          curl -X POST http://localhost:8080/api/setup/new-document \
             -H "Content-Type: application/json" \
             -d '{}' || echo "Database may already be initialized"
           sleep 2
@@ -130,7 +119,7 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
         env:
-          TRILIUM_URL: http://trilium:8080/etapi
+          TRILIUM_URL: http://localhost:8080/etapi
 
   docker:
     runs-on: ubuntu-latest
