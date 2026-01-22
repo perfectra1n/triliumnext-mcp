@@ -2,6 +2,26 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+/**
+ * Normalizes the Trilium server URL by:
+ * 1. Removing trailing slashes
+ * 2. Appending /etapi if not already present
+ *
+ * This allows users to provide either the base URL (http://localhost:8080)
+ * or the full ETAPI URL (http://localhost:8080/etapi).
+ */
+export function normalizeServerUrl(url: string): string {
+  // Remove trailing slashes
+  let normalized = url.replace(/\/+$/, '');
+
+  // Only append /etapi if not already present
+  if (!normalized.endsWith('/etapi')) {
+    normalized += '/etapi';
+  }
+
+  return normalized;
+}
+
 export interface Config {
   triliumUrl: string;
   triliumToken: string;
@@ -88,14 +108,15 @@ TriliumNext MCP Server
 Usage: triliumnext-mcp [options]
 
 Options:
-  -u, --url <url>           Trilium ETAPI URL (default: http://localhost:37740/etapi)
+  -u, --url <url>           Trilium server URL (default: http://localhost:37740)
+                            Can be base URL or full ETAPI URL - /etapi is appended if missing
   -t, --token <token>       Trilium ETAPI token
   --transport <type>        Transport type: stdio or http (default: stdio)
   -p, --port <port>         HTTP server port when using http transport (default: 3000)
   -h, --help                Show this help message
 
 Environment Variables:
-  TRILIUM_URL               Trilium ETAPI URL
+  TRILIUM_URL               Trilium server URL (base or full ETAPI URL)
   TRILIUM_TOKEN             Trilium ETAPI token
 
 Configuration File:
@@ -119,8 +140,9 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
 
   const file = loadConfigFile();
 
-  const triliumUrl =
-    cli.url ?? process.env.TRILIUM_URL ?? file.url ?? 'http://localhost:37740/etapi';
+  const rawUrl =
+    cli.url ?? process.env.TRILIUM_URL ?? file.url ?? 'http://localhost:37740';
+  const triliumUrl = normalizeServerUrl(rawUrl);
 
   const triliumToken = cli.token ?? process.env.TRILIUM_TOKEN ?? file.token ?? '';
 
