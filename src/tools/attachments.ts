@@ -4,6 +4,20 @@ import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { positionSchema } from './validators.js';
 
+// Supported image MIME types for visual content display
+const IMAGE_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/jpg',
+  'image/gif',
+  'image/webp',
+  'image/svg+xml',
+]);
+
+function isImageMimeType(mime: string): boolean {
+  return IMAGE_MIME_TYPES.has(mime.toLowerCase());
+}
+
 // Zod schemas for validation
 const createAttachmentSchema = z.object({
   ownerId: z
@@ -87,7 +101,7 @@ export function registerAttachmentTools(): Tool[] {
     ),
     defineTool(
       'get_attachment_content',
-      'Get the content/body of an attachment. Returns the raw content as text.',
+      'Get the content/body of an attachment. For text notes, returns the raw content as text. For image attachments (PNG, JPEG, GIF, WebP, SVG), returns the image for visual viewing.',
       getAttachmentContentSchema
     ),
     defineTool(
@@ -102,7 +116,12 @@ export async function handleAttachmentTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: string; text: string }> } | null> {
+): Promise<{
+  content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; data: string; mimeType: string }
+  >;
+} | null> {
   switch (name) {
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
@@ -150,9 +169,23 @@ export async function handleAttachmentTool(
 
     case 'get_attachment_content': {
       const parsed = getAttachmentContentSchema.parse(args);
-      const result = await client.getAttachmentContent(parsed.attachmentId);
+      const attachment = await client.getAttachment(parsed.attachmentId);
+      const content = await client.getAttachmentContent(parsed.attachmentId);
+
+      if (isImageMimeType(attachment.mime)) {
+        return {
+          content: [
+            {
+              type: 'image',
+              data: content,
+              mimeType: attachment.mime,
+            },
+          ],
+        };
+      }
+
       return {
-        content: [{ type: 'text', text: result }],
+        content: [{ type: 'text', text: content }],
       };
     }
 

@@ -1842,7 +1842,20 @@ describe('Attachment Tools', () => {
     });
 
     describe('get_attachment_content', () => {
-      it('should get attachment content', async () => {
+      it('should get text attachment content', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 11,
+        });
         vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('Hello World');
 
         const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
@@ -1850,18 +1863,143 @@ describe('Attachment Tools', () => {
         });
 
         expect(result).not.toBeNull();
+        expect(mockClient.getAttachment).toHaveBeenCalledWith('attach123');
         expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0].text).toBe('Hello World');
+        expect(result!.content[0]).toEqual({ type: 'text', text: 'Hello World' });
       });
 
       it('should handle empty content', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/plain',
+          title: 'test.txt',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 0,
+        });
         vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('');
 
         const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
           attachmentId: 'attach123',
         });
 
-        expect(result!.content[0].text).toBe('');
+        expect(result!.content[0]).toEqual({ type: 'text', text: '' });
+      });
+
+      it('should return image content block for PNG', async () => {
+        const base64Data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'image/png',
+          title: 'test.png',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 100,
+        });
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content[0]).toEqual({
+          type: 'image',
+          data: base64Data,
+          mimeType: 'image/png',
+        });
+      });
+
+      it('should return image content block for JPEG', async () => {
+        const base64Data = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAA...';
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'image/jpeg',
+          title: 'test.jpg',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 100,
+        });
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content[0]).toEqual({
+          type: 'image',
+          data: base64Data,
+          mimeType: 'image/jpeg',
+        });
+      });
+
+      it('should return text content block for non-image MIME types', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'application/pdf',
+          title: 'document.pdf',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 1000,
+        });
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('base64pdfcontent');
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content[0]).toEqual({ type: 'text', text: 'base64pdfcontent' });
+      });
+
+      it('should handle case-insensitive MIME type matching', async () => {
+        const base64Data = 'imagedata';
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'attach123',
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'IMAGE/PNG',
+          title: 'test.png',
+          position: 10,
+          blobId: 'blob123',
+          dateModified: '2024-01-01',
+          utcDateModified: '2024-01-01',
+          utcDateScheduledForErasureSince: null,
+          contentLength: 100,
+        });
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+
+        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
+          attachmentId: 'attach123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content[0]).toEqual({
+          type: 'image',
+          data: base64Data,
+          mimeType: 'IMAGE/PNG',
+        });
       });
 
       it('should reject missing attachmentId', async () => {

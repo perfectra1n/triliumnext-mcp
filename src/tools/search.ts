@@ -46,7 +46,7 @@ export async function handleSearchTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: string; text: string }> } | null> {
+): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
   switch (name) {
     case 'search_notes': {
       const parsed = searchNotesSchema.parse(args);

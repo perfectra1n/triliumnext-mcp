@@ -56,7 +56,13 @@ export async function createServer(config: Config): Promise<void> {
 
     try {
       // Try each tool category
-      let result = await handleNoteTool(client, name, args);
+      // Type supports both text and image content blocks (for attachment images)
+      let result: {
+        content: Array<
+          | { type: 'text'; text: string }
+          | { type: 'image'; data: string; mimeType: string }
+        >;
+      } | null = await handleNoteTool(client, name, args);
       if (result !== null) return result;
 
       result = await handleSearchTool(client, name, args);

@@ -52,7 +52,7 @@ export async function handleSystemTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: string; text: string }> } | null> {
+): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
   switch (name) {
     case 'create_revision': {
       const parsed = createRevisionSchema.parse(args);

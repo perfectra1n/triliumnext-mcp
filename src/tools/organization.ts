@@ -73,7 +73,7 @@ export async function handleOrganizationTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: string; text: string }> } | null> {
+): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
   switch (name) {
     case 'move_note': {
       const parsed = moveNoteSchema.parse(args);

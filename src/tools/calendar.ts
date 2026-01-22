@@ -39,7 +39,7 @@ export async function handleCalendarTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: string; text: string }> } | null> {
+): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
   switch (name) {
     case 'get_day_note': {
       const parsed = getDayNoteSchema.parse(args);
