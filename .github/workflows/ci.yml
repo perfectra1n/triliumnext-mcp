@@ -84,9 +84,43 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Debug network
+        run: |
+          echo "=== All environment variables ==="
+          env | sort
+          echo ""
+          echo "=== /etc/hosts ==="
+          cat /etc/hosts
+          echo ""
+          echo "=== /etc/resolv.conf ==="
+          cat /etc/resolv.conf
+          echo ""
+          echo "=== DNS resolution attempts ==="
+          getent hosts trilium || echo "getent failed for trilium"
+          getent hosts localhost || echo "getent failed for localhost"
+          host trilium 2>&1 || echo "host command failed"
+          nslookup trilium 2>&1 || echo "nslookup failed"
+          echo ""
+          echo "=== Network interfaces ==="
+          ip addr 2>/dev/null || ifconfig 2>/dev/null || echo "No network tools"
+          echo ""
+          echo "=== Route table ==="
+          ip route 2>/dev/null || route -n 2>/dev/null || echo "No route tools"
+          echo ""
+          echo "=== Try pinging common hostnames ==="
+          ping -c 1 trilium 2>&1 || echo "ping trilium failed"
+          ping -c 1 localhost 2>&1 || echo "ping localhost failed"
+          echo ""
+          echo "=== Check if docker is available ==="
+          which docker && docker ps 2>&1 || echo "docker not available or no permission"
+          echo ""
+          echo "=== Try curl to various endpoints ==="
+          curl -v http://trilium:8080/api/app-info 2>&1 || echo "curl to trilium:8080 failed"
+          curl -v http://localhost:8080/api/app-info 2>&1 || echo "curl to localhost:8080 failed"
+          curl -v http://127.0.0.1:8080/api/app-info 2>&1 || echo "curl to 127.0.0.1:8080 failed"
+
       - name: Initialize Trilium database
         run: |
-          apt-get update && apt-get install -y curl
           echo "Initializing Trilium database..."
           curl -X POST http://trilium:8080/api/setup/new-document \
             -H "Content-Type: application/json" \
