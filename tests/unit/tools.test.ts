@@ -462,6 +462,43 @@ describe('Note Tools', () => {
 
         expect(result!.content[0].text).toBe('');
       });
+
+      it('should convert HTML to markdown when format is markdown', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(
+          '<h2>Heading</h2><p>Some <strong>bold</strong> text</p>'
+        );
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+          format: 'markdown',
+        });
+
+        expect(result!.content[0].text).toContain('## Heading');
+        expect(result!.content[0].text).toContain('**bold**');
+      });
+
+      it('should return HTML unchanged when format is html', async () => {
+        const htmlContent = '<p>HTML content</p>';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+          format: 'html',
+        });
+
+        expect(result!.content[0].text).toBe(htmlContent);
+      });
+
+      it('should return HTML by default when format is not specified', async () => {
+        const htmlContent = '<div>Default HTML</div>';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content[0].text).toBe(htmlContent);
+      });
     });
 
     describe('update_note', () => {

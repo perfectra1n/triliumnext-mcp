@@ -11,6 +11,7 @@ import {
   positionSchema,
 } from './validators.js';
 import { marked } from 'marked';
+import TurndownService from 'turndown';
 
 /**
  * Convert markdown content to HTML if format is 'markdown'.
@@ -21,6 +22,17 @@ async function convertContent(content: string, format?: 'html' | 'markdown'): Pr
     return await marked.parse(content);
   }
   return content;
+}
+
+/**
+ * Convert HTML content to markdown.
+ */
+function convertHtmlToMarkdown(html: string): string {
+  const turndownService = new TurndownService({
+    headingStyle: 'atx',
+    codeBlockStyle: 'fenced',
+  });
+  return turndownService.turndown(html);
 }
 
 // Zod schemas for validation
@@ -87,6 +99,13 @@ const getNoteSchema = z.object({
 
 const getNoteContentSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to get content from'),
+  format: z
+    .enum(['html', 'markdown'])
+    .optional()
+    .describe(
+      'Output format for text notes. Use "markdown" to convert HTML to markdown. ' +
+        'Defaults to "html" (returns content as stored). Only applies to text notes.'
+    ),
 });
 
 const updateNoteSchema = z.object({
@@ -158,7 +177,7 @@ export function registerNoteTools(): Tool[] {
     ),
     defineTool(
       'get_note_content',
-      'Get the content/body of a note. For text notes, returns HTML. For code notes, returns the raw code.',
+      'Get the content/body of a note. For text notes, returns HTML by default or markdown (set format to "markdown"). For code notes, returns the raw code.',
       getNoteContentSchema
     ),
     defineTool(
@@ -222,7 +241,10 @@ export async function handleNoteTool(
 
     case 'get_note_content': {
       const parsed = getNoteContentSchema.parse(args);
-      const result = await client.getNoteContent(parsed.noteId);
+      let result = await client.getNoteContent(parsed.noteId);
+      if (parsed.format === 'markdown') {
+        result = convertHtmlToMarkdown(result);
+      }
       return {
         content: [{ type: 'text', text: result }],
       };
