@@ -402,6 +402,30 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       expect(branch2After.notePosition).toBeLessThan(branch1After.notePosition);
     });
+
+    it('delete_branch - should remove a branch while keeping the note', async () => {
+      // Create a note with a clone (two branches)
+      const note = await client.createNote({
+        parentNoteId: parentNote1Id,
+        title: 'Note with Two Parents',
+        type: 'text',
+        content: '<p>This note has two branches</p>',
+      });
+
+      // Clone it to parent2
+      const secondBranch = await client.createBranch({
+        noteId: note.note.noteId,
+        parentNoteId: parentNote2Id,
+      });
+
+      // Delete the second branch
+      await client.deleteBranch(secondBranch.branchId);
+
+      // Note should still exist with only first parent
+      const noteAfter = await client.getNote(note.note.noteId);
+      expect(noteAfter.parentNoteIds).toContain(parentNote1Id);
+      expect(noteAfter.parentNoteIds).not.toContain(parentNote2Id);
+    });
   });
 
   describe('Attributes', () => {
@@ -494,6 +518,26 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       });
 
       expect(updated.value).toBe('updatedValue');
+    });
+
+    it('get_attribute - should get attribute by ID', async () => {
+      const attribute = await client.getAttribute(inheritableAttributeId);
+
+      expect(attribute.attributeId).toBe(inheritableAttributeId);
+      expect(attribute.name).toBe('inheritableLabel');
+      expect(attribute.isInheritable).toBe(true);
+    });
+
+    it('set_attribute - should create attribute with position', async () => {
+      const attribute = await client.createAttribute({
+        noteId: testNoteId,
+        type: 'label',
+        name: 'orderedLabel',
+        value: 'first',
+        position: 5,
+      });
+
+      expect(attribute.position).toBe(5);
     });
 
     it('delete_attribute - should remove attribute', async () => {

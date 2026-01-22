@@ -22,6 +22,10 @@ const reorderNotesSchema = z.object({
   })).describe('Array of branch positions'),
 });
 
+const deleteBranchSchema = z.object({
+  branchId: z.string().describe('ID of the branch to delete'),
+});
+
 export function registerOrganizationTools(): Tool[] {
   return [
     {
@@ -71,6 +75,17 @@ export function registerOrganizationTools(): Tool[] {
           },
         },
         required: ['parentNoteId', 'notePositions'],
+      },
+    },
+    {
+      name: 'delete_branch',
+      description: 'Delete a specific branch (parent-child link) without deleting the note itself. Use this to remove a note from one location while keeping it in others. WARNING: If you delete the last branch of a note, the note itself will be deleted.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          branchId: { type: 'string', description: 'ID of the branch to delete (not the note ID)' },
+        },
+        required: ['branchId'],
       },
     },
   ];
@@ -138,6 +153,14 @@ export async function handleOrganizationTool(
 
       return {
         content: [{ type: 'text', text: JSON.stringify({ success: true, updatedBranches: results }, null, 2) }],
+      };
+    }
+
+    case 'delete_branch': {
+      const parsed = deleteBranchSchema.parse(args);
+      await client.deleteBranch(parsed.branchId);
+      return {
+        content: [{ type: 'text', text: `Branch ${parsed.branchId} deleted successfully` }],
       };
     }
 

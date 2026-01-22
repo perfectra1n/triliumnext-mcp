@@ -751,10 +751,10 @@ describe('Search Tools', () => {
 
 describe('Organization Tools', () => {
   describe('registerOrganizationTools', () => {
-    it('should register 3 organization tools', () => {
+    it('should register 4 organization tools', () => {
       const tools = registerOrganizationTools();
-      expect(tools).toHaveLength(3);
-      expect(tools.map((t) => t.name)).toEqual(['move_note', 'clone_note', 'reorder_notes']);
+      expect(tools).toHaveLength(4);
+      expect(tools.map((t) => t.name)).toEqual(['move_note', 'clone_note', 'reorder_notes', 'delete_branch']);
     });
 
     it('should have correct input schemas', () => {
@@ -771,6 +771,8 @@ describe('Organization Tools', () => {
         'parentNoteId',
         'notePositions',
       ]);
+
+      expect(toolMap['delete_branch'].inputSchema.required).toEqual(['branchId']);
     });
   });
 
@@ -925,6 +927,25 @@ describe('Organization Tools', () => {
       });
     });
 
+    describe('delete_branch', () => {
+      it('should delete branch by ID', async () => {
+        vi.mocked(mockClient.deleteBranch).mockResolvedValue(undefined);
+
+        const result = await handleOrganizationTool(mockClient, 'delete_branch', {
+          branchId: 'branch123',
+        });
+
+        expect(mockClient.deleteBranch).toHaveBeenCalledWith('branch123');
+        expect(result?.content[0].text).toContain('Branch branch123 deleted successfully');
+      });
+
+      it('should reject missing branchId', async () => {
+        await expect(
+          handleOrganizationTool(mockClient, 'delete_branch', {})
+        ).rejects.toThrow();
+      });
+    });
+
     it('should return null for unknown tool', async () => {
       const result = await handleOrganizationTool(mockClient, 'unknown_tool', {});
       expect(result).toBeNull();
@@ -934,10 +955,10 @@ describe('Organization Tools', () => {
 
 describe('Attribute Tools', () => {
   describe('registerAttributeTools', () => {
-    it('should register 3 attribute tools', () => {
+    it('should register 4 attribute tools', () => {
       const tools = registerAttributeTools();
-      expect(tools).toHaveLength(3);
-      expect(tools.map((t) => t.name)).toEqual(['get_attributes', 'set_attribute', 'delete_attribute']);
+      expect(tools).toHaveLength(4);
+      expect(tools.map((t) => t.name)).toEqual(['get_attributes', 'get_attribute', 'set_attribute', 'delete_attribute']);
     });
 
     it('should have correct input schema for set_attribute', () => {
@@ -946,6 +967,15 @@ describe('Attribute Tools', () => {
 
       expect(setAttrTool.inputSchema.required).toEqual(['noteId', 'type', 'name', 'value']);
       expect(setAttrTool.inputSchema.properties).toHaveProperty('isInheritable');
+      expect(setAttrTool.inputSchema.properties).toHaveProperty('position');
+      expect(setAttrTool.inputSchema.properties).toHaveProperty('attributeId');
+    });
+
+    it('should have correct input schema for get_attribute', () => {
+      const tools = registerAttributeTools();
+      const getAttrTool = tools.find((t) => t.name === 'get_attribute')!;
+
+      expect(getAttrTool.inputSchema.required).toEqual(['attributeId']);
     });
   });
 
@@ -988,6 +1018,36 @@ describe('Attribute Tools', () => {
         const parsed = JSON.parse(result!.content[0].text);
         expect(parsed.labels).toHaveLength(0);
         expect(parsed.relations).toHaveLength(0);
+      });
+    });
+
+    describe('get_attribute', () => {
+      it('should get attribute by ID', async () => {
+        const mockAttr = {
+          attributeId: 'attr123',
+          noteId: 'note456',
+          type: 'label',
+          name: 'testLabel',
+          value: 'testValue',
+          position: 10,
+          isInheritable: false,
+        };
+        vi.mocked(mockClient.getAttribute).mockResolvedValue(mockAttr as any);
+
+        const result = await handleAttributeTool(mockClient, 'get_attribute', {
+          attributeId: 'attr123',
+        });
+
+        expect(mockClient.getAttribute).toHaveBeenCalledWith('attr123');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed.attributeId).toBe('attr123');
+        expect(parsed.name).toBe('testLabel');
+      });
+
+      it('should reject missing attributeId', async () => {
+        await expect(
+          handleAttributeTool(mockClient, 'get_attribute', {})
+        ).rejects.toThrow();
       });
     });
 
@@ -1060,7 +1120,58 @@ describe('Attribute Tools', () => {
           name: 'cssClass',
           value: 'highlight',
           isInheritable: true,
+          position: undefined,
+          attributeId: undefined,
         });
+      });
+
+      it('should create attribute with position', async () => {
+        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
+        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'new' } as any);
+
+        await handleAttributeTool(mockClient, 'set_attribute', {
+          noteId: 'abc123',
+          type: 'label',
+          name: 'priority',
+          value: 'high',
+          position: 10,
+        });
+
+        expect(mockClient.createAttribute).toHaveBeenCalledWith(
+          expect.objectContaining({ position: 10 })
+        );
+      });
+
+      it('should create attribute with forced attributeId', async () => {
+        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
+        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'forcedId' } as any);
+
+        await handleAttributeTool(mockClient, 'set_attribute', {
+          noteId: 'abc123',
+          type: 'label',
+          name: 'custom',
+          value: 'test',
+          attributeId: 'forcedId',
+        });
+
+        expect(mockClient.createAttribute).toHaveBeenCalledWith(
+          expect.objectContaining({ attributeId: 'forcedId' })
+        );
+      });
+
+      it('should skip existing check when attributeId is provided', async () => {
+        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'forcedId' } as any);
+
+        await handleAttributeTool(mockClient, 'set_attribute', {
+          noteId: 'abc123',
+          type: 'label',
+          name: 'custom',
+          value: 'test',
+          attributeId: 'forcedId',
+        });
+
+        // Should not call getNote to check for existing
+        expect(mockClient.getNote).not.toHaveBeenCalled();
       });
 
       it('should update existing attribute by name and type match', async () => {
@@ -1383,7 +1494,7 @@ describe('Tool count verification', () => {
       ...registerCalendarTools(),
       ...registerSystemTools(),
     ];
-    expect(allTools).toHaveLength(19);
+    expect(allTools).toHaveLength(21);
   });
 
   it('all tools should have descriptions', () => {
