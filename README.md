@@ -11,10 +11,20 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 
 ## Installation
 
+Please be sure to note the folder that you clone the repository into below.
 ```bash
+git clone https://github.com/perfectra1n/triliumnext-mcp
+cd triliumnext-mcp
 npm install
 npm run build
 ```
+
+Then as an example, for adding it to Claude Code:
+```bash
+claude mcp add trilium node <path_to_repository>/triliumnext-mcp/dist/index.js --scope user -e TRILIUM_TOKEN=<your_etapi_token_from_trilium> -e TRILIUM_URL=<your_full_trilium_url_e.g._https://trilium.example.com>
+```
+
+The above command will add it to your `.mcpServers` block in your `~/.claude.json` file, at the user scope (so you can use it across any repository).
 
 ## Configuration
 
@@ -26,16 +36,9 @@ Configuration precedence (highest to lowest):
 
 ### CLI Arguments
 
-For adding it to Claude Code:
 ```bash
-claude mcp add trilium node <path_to_repository>/triliumnext-mcp/dist/index.js --scope user
-```
-
-You'll the need to edit the file at `~/.claude.json`, and at the bottom you should see a section where that MCP server was added. In the `env` block/key, you'll need to set `TRILIUM_TOKEN` and `TRILIUM_URL` to their respective values.
-
-
-
-```bash
+cd triliumnext-mcp
+npm install -g .
 triliumnext-mcp --url http://localhost:37740/etapi --token YOUR_TOKEN
 ```
 
