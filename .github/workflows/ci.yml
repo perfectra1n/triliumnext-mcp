@@ -65,8 +65,6 @@ jobs:
     services:
       trilium:
         image: triliumnext/notes:latest
-        ports:
-          - 37740:8080
         env:
           TRILIUM_GENERAL_NOAUTHENTICATION: true
         options: >-
@@ -91,22 +89,10 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Wait for Trilium
-        run: |
-          echo "Waiting for Trilium to be ready..."
-          for i in {1..30}; do
-            if curl -sf http://localhost:37740/api/app-info > /dev/null; then
-              echo "Trilium is ready!"
-              break
-            fi
-            echo "Attempt $i: Trilium not ready yet..."
-            sleep 2
-          done
-
       - name: Initialize Trilium database
         run: |
           echo "Initializing Trilium database..."
-          curl -X POST http://localhost:37740/api/setup/new-document \
+          curl -X POST http://trilium:8080/api/setup/new-document \
             -H "Content-Type: application/json" \
             -d '{}' || echo "Database may already be initialized"
           sleep 2
@@ -114,7 +100,7 @@ jobs:
       - name: Run integration tests
         run: npm run test:integration
         env:
-          TRILIUM_URL: http://localhost:37740/etapi
+          TRILIUM_URL: http://trilium:8080/etapi
 
   docker:
     runs-on: ubuntu-latest
