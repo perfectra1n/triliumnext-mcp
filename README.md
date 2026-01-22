@@ -26,6 +26,15 @@ Configuration precedence (highest to lowest):
 
 ### CLI Arguments
 
+For adding it to Claude Code:
+```bash
+claude mcp add trilium node <path_to_repository>/triliumnext-mcp/dist/index.js --scope user
+```
+
+You'll the need to edit the file at `~/.claude.json`, and at the bottom you should see a section where that MCP server was added. In the `env` block/key, you'll need to set `TRILIUM_TOKEN` and `TRILIUM_URL` to their respective values.
+
+
+
 ```bash
 triliumnext-mcp --url http://localhost:37740/etapi --token YOUR_TOKEN
 ```
