@@ -122,6 +122,28 @@ const deleteNoteSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to delete'),
 });
 
+const appendNoteContentSchema = z.object({
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to append content to'),
+  content: z
+    .string()
+    .describe(
+      'Content to append to the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+        'For text notes with code blocks, use ' +
+        '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
+        'The class must be on the <code> element, not <pre>. ' +
+        'For internal links to other notes, use: ' +
+        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
+        "The path should be the full note path from root. Use get_note to find paths."
+    ),
+  format: z
+    .enum(['html', 'markdown'])
+    .optional()
+    .describe(
+      'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
+        'Defaults to "html". Only applies to text notes.'
+    ),
+});
+
 export function registerNoteTools(): Tool[] {
   return [
     defineTool(
@@ -148,6 +170,11 @@ export function registerNoteTools(): Tool[] {
       'update_note_content',
       'Update the content/body of a note. For text notes, provide HTML (default) or markdown (set format to "markdown"). For code notes, provide raw code.',
       updateNoteContentSchema
+    ),
+    defineTool(
+      'append_note_content',
+      'Append content to an existing note. Fetches the current content, adds the new content at the end, and updates the note. For text notes, provide HTML (default) or markdown (set format to "markdown"). For code notes, provide raw code.',
+      appendNoteContentSchema
     ),
     defineTool(
       'delete_note',
@@ -219,6 +246,17 @@ export async function handleNoteTool(
       await client.updateNoteContent(parsed.noteId, content);
       return {
         content: [{ type: 'text', text: 'Note content updated successfully' }],
+      };
+    }
+
+    case 'append_note_content': {
+      const parsed = appendNoteContentSchema.parse(args);
+      const existingContent = await client.getNoteContent(parsed.noteId);
+      const newContent = await convertContent(parsed.content, parsed.format);
+      const combinedContent = existingContent + newContent;
+      await client.updateNoteContent(parsed.noteId, combinedContent);
+      return {
+        content: [{ type: 'text', text: 'Content appended to note successfully' }],
       };
     }
 

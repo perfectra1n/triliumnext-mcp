@@ -49,15 +49,16 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
 
 describe('Note Tools', () => {
   describe('registerNoteTools', () => {
-    it('should register 6 note tools', () => {
+    it('should register 7 note tools', () => {
       const tools = registerNoteTools();
-      expect(tools).toHaveLength(6);
+      expect(tools).toHaveLength(7);
       expect(tools.map((t) => t.name)).toEqual([
         'create_note',
         'get_note',
         'get_note_content',
         'update_note',
         'update_note_content',
+        'append_note_content',
         'delete_note',
       ]);
     });
@@ -607,6 +608,65 @@ describe('Note Tools', () => {
         });
 
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', htmlContent);
+      });
+    });
+
+    describe('append_note_content', () => {
+      it('should append content to existing note', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing content</p>');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        const result = await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          content: '<p>New content</p>',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
+          'abc123',
+          '<p>Existing content</p><p>New content</p>'
+        );
+        expect(result!.content[0].text).toContain('appended');
+      });
+
+      it('should append to empty note', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          content: '<p>First content</p>',
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>First content</p>');
+      });
+
+      it('should convert markdown to HTML when format is markdown', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          content: '## New Section',
+          format: 'markdown',
+        });
+
+        const calledContent = vi.mocked(mockClient.updateNoteContent).mock.calls[0][1];
+        expect(calledContent).toContain('<p>Existing</p>');
+        expect(calledContent).toContain('<h2>New Section</h2>');
+      });
+
+      it('should reject missing noteId', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'append_note_content', { content: '<p>Test</p>' })
+        ).rejects.toThrow();
+      });
+
+      it('should reject missing content', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'append_note_content', { noteId: 'abc123' })
+        ).rejects.toThrow();
       });
     });
 
@@ -2059,7 +2119,7 @@ describe('Attachment Tools', () => {
 });
 
 describe('Tool count verification', () => {
-  it('should have exactly 27 tools total', () => {
+  it('should have exactly 28 tools total', () => {
     const allTools = [
       ...registerNoteTools(),
       ...registerSearchTools(),
@@ -2069,7 +2129,7 @@ describe('Tool count verification', () => {
       ...registerSystemTools(),
       ...registerAttachmentTools(),
     ];
-    expect(allTools).toHaveLength(27);
+    expect(allTools).toHaveLength(28);
   });
 
   it('all tools should have descriptions', () => {
