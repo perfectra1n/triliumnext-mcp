@@ -95,6 +95,4 @@ jobs:
           context: .
           file: docker/Dockerfile
           push: false
-          tags: triliumnext-mcp:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: perfectra1n/triliumnext-mcp:test
