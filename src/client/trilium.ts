@@ -47,7 +47,7 @@ export class TriliumClient {
       body?: unknown;
       query?: Record<string, string | number | boolean | undefined>;
       contentType?: string;
-      responseType?: 'json' | 'text';
+      responseType?: 'json' | 'text' | 'arraybuffer';
     } = {}
   ): Promise<T> {
     const { body, query, contentType = 'application/json', responseType = 'json' } = options;
@@ -107,6 +107,10 @@ export class TriliumClient {
 
     if (responseType === 'text') {
       return (await response.text()) as T;
+    }
+
+    if (responseType === 'arraybuffer') {
+      return (await response.arrayBuffer()) as T;
     }
 
     return (await response.json()) as T;
@@ -285,6 +289,39 @@ export class TriliumClient {
     return this.request<string>('GET', `/attachments/${attachmentId}/content`, {
       responseType: 'text',
     });
+  }
+
+  async getAttachmentContentAsBase64(attachmentId: EntityId): Promise<string> {
+    const buffer = await this.request<ArrayBuffer>('GET', `/attachments/${attachmentId}/content`, {
+      responseType: 'arraybuffer',
+    });
+    const bytes = new Uint8Array(buffer);
+
+    // Check if content is already base64-encoded (created via ETAPI)
+    // vs raw binary (created via Trilium UI)
+    // PNG starts with \x89PNG (0x89, 0x50, 0x4E, 0x47)
+    // JPEG starts with \xFF\xD8\xFF
+    // GIF starts with GIF8 (0x47, 0x49, 0x46, 0x38)
+    // WebP starts with RIFF (0x52, 0x49, 0x46, 0x46)
+    const isPngBinary = bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47;
+    const isJpegBinary = bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+    const isGifBinary = bytes[0] === 0x47 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x38;
+    const isWebpBinary = bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46;
+    const isSvgBinary = bytes[0] === 0x3c; // < character for XML/SVG
+
+    if (isPngBinary || isJpegBinary || isGifBinary || isWebpBinary || isSvgBinary) {
+      // Content is raw binary - convert to base64
+      let binary = '';
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      return btoa(binary);
+    }
+
+    // Content is already base64-encoded (stored as text via ETAPI)
+    // Just decode the bytes as UTF-8 text
+    const decoder = new TextDecoder('utf-8');
+    return decoder.decode(buffer);
   }
 
   async updateAttachmentContent(attachmentId: EntityId, content: string): Promise<void> {

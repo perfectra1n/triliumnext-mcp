@@ -170,20 +170,23 @@ export async function handleAttachmentTool(
     case 'get_attachment_content': {
       const parsed = getAttachmentContentSchema.parse(args);
       const attachment = await client.getAttachment(parsed.attachmentId);
-      const content = await client.getAttachmentContent(parsed.attachmentId);
 
       if (isImageMimeType(attachment.mime)) {
+        // Fetch as binary and convert to base64 for proper MCP image content
+        const base64Content = await client.getAttachmentContentAsBase64(parsed.attachmentId);
         return {
           content: [
             {
               type: 'image',
-              data: content,
+              data: base64Content,
               mimeType: attachment.mime,
             },
           ],
         };
       }
 
+      // For non-images, fetch as text
+      const content = await client.getAttachmentContent(parsed.attachmentId);
       return {
         content: [{ type: 'text', text: content }],
       };

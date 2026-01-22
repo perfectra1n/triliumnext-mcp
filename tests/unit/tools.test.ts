@@ -41,6 +41,7 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     updateAttachment: vi.fn(),
     deleteAttachment: vi.fn(),
     getAttachmentContent: vi.fn(),
+    getAttachmentContentAsBase64: vi.fn(),
     updateAttachmentContent: vi.fn(),
     ...overrides,
   } as unknown as TriliumClient;
@@ -1906,13 +1907,14 @@ describe('Attachment Tools', () => {
           utcDateScheduledForErasureSince: null,
           contentLength: 100,
         });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
 
         const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
           attachmentId: 'attach123',
         });
 
         expect(result).not.toBeNull();
+        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
         expect(result!.content[0]).toEqual({
           type: 'image',
           data: base64Data,
@@ -1935,13 +1937,14 @@ describe('Attachment Tools', () => {
           utcDateScheduledForErasureSince: null,
           contentLength: 100,
         });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
 
         const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
           attachmentId: 'attach123',
         });
 
         expect(result).not.toBeNull();
+        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
         expect(result!.content[0]).toEqual({
           type: 'image',
           data: base64Data,
@@ -1988,13 +1991,14 @@ describe('Attachment Tools', () => {
           utcDateScheduledForErasureSince: null,
           contentLength: 100,
         });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue(base64Data);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
 
         const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
           attachmentId: 'attach123',
         });
 
         expect(result).not.toBeNull();
+        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
         expect(result!.content[0]).toEqual({
           type: 'image',
           data: base64Data,
