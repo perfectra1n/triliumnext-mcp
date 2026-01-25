@@ -145,6 +145,38 @@ Or configure it in your Claude Code settings.
 | `get_attachment_content` | Get the content/body of an attachment |
 | `update_attachment_content` | Update the content/body of an attachment |
 
+## Debugging with MCP Inspector
+
+[MCP Inspector](https://github.com/modelcontextprotocol/inspector) is the official developer tool for testing and debugging MCP servers. It provides a web-based UI for interactive testing and real-time visualization of tool calls and responses.
+
+### Running the Inspector
+
+```bash
+npm run inspector
+```
+
+This opens a web UI at `http://localhost:6274` where you can:
+- Browse available tools
+- Execute tool calls interactively
+- View request/response payloads
+- Debug issues in real-time
+
+### Passing Trilium Configuration
+
+The inspector needs your Trilium credentials. Pass them as environment variables:
+
+```bash
+TRILIUM_URL=http://localhost:37740/etapi TRILIUM_TOKEN=your-token npm run inspector
+```
+
+Or export them first:
+
+```bash
+export TRILIUM_URL=http://localhost:37740/etapi
+export TRILIUM_TOKEN=your-token
+npm run inspector
+```
+
 ## Development
 
 ### Prerequisites
