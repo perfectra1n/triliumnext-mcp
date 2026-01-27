@@ -564,17 +564,18 @@ describe('Note Tools', () => {
         expect(result!.content).toHaveLength(1);
         expect(result!.content[0].type).toBe('text');
         const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('Some images could not be loaded');
+        expect(textContent).toContain('Some attachments could not be loaded');
         expect(textContent).toContain('img123');
         expect(textContent).toContain('Not found');
       });
 
-      it('should skip non-image attachments', async () => {
+      it('should list non-image attachments with suggestion to fetch', async () => {
         const htmlContent = '<p>Text</p><a href="api/attachments/doc123/content">PDF</a>';
         vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
         vi.mocked(mockClient.getAttachment).mockResolvedValue({
           attachmentId: 'doc123',
           mime: 'application/pdf',
+          title: 'document.pdf',
         } as any);
 
         const result = await handleNoteTool(mockClient, 'get_note_content', {
@@ -583,7 +584,11 @@ describe('Note Tools', () => {
 
         expect(result!.content).toHaveLength(1);
         const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('Not an image');
+        expect(textContent).toContain('Attachments:');
+        expect(textContent).toContain('document.pdf');
+        expect(textContent).toContain('application/pdf');
+        expect(textContent).toContain('doc123');
+        expect(textContent).toContain('get_attachment_content');
       });
 
       it('should fetch multiple images in parallel', async () => {
@@ -680,6 +685,36 @@ describe('Note Tools', () => {
 
         expect(result!.content).toHaveLength(1);
         expect(result!.content[0]).toEqual({ type: 'text', text: '' });
+      });
+
+      it('should handle mixed images and other attachments', async () => {
+        const htmlContent =
+          '<img src="api/attachments/img1/image"><a href="api/attachments/pdf1/content">PDF</a>';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment)
+          .mockResolvedValueOnce({ attachmentId: 'img1', mime: 'image/png', title: 'photo.png' } as any)
+          .mockResolvedValueOnce({ attachmentId: 'pdf1', mime: 'application/pdf', title: 'report.pdf' } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('imgdata');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        // Should have text + 1 image
+        expect(result!.content).toHaveLength(2);
+
+        // Text should contain attachment info for PDF
+        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
+        expect(textContent).toContain('report.pdf');
+        expect(textContent).toContain('application/pdf');
+        expect(textContent).toContain('get_attachment_content');
+
+        // Image should be included
+        expect(result!.content[1]).toEqual({
+          type: 'image',
+          data: 'imgdata',
+          mimeType: 'image/png',
+        });
       });
     });
 

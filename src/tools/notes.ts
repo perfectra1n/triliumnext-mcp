@@ -59,32 +59,54 @@ function extractAttachmentIds(html: string): string[] {
   return Array.from(ids);
 }
 
-interface ImageFetchResult {
+interface AttachmentFetchResult {
   attachmentId: string;
   success: boolean;
+  isImage: boolean;
   error?: string;
   data?: string;
   mimeType?: string;
+  title?: string;
 }
 
 /**
- * Fetch an image attachment and return its data.
+ * Fetch an attachment's metadata and content (if image).
+ * For images: fetches the actual image data.
+ * For other types: returns metadata only so LLM can decide to fetch separately.
  */
-async function fetchImageAttachment(
+async function fetchAttachment(
   client: TriliumClient,
   attachmentId: string
-): Promise<ImageFetchResult> {
+): Promise<AttachmentFetchResult> {
   try {
     const attachment = await client.getAttachment(attachmentId);
-    if (!isImageMimeType(attachment.mime)) {
-      return { attachmentId, success: false, error: `Not an image (${attachment.mime})` };
+    const isImage = isImageMimeType(attachment.mime);
+
+    if (isImage) {
+      const data = await client.getAttachmentContentAsBase64(attachmentId);
+      return {
+        attachmentId,
+        success: true,
+        isImage: true,
+        data,
+        mimeType: attachment.mime,
+        title: attachment.title,
+      };
     }
-    const data = await client.getAttachmentContentAsBase64(attachmentId);
-    return { attachmentId, success: true, data, mimeType: attachment.mime };
+
+    // For non-images, return metadata only
+    return {
+      attachmentId,
+      success: true,
+      isImage: false,
+      mimeType: attachment.mime,
+      title: attachment.title,
+    };
   } catch (error) {
     return {
       attachmentId,
       success: false,
+      isImage: false,
       error: error instanceof Error ? error.message : String(error),
     };
   }
@@ -316,21 +338,33 @@ export async function handleNoteTool(
 
       if (parsed.includeImages !== false) {
         const attachmentIds = extractAttachmentIds(rawHtml);
-        const imageResults = await Promise.all(
-          attachmentIds.map((id) => fetchImageAttachment(client, id))
+        const attachmentResults = await Promise.all(
+          attachmentIds.map((id) => fetchAttachment(client, id))
         );
 
-        const successful = imageResults.filter((r) => r.success);
-        const failed = imageResults.filter((r) => !r.success);
+        const images = attachmentResults.filter((r) => r.success && r.isImage);
+        const otherAttachments = attachmentResults.filter((r) => r.success && !r.isImage);
+        const failed = attachmentResults.filter((r) => !r.success);
 
         let finalText = textContent;
+
+        // Add info about other attachments that the LLM can fetch if needed
+        if (otherAttachments.length > 0) {
+          const attachmentList = otherAttachments
+            .map((a) => `- **${a.title || a.attachmentId}** (${a.mimeType}) - ID: \`${a.attachmentId}\``)
+            .join('\n');
+          finalText +=
+            `\n\n---\n**Attachments:** This note has ${otherAttachments.length} non-image attachment(s) ` +
+            `that can be fetched using \`get_attachment_content\`:\n${attachmentList}`;
+        }
+
         if (failed.length > 0) {
           const warnings = failed.map((f) => `- ${f.attachmentId}: ${f.error}`).join('\n');
-          finalText += `\n\n---\n**Note:** Some images could not be loaded:\n${warnings}`;
+          finalText += `\n\n---\n**Note:** Some attachments could not be loaded:\n${warnings}`;
         }
 
         content.push({ type: 'text', text: finalText });
-        for (const img of successful) {
+        for (const img of images) {
           if (img.data && img.mimeType) {
             content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
           }
