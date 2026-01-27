@@ -501,6 +501,188 @@ describe('Note Tools', () => {
       });
     });
 
+    describe('get_note_content with images', () => {
+      it('should include images by default', async () => {
+        const htmlContent = '<p>Text</p><img src="api/attachments/img123/image">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'img123',
+          mime: 'image/png',
+        } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('base64data');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content).toHaveLength(2);
+        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
+        expect(result!.content[1]).toEqual({
+          type: 'image',
+          data: 'base64data',
+          mimeType: 'image/png',
+        });
+      });
+
+      it('should opt-out with includeImages: false', async () => {
+        const htmlContent = '<p>Text</p><img src="api/attachments/img123/image">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+          includeImages: false,
+        });
+
+        expect(result).not.toBeNull();
+        expect(result!.content).toHaveLength(1);
+        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
+        expect(mockClient.getAttachment).not.toHaveBeenCalled();
+      });
+
+      it('should work normally when no images in content', async () => {
+        const htmlContent = '<p>Just text, no images</p>';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content).toHaveLength(1);
+        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
+      });
+
+      it('should handle failed fetch gracefully', async () => {
+        const htmlContent = '<p>Text</p><img src="api/attachments/img123/image">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockRejectedValue(new Error('Not found'));
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content).toHaveLength(1);
+        expect(result!.content[0].type).toBe('text');
+        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
+        expect(textContent).toContain('Some images could not be loaded');
+        expect(textContent).toContain('img123');
+        expect(textContent).toContain('Not found');
+      });
+
+      it('should skip non-image attachments', async () => {
+        const htmlContent = '<p>Text</p><a href="api/attachments/doc123/content">PDF</a>';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'doc123',
+          mime: 'application/pdf',
+        } as any);
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content).toHaveLength(1);
+        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
+        expect(textContent).toContain('Not an image');
+      });
+
+      it('should fetch multiple images in parallel', async () => {
+        const htmlContent =
+          '<img src="api/attachments/img1/image"><img src="api/attachments/img2/image">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment)
+          .mockResolvedValueOnce({ attachmentId: 'img1', mime: 'image/png' } as any)
+          .mockResolvedValueOnce({ attachmentId: 'img2', mime: 'image/jpeg' } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64)
+          .mockResolvedValueOnce('data1')
+          .mockResolvedValueOnce('data2');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content).toHaveLength(3);
+        expect(result!.content[0].type).toBe('text');
+        expect(result!.content[1]).toEqual({ type: 'image', data: 'data1', mimeType: 'image/png' });
+        expect(result!.content[2]).toEqual({ type: 'image', data: 'data2', mimeType: 'image/jpeg' });
+      });
+
+      it('should deduplicate attachment IDs', async () => {
+        const htmlContent =
+          '<img src="api/attachments/img1/image"><img src="api/attachments/img1/content">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'img1',
+          mime: 'image/png',
+        } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('data1');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(mockClient.getAttachment).toHaveBeenCalledTimes(1);
+        expect(result!.content).toHaveLength(2);
+      });
+
+      it('should work with markdown format and images', async () => {
+        const htmlContent = '<h1>Title</h1><img src="api/attachments/img1/image">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'img1',
+          mime: 'image/png',
+        } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('imgdata');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+          format: 'markdown',
+        });
+
+        expect(result!.content).toHaveLength(2);
+        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
+        expect(textContent).toContain('# Title');
+        expect(result!.content[1]).toEqual({
+          type: 'image',
+          data: 'imgdata',
+          mimeType: 'image/png',
+        });
+      });
+
+      it('should extract from data-attachment-id pattern', async () => {
+        const htmlContent = '<img data-attachment-id="att123" src="other">';
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({
+          attachmentId: 'att123',
+          mime: 'image/gif',
+        } as any);
+        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('gifdata');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(mockClient.getAttachment).toHaveBeenCalledWith('att123');
+        expect(result!.content).toHaveLength(2);
+        expect(result!.content[1]).toEqual({
+          type: 'image',
+          data: 'gifdata',
+          mimeType: 'image/gif',
+        });
+      });
+
+      it('should handle empty content with images enabled', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('');
+
+        const result = await handleNoteTool(mockClient, 'get_note_content', {
+          noteId: 'note123',
+        });
+
+        expect(result!.content).toHaveLength(1);
+        expect(result!.content[0]).toEqual({ type: 'text', text: '' });
+      });
+    });
+
     describe('update_note', () => {
       it('should update note title only', async () => {
         const mockNote = { noteId: 'abc123', title: 'New Title' };

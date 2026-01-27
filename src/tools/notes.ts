@@ -12,6 +12,7 @@ import {
 } from './validators.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
+import { isImageMimeType } from './attachments.js';
 
 /**
  * Convert markdown content to HTML if format is 'markdown'.
@@ -33,6 +34,60 @@ function convertHtmlToMarkdown(html: string): string {
     codeBlockStyle: 'fenced',
   });
   return turndownService.turndown(html);
+}
+
+// Regex patterns for Trilium attachment URLs
+const ATTACHMENT_URL_PATTERNS: RegExp[] = [
+  /api\/attachments\/([a-zA-Z0-9_]{4,32})\/image/g,
+  /api\/attachments\/([a-zA-Z0-9_]{4,32})\/content/g,
+  /api\/attachments\/([a-zA-Z0-9_]{4,32})(?:\/|"|'|\s|$)/g,
+  /data-attachment-id=["']([a-zA-Z0-9_]{4,32})["']/g,
+];
+
+/**
+ * Extract attachment IDs from HTML content.
+ */
+function extractAttachmentIds(html: string): string[] {
+  const ids = new Set<string>();
+  for (const pattern of ATTACHMENT_URL_PATTERNS) {
+    pattern.lastIndex = 0;
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      ids.add(match[1]);
+    }
+  }
+  return Array.from(ids);
+}
+
+interface ImageFetchResult {
+  attachmentId: string;
+  success: boolean;
+  error?: string;
+  data?: string;
+  mimeType?: string;
+}
+
+/**
+ * Fetch an image attachment and return its data.
+ */
+async function fetchImageAttachment(
+  client: TriliumClient,
+  attachmentId: string
+): Promise<ImageFetchResult> {
+  try {
+    const attachment = await client.getAttachment(attachmentId);
+    if (!isImageMimeType(attachment.mime)) {
+      return { attachmentId, success: false, error: `Not an image (${attachment.mime})` };
+    }
+    const data = await client.getAttachmentContentAsBase64(attachmentId);
+    return { attachmentId, success: true, data, mimeType: attachment.mime };
+  } catch (error) {
+    return {
+      attachmentId,
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
 }
 
 // Zod schemas for validation
@@ -106,6 +161,13 @@ const getNoteContentSchema = z.object({
       'Output format for text notes. Use "markdown" to convert HTML to markdown. ' +
         'Defaults to "html" (returns content as stored). Only applies to text notes.'
     ),
+  includeImages: z
+    .boolean()
+    .default(true)
+    .describe(
+      'When true (default), parses HTML for embedded images and includes them as image content blocks. ' +
+        'Set false for text-only.'
+    ),
 });
 
 const updateNoteSchema = z.object({
@@ -177,7 +239,9 @@ export function registerNoteTools(): Tool[] {
     ),
     defineTool(
       'get_note_content',
-      'Get the content/body of a note. For text notes, returns HTML by default or markdown (set format to "markdown"). For code notes, returns the raw code.',
+      'Get the content/body of a note. For text notes, returns HTML by default or markdown. ' +
+        'By default, embedded images are automatically fetched and included as image content blocks. ' +
+        'Set includeImages to false for text-only output.',
       getNoteContentSchema
     ),
     defineTool(
@@ -207,7 +271,9 @@ export async function handleNoteTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<{
+  content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+} | null> {
   switch (name) {
     case 'create_note': {
       const parsed = createNoteSchema.parse(args);
@@ -241,13 +307,39 @@ export async function handleNoteTool(
 
     case 'get_note_content': {
       const parsed = getNoteContentSchema.parse(args);
-      let result = await client.getNoteContent(parsed.noteId);
-      if (parsed.format === 'markdown') {
-        result = convertHtmlToMarkdown(result);
+      const rawHtml = await client.getNoteContent(parsed.noteId);
+      const textContent = parsed.format === 'markdown' ? convertHtmlToMarkdown(rawHtml) : rawHtml;
+
+      const content: Array<
+        { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+      > = [];
+
+      if (parsed.includeImages !== false) {
+        const attachmentIds = extractAttachmentIds(rawHtml);
+        const imageResults = await Promise.all(
+          attachmentIds.map((id) => fetchImageAttachment(client, id))
+        );
+
+        const successful = imageResults.filter((r) => r.success);
+        const failed = imageResults.filter((r) => !r.success);
+
+        let finalText = textContent;
+        if (failed.length > 0) {
+          const warnings = failed.map((f) => `- ${f.attachmentId}: ${f.error}`).join('\n');
+          finalText += `\n\n---\n**Note:** Some images could not be loaded:\n${warnings}`;
+        }
+
+        content.push({ type: 'text', text: finalText });
+        for (const img of successful) {
+          if (img.data && img.mimeType) {
+            content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+          }
+        }
+      } else {
+        content.push({ type: 'text', text: textContent });
       }
-      return {
-        content: [{ type: 'text', text: result }],
-      };
+
+      return { content };
     }
 
     case 'update_note': {

@@ -5,7 +5,7 @@ import { defineTool } from './schemas.js';
 import { positionSchema } from './validators.js';
 
 // Supported image MIME types for visual content display
-const IMAGE_MIME_TYPES = new Set([
+export const IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
   'image/jpg',
@@ -14,7 +14,7 @@ const IMAGE_MIME_TYPES = new Set([
   'image/svg+xml',
 ]);
 
-function isImageMimeType(mime: string): boolean {
+export function isImageMimeType(mime: string): boolean {
   return IMAGE_MIME_TYPES.has(mime.toLowerCase());
 }
 
