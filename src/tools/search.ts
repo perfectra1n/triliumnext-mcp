@@ -8,7 +8,13 @@ const searchNotesSchema = z.object({
   query: z
     .string()
     .min(1, 'Search query is required')
-    .describe('Search query string. Use #label for labels, ~relation for relations.'),
+    .describe(
+      'Trilium search query. Fulltext: "word1 word2" (implicit AND), "exact phrase" (quotes). ' +
+        'Labels: #label, #label=value, #!label (negation). Relations: ~relation. ' +
+        'Operators: = != *=* =* *= >= > < <=. ' +
+        'Boolean: "or" between terms, AND with parentheses. ' +
+        'Examples: "meeting", "#project", "#status = active", "meeting #project"'
+    ),
   fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
   includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
   ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
@@ -31,7 +37,35 @@ export function registerSearchTools(): Tool[] {
   return [
     defineTool(
       'search_notes',
-      'Search notes using full-text search and/or attribute filters. Supports Trilium search syntax including #label and ~relation filters.',
+      `Search notes using full-text search and/or attribute filters. Supports Trilium search syntax.
+
+**Full-text search:**
+- \`rings tolkien\` - Both terms must appear (implicit AND between words)
+- \`"exact phrase"\` - Use quotes for exact phrase matching
+
+**Attribute filters (labels and relations):**
+- \`#labelname\` - Notes with label
+- \`#!labelname\` - Notes WITHOUT label
+- \`#year = 1954\` - Label with exact value
+- \`#year >= 1950\` - Numeric comparison (>=, >, <, <=)
+- \`#name *=* john\` - Label value contains "john"
+- \`~relationname\` - Notes with relation
+
+**Combining searches:**
+- \`tolkien #book\` - Fulltext AND attribute (space = implicit AND)
+- \`#book or #article\` - OR between attributes
+- \`(#year >= 1950 AND #year <= 1960)\` - AND with parentheses for grouping
+
+**String operators:** = (exact), != (not equal), *=* (contains), =* (starts with), *= (ends with), %= (regex)
+
+**Note properties:** note.title, note.dateCreated, note.dateModified, note.parents.title, note.ancestors.title
+
+**Examples:**
+- \`meeting\` - Notes containing "meeting"
+- \`#project\` - Notes with "project" label
+- \`#status = active\` - Notes where status label equals "active"
+- \`meeting #project\` - Notes containing "meeting" with "project" label
+- \`#type = task #priority = high\` - Multiple label conditions (implicit AND)`,
       searchNotesSchema
     ),
     defineTool(
