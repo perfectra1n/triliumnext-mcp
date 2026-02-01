@@ -247,6 +247,21 @@ const appendNoteContentSchema = z.object({
     ),
 });
 
+const undeleteNoteSchema = z.object({
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the deleted note to restore'),
+});
+
+const getNoteAttachmentsSchema = z.object({
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to get attachments for'),
+});
+
+const getNoteHistorySchema = z.object({
+  ancestorNoteId: z
+    .string()
+    .optional()
+    .describe('Limit changes to a subtree identified by this note ID. Defaults to all notes.'),
+});
+
 export function registerNoteTools(): Tool[] {
   return [
     defineTool(
@@ -285,6 +300,21 @@ export function registerNoteTools(): Tool[] {
       'delete_note',
       'Delete a note by ID. This will also delete all branches pointing to this note.',
       deleteNoteSchema
+    ),
+    defineTool(
+      'undelete_note',
+      'Restore a deleted note. The note must have been deleted and must have at least one undeleted parent. Use get_note_history to find deleted notes that can be undeleted.',
+      undeleteNoteSchema
+    ),
+    defineTool(
+      'get_note_attachments',
+      'Get all attachments for a note by its ID. Returns array of attachment metadata including role, MIME type, title, and size. Use get_attachment_content to retrieve attachment contents.',
+      getNoteAttachmentsSchema
+    ),
+    defineTool(
+      'get_note_history',
+      'Get recent changes including note creations, modifications, and deletions. Optionally filter by subtree using ancestorNoteId. Returns change events with note info and deletion/undelete status.',
+      getNoteHistorySchema
     ),
   ];
 }
@@ -413,6 +443,37 @@ export async function handleNoteTool(
       await client.deleteNote(parsed.noteId);
       return {
         content: [{ type: 'text', text: `Note ${parsed.noteId} deleted successfully` }],
+      };
+    }
+
+    case 'undelete_note': {
+      const parsed = undeleteNoteSchema.parse(args);
+      const result = await client.undeleteNote(parsed.noteId);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: result.success
+              ? `Note ${parsed.noteId} has been restored successfully.`
+              : `Failed to restore note ${parsed.noteId}.`,
+          },
+        ],
+      };
+    }
+
+    case 'get_note_attachments': {
+      const parsed = getNoteAttachmentsSchema.parse(args);
+      const attachments = await client.getNoteAttachments(parsed.noteId);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(attachments, null, 2) }],
+      };
+    }
+
+    case 'get_note_history': {
+      const parsed = getNoteHistorySchema.parse(args);
+      const history = await client.getNoteHistory(parsed.ancestorNoteId);
+      return {
+        content: [{ type: 'text', text: JSON.stringify(history, null, 2) }],
       };
     }
 

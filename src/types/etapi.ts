@@ -247,3 +247,44 @@ export interface EtapiError {
   code: string;
   message: string;
 }
+
+/**
+ * Revision entity - snapshot of note title and content
+ */
+export interface Revision {
+  revisionId: EntityId;
+  noteId: EntityId;
+  type: NoteType;
+  mime: string;
+  isProtected: boolean;
+  title: string;
+  blobId?: string;
+  dateLastEdited: LocalDateTime;
+  dateCreated: LocalDateTime;
+  utcDateLastEdited: UtcDateTime;
+  utcDateCreated: UtcDateTime;
+  utcDateModified: UtcDateTime;
+  contentLength: number;
+}
+
+/**
+ * Recent change event (creation, modification, or deletion)
+ */
+export interface RecentChange {
+  noteId: EntityId;
+  title: string;
+  current_title: string;
+  current_isDeleted: boolean;
+  current_deleteId?: string;
+  current_isProtected: boolean;
+  utcDate: UtcDateTime;
+  date: LocalDateTime;
+  canBeUndeleted?: boolean;
+}
+
+/**
+ * Response from undelete endpoint
+ */
+export interface UndeleteResponse {
+  success: boolean;
+}

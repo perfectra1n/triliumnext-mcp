@@ -18,6 +18,9 @@ import type {
   AppInfo,
   EtapiError,
   EntityId,
+  Revision,
+  RecentChange,
+  UndeleteResponse,
 } from '../types/etapi.js';
 
 export class TriliumClientError extends Error {
@@ -146,6 +149,20 @@ export class TriliumClient {
     await this.request<undefined>('DELETE', `/notes/${noteId}`);
   }
 
+  async undeleteNote(noteId: EntityId): Promise<UndeleteResponse> {
+    return this.request<UndeleteResponse>('POST', `/notes/${noteId}/undelete`);
+  }
+
+  async getNoteAttachments(noteId: EntityId): Promise<Attachment[]> {
+    return this.request<Attachment[]>('GET', `/notes/${noteId}/attachments`);
+  }
+
+  async getNoteHistory(ancestorNoteId?: EntityId): Promise<RecentChange[]> {
+    return this.request<RecentChange[]>('GET', '/notes/history', {
+      query: ancestorNoteId ? { ancestorNoteId } : undefined,
+    });
+  }
+
   // ==================== Search ====================
 
   async searchNotes(params: SearchParams): Promise<SearchResponse> {
@@ -237,6 +254,20 @@ export class TriliumClient {
   async createRevision(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<void> {
     await this.request<undefined>('POST', `/notes/${noteId}/revision`, {
       query: { format },
+    });
+  }
+
+  async getNoteRevisions(noteId: EntityId): Promise<Revision[]> {
+    return this.request<Revision[]>('GET', `/notes/${noteId}/revisions`);
+  }
+
+  async getRevision(revisionId: EntityId): Promise<Revision> {
+    return this.request<Revision>('GET', `/revisions/${revisionId}`);
+  }
+
+  async getRevisionContent(revisionId: EntityId): Promise<string> {
+    return this.request<string>('GET', `/revisions/${revisionId}/content`, {
+      responseType: 'text',
     });
   }
 
