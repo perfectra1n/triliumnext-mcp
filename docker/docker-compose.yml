@@ -29,7 +29,8 @@ services:
     environment:
       - TRILIUM_URL=http://trilium:8080/etapi
       - TRILIUM_TOKEN=${TRILIUM_TOKEN}
-    command: ["--transport", "http", "--port", "3000"]
+      - TRILIUM_TRANSPORT=http
+      - TRILIUM_HTTP_PORT=3000
     ports:
       - "3000:3000"
     restart: unless-stopped
