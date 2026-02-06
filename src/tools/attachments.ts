@@ -3,6 +3,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { positionSchema } from './validators.js';
+import { searchReplaceBlockSchema, resolveContent } from './diff.js';
 
 // Supported image MIME types for visual content display
 export const IMAGE_MIME_TYPES = new Set([
@@ -69,13 +70,49 @@ const getAttachmentContentSchema = z.object({
     .describe('ID of the attachment to get content from'),
 });
 
-const updateAttachmentContentSchema = z.object({
-  attachmentId: z
-    .string()
-    .min(1, 'Attachment ID is required')
-    .describe('ID of the attachment to update'),
-  content: z.string().describe('New content for the attachment'),
-});
+const updateAttachmentContentSchema = z
+  .object({
+    attachmentId: z
+      .string()
+      .min(1, 'Attachment ID is required')
+      .describe('ID of the attachment to update'),
+    content: z
+      .string()
+      .optional()
+      .describe('Full replacement content for the attachment'),
+    changes: z
+      .array(searchReplaceBlockSchema)
+      .optional()
+      .describe(
+        'Array of search/replace blocks to apply sequentially. Each block has old_string (exact match to find) ' +
+          'and new_string (replacement).'
+      ),
+    patch: z
+      .string()
+      .optional()
+      .describe('Unified diff patch to apply to the existing attachment content.'),
+  })
+  .check((ctx) => {
+    const { content, changes, patch } = ctx.value;
+    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
+      Boolean
+    ).length;
+    if (modes === 0) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Exactly one of "content", "changes", or "patch" must be provided',
+        path: [],
+      });
+    } else if (modes > 1) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
+        path: [],
+      });
+    }
+  });
 
 export function registerAttachmentTools(): Tool[] {
   return [
@@ -106,7 +143,9 @@ export function registerAttachmentTools(): Tool[] {
     ),
     defineTool(
       'update_attachment_content',
-      'Update the content/body of an attachment. Provide new content as text.',
+      'Update the content/body of an attachment. Three modes: (1) Full replacement via "content". ' +
+        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially. ' +
+        '(3) Unified diff via "patch". Exactly one mode must be used per call.',
       updateAttachmentContentSchema
     ),
   ];
@@ -194,7 +233,19 @@ export async function handleAttachmentTool(
 
     case 'update_attachment_content': {
       const parsed = updateAttachmentContentSchema.parse(args);
-      await client.updateAttachmentContent(parsed.attachmentId, parsed.content);
+      let finalContent: string;
+      if (parsed.changes !== undefined || parsed.patch !== undefined) {
+        // Diff modes: fetch existing content first
+        const existingContent = await client.getAttachmentContent(parsed.attachmentId);
+        finalContent = await resolveContent(existingContent, {
+          changes: parsed.changes,
+          patch: parsed.patch,
+        });
+      } else {
+        // Full replacement mode
+        finalContent = parsed.content!;
+      }
+      await client.updateAttachmentContent(parsed.attachmentId, finalContent);
       return {
         content: [{ type: 'text', text: 'Attachment content updated successfully' }],
       };

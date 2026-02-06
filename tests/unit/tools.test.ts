@@ -7,6 +7,7 @@ import { registerCalendarTools, handleCalendarTool } from '../../src/tools/calen
 import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
 import { registerAttachmentTools, handleAttachmentTool } from '../../src/tools/attachments.js';
 import type { TriliumClient } from '../../src/client/trilium.js';
+import { DiffApplicationError } from '../../src/tools/diff.js';
 
 // Mock client factory
 function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient {
@@ -83,9 +84,12 @@ describe('Note Tools', () => {
       expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('type');
       expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('mime');
 
-      // update_note_content schema - should have format option
-      expect(toolMap['update_note_content'].inputSchema.required).toEqual(['noteId', 'content']);
+      // update_note_content schema - should have format option and diff modes
+      expect(toolMap['update_note_content'].inputSchema.required).toEqual(['noteId']);
       expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('format');
+      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('content');
+      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('changes');
+      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('patch');
     });
   });
 
@@ -865,6 +869,141 @@ describe('Note Tools', () => {
       });
     });
 
+    describe('update_note_content - diff modes', () => {
+      it('should apply search/replace changes to existing content', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello World</p>');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          changes: [{ old_string: 'Hello', new_string: 'Goodbye' }],
+        });
+
+        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Goodbye World</p>');
+      });
+
+      it('should apply multiple search/replace changes sequentially', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue(
+          '<p>Hello World, Hello Again</p>'
+        );
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          changes: [
+            { old_string: 'Hello World', new_string: 'Goodbye World' },
+            { old_string: 'Hello Again', new_string: 'Goodbye Again' },
+          ],
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
+          'abc123',
+          '<p>Goodbye World, Goodbye Again</p>'
+        );
+      });
+
+      it('should apply unified diff patch', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('line1\nline2\nline3\n');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          patch:
+            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
+        });
+
+        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
+          'abc123',
+          'line1\nline2_modified\nline3\n'
+        );
+      });
+
+      it('should not fetch existing content for full replacement mode', async () => {
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'update_note_content', {
+          noteId: 'abc123',
+          content: '<p>Replaced</p>',
+        });
+
+        expect(mockClient.getNoteContent).not.toHaveBeenCalled();
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Replaced</p>');
+      });
+
+      it('should reject when both content and changes provided', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            content: '<p>Content</p>',
+            changes: [{ old_string: 'a', new_string: 'b' }],
+          })
+        ).rejects.toThrow();
+      });
+
+      it('should reject when both content and patch provided', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            content: '<p>Content</p>',
+            patch: '--- a\n+++ b\n',
+          })
+        ).rejects.toThrow();
+      });
+
+      it('should reject when all three provided', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            content: '<p>Content</p>',
+            changes: [{ old_string: 'a', new_string: 'b' }],
+            patch: '--- a\n+++ b\n',
+          })
+        ).rejects.toThrow();
+      });
+
+      it('should reject when none of content/changes/patch provided', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+          })
+        ).rejects.toThrow();
+      });
+
+      it('should throw clear error when search string not found', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello</p>');
+
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            changes: [{ old_string: 'nonexistent', new_string: 'x' }],
+          })
+        ).rejects.toThrow(DiffApplicationError);
+      });
+
+      it('should throw clear error when search string is ambiguous', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello Hello</p>');
+
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            changes: [{ old_string: 'Hello', new_string: 'x' }],
+          })
+        ).rejects.toThrow(DiffApplicationError);
+      });
+
+      it('should reject format=markdown with changes mode', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            changes: [{ old_string: 'a', new_string: 'b' }],
+            format: 'markdown',
+          })
+        ).rejects.toThrow();
+      });
+    });
+
     describe('append_note_content', () => {
       it('should append content to existing note', async () => {
         vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing content</p>');
@@ -917,9 +1056,64 @@ describe('Note Tools', () => {
         ).rejects.toThrow();
       });
 
-      it('should reject missing content', async () => {
+      it('should reject when no content mode provided', async () => {
         await expect(
           handleNoteTool(mockClient, 'append_note_content', { noteId: 'abc123' })
+        ).rejects.toThrow();
+      });
+    });
+
+    describe('append_note_content - diff modes', () => {
+      it('should apply search/replace changes to existing content', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          changes: [{ old_string: 'Existing', new_string: 'Modified' }],
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Modified</p>');
+      });
+
+      it('should apply unified diff patch', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('line1\nline2\nline3\n');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          patch:
+            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
+          'abc123',
+          'line1\nline2_modified\nline3\n'
+        );
+      });
+
+      it('should still support plain content append (backward compat)', async () => {
+        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'append_note_content', {
+          noteId: 'abc123',
+          content: '<p>Appended</p>',
+        });
+
+        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
+          'abc123',
+          '<p>Existing</p><p>Appended</p>'
+        );
+      });
+
+      it('should reject mutual exclusivity violations', async () => {
+        await expect(
+          handleNoteTool(mockClient, 'append_note_content', {
+            noteId: 'abc123',
+            content: '<p>Content</p>',
+            changes: [{ old_string: 'a', new_string: 'b' }],
+          })
         ).rejects.toThrow();
       });
     });
@@ -1965,8 +2159,10 @@ describe('Attachment Tools', () => {
 
       expect(toolMap['update_attachment_content'].inputSchema.required).toEqual([
         'attachmentId',
-        'content',
       ]);
+      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('content');
+      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('changes');
+      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('patch');
     });
   });
 
@@ -2356,7 +2552,72 @@ describe('Attachment Tools', () => {
         expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith('attach123', largeContent);
       });
 
-      it('should reject missing required fields', async () => {
+      it('should reject when no content mode provided', async () => {
+        await expect(
+          handleAttachmentTool(mockClient, 'update_attachment_content', {
+            attachmentId: 'attach123',
+          })
+        ).rejects.toThrow();
+      });
+    });
+
+    describe('update_attachment_content - diff modes', () => {
+      it('should apply search/replace changes to existing attachment content', async () => {
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('old text content');
+        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
+
+        await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          changes: [{ old_string: 'old', new_string: 'new' }],
+        });
+
+        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
+        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
+          'attach123',
+          'new text content'
+        );
+      });
+
+      it('should apply unified diff patch to attachment', async () => {
+        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('line1\nline2\nline3\n');
+        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
+
+        await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          patch:
+            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
+        });
+
+        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
+        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
+          'attach123',
+          'line1\nline2_modified\nline3\n'
+        );
+      });
+
+      it('should still support full replacement (backward compat)', async () => {
+        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
+
+        await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          content: 'replaced',
+        });
+
+        expect(mockClient.getAttachmentContent).not.toHaveBeenCalled();
+        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith('attach123', 'replaced');
+      });
+
+      it('should reject mutual exclusivity violations', async () => {
+        await expect(
+          handleAttachmentTool(mockClient, 'update_attachment_content', {
+            attachmentId: 'attach123',
+            content: 'content',
+            changes: [{ old_string: 'a', new_string: 'b' }],
+          })
+        ).rejects.toThrow();
+      });
+
+      it('should reject when no mode provided', async () => {
         await expect(
           handleAttachmentTool(mockClient, 'update_attachment_content', {
             attachmentId: 'attach123',

@@ -13,6 +13,7 @@ import {
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import { isImageMimeType } from './attachments.js';
+import { searchReplaceBlockSchema, resolveContent } from './diff.js';
 
 /**
  * Convert markdown content to HTML if format is 'markdown'.
@@ -199,53 +200,146 @@ const updateNoteSchema = z.object({
   mime: z.string().optional().describe('New MIME type for the note'),
 });
 
-const updateNoteContentSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to update'),
-  content: z
-    .string()
-    .describe(
-      'New content for the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
-        'For text notes with code blocks, use ' +
-        '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
-        'The class must be on the <code> element, not <pre>. ' +
-        'For internal links to other notes, use: ' +
-        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
-        "The path should be the full note path from root. Use get_note to find paths."
-    ),
-  format: z
-    .enum(['html', 'markdown'])
-    .optional()
-    .describe(
-      'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
-        'Defaults to "html". Only applies to text notes.'
-    ),
-});
+const updateNoteContentSchema = z
+  .object({
+    noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to update'),
+    content: z
+      .string()
+      .optional()
+      .describe(
+        'Full replacement content for the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+          'For text notes with code blocks, use ' +
+          '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
+          'The class must be on the <code> element, not <pre>. ' +
+          'For internal links to other notes, use: ' +
+          '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
+          "The path should be the full note path from root. Use get_note to find paths."
+      ),
+    changes: z
+      .array(searchReplaceBlockSchema)
+      .optional()
+      .describe(
+        'Array of search/replace blocks to apply sequentially. Each block has old_string (exact match to find) ' +
+          'and new_string (replacement). Operates on stored content (HTML for text notes). ' +
+          'Cannot be used with format="markdown".'
+      ),
+    patch: z
+      .string()
+      .optional()
+      .describe(
+        'Unified diff patch to apply to the existing content. ' +
+          'Cannot be used with format="markdown".'
+      ),
+    format: z
+      .enum(['html', 'markdown'])
+      .optional()
+      .describe(
+        'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
+          'Defaults to "html". Only applies to full content replacement mode.'
+      ),
+  })
+  .check((ctx) => {
+    const { content, changes, patch, format } = ctx.value;
+    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
+      Boolean
+    ).length;
+    if (modes === 0) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Exactly one of "content", "changes", or "patch" must be provided',
+        path: [],
+      });
+    } else if (modes > 1) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
+        path: [],
+      });
+    }
+    if (format === 'markdown' && (changes !== undefined || patch !== undefined)) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message:
+          'format="markdown" cannot be used with "changes" or "patch" modes — diffs operate on stored content (HTML)',
+        path: ['format'],
+      });
+    }
+  });
 
 const deleteNoteSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to delete'),
 });
 
-const appendNoteContentSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to append content to'),
-  content: z
-    .string()
-    .describe(
-      'Content to append to the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
-        'For text notes with code blocks, use ' +
-        '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
-        'The class must be on the <code> element, not <pre>. ' +
-        'For internal links to other notes, use: ' +
-        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
-        "The path should be the full note path from root. Use get_note to find paths."
-    ),
-  format: z
-    .enum(['html', 'markdown'])
-    .optional()
-    .describe(
-      'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
-        'Defaults to "html". Only applies to text notes.'
-    ),
-});
+const appendNoteContentSchema = z
+  .object({
+    noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to append content to'),
+    content: z
+      .string()
+      .optional()
+      .describe(
+        'Content to append to the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+          'For text notes with code blocks, use ' +
+          '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
+          'The class must be on the <code> element, not <pre>. ' +
+          'For internal links to other notes, use: ' +
+          '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
+          "The path should be the full note path from root. Use get_note to find paths."
+      ),
+    changes: z
+      .array(searchReplaceBlockSchema)
+      .optional()
+      .describe(
+        'Array of search/replace blocks to apply sequentially to the existing content. ' +
+          'Cannot be used with format="markdown".'
+      ),
+    patch: z
+      .string()
+      .optional()
+      .describe(
+        'Unified diff patch to apply to the existing content. ' +
+          'Cannot be used with format="markdown".'
+      ),
+    format: z
+      .enum(['html', 'markdown'])
+      .optional()
+      .describe(
+        'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
+          'Defaults to "html". Only applies to full content append mode.'
+      ),
+  })
+  .check((ctx) => {
+    const { content, changes, patch, format } = ctx.value;
+    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
+      Boolean
+    ).length;
+    if (modes === 0) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Exactly one of "content", "changes", or "patch" must be provided',
+        path: [],
+      });
+    } else if (modes > 1) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
+        path: [],
+      });
+    }
+    if (format === 'markdown' && (changes !== undefined || patch !== undefined)) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message:
+          'format="markdown" cannot be used with "changes" or "patch" modes — diffs operate on stored content (HTML)',
+        path: ['format'],
+      });
+    }
+  });
 
 export function registerNoteTools(): Tool[] {
   return [
@@ -273,12 +367,18 @@ export function registerNoteTools(): Tool[] {
     ),
     defineTool(
       'update_note_content',
-      'Update the content/body of a note. For text notes, provide HTML (default) or markdown (set format to "markdown"). For code notes, provide raw code.',
+      'Update the content/body of a note. Three modes: (1) Full replacement via "content" — provide HTML (default) or markdown (set format to "markdown"). ' +
+        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
+        '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
+        'Exactly one mode must be used per call.',
       updateNoteContentSchema
     ),
     defineTool(
       'append_note_content',
-      'Append content to an existing note. Fetches the current content, adds the new content at the end, and updates the note. For text notes, provide HTML (default) or markdown (set format to "markdown"). For code notes, provide raw code.',
+      'Append or edit content of an existing note. Three modes: (1) Append via "content" — fetches current content and appends new content at the end. ' +
+        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
+        '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
+        'Exactly one mode must be used per call.',
       appendNoteContentSchema
     ),
     defineTool(
@@ -390,8 +490,21 @@ export async function handleNoteTool(
 
     case 'update_note_content': {
       const parsed = updateNoteContentSchema.parse(args);
-      const content = await convertContent(parsed.content, parsed.format);
-      await client.updateNoteContent(parsed.noteId, content);
+      let finalContent: string;
+      if (parsed.changes !== undefined || parsed.patch !== undefined) {
+        // Diff modes: fetch existing content first
+        const existingContent = await client.getNoteContent(parsed.noteId);
+        finalContent = await resolveContent(existingContent, {
+          changes: parsed.changes,
+          patch: parsed.patch,
+        });
+      } else {
+        // Full replacement mode
+        finalContent = await resolveContent('', {
+          content: parsed.content,
+        }, parsed.format === 'markdown' ? (c) => convertContent(c, 'markdown') : undefined);
+      }
+      await client.updateNoteContent(parsed.noteId, finalContent);
       return {
         content: [{ type: 'text', text: 'Note content updated successfully' }],
       };
@@ -400,9 +513,19 @@ export async function handleNoteTool(
     case 'append_note_content': {
       const parsed = appendNoteContentSchema.parse(args);
       const existingContent = await client.getNoteContent(parsed.noteId);
-      const newContent = await convertContent(parsed.content, parsed.format);
-      const combinedContent = existingContent + newContent;
-      await client.updateNoteContent(parsed.noteId, combinedContent);
+      let finalContent: string;
+      if (parsed.changes !== undefined || parsed.patch !== undefined) {
+        // Diff modes: apply diffs to existing content
+        finalContent = await resolveContent(existingContent, {
+          changes: parsed.changes,
+          patch: parsed.patch,
+        });
+      } else {
+        // Append mode: concatenate new content to existing
+        const newContent = await convertContent(parsed.content!, parsed.format);
+        finalContent = existingContent + newContent;
+      }
+      await client.updateNoteContent(parsed.noteId, finalContent);
       return {
         content: [{ type: 'text', text: 'Content appended to note successfully' }],
       };

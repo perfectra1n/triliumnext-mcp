@@ -1,5 +1,6 @@
 import { ZodError, type ZodIssue } from 'zod';
 import { TriliumClientError } from '../client/trilium.js';
+import { DiffApplicationError } from '../tools/diff.js';
 
 /**
  * Structured error information for MCP responses
@@ -143,6 +144,17 @@ export function formatZodError(error: ZodError, toolName?: string): StructuredEr
     message: toolName ? `Invalid input for tool "${toolName}"` : 'Invalid input',
     suggestion,
     fieldErrors,
+  };
+}
+
+/**
+ * Format a DiffApplicationError into a structured error with actionable guidance
+ */
+export function formatDiffError(error: DiffApplicationError): StructuredError {
+  return {
+    message: error.message,
+    code: 'DIFF_APPLICATION_FAILED',
+    suggestion: 'Fetch the current content and retry with updated diffs.',
   };
 }
 

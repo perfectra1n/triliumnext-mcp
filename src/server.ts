@@ -7,9 +7,11 @@ import { TriliumClient, TriliumClientError } from './client/trilium.js';
 import {
   formatTriliumError,
   formatZodError,
+  formatDiffError,
   formatUnknownError,
   formatErrorForMCP,
 } from './errors/index.js';
+import { DiffApplicationError } from './tools/diff.js';
 import type { Config } from './config.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool } from './tools/search.js';
@@ -94,6 +96,8 @@ export async function createServer(config: Config): Promise<void> {
         structured = formatTriliumError(error);
       } else if (error instanceof ZodError) {
         structured = formatZodError(error, name);
+      } else if (error instanceof DiffApplicationError) {
+        structured = formatDiffError(error);
       } else {
         structured = formatUnknownError(error);
       }
