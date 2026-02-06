@@ -522,7 +522,7 @@ export async function handleNoteTool(
         });
       } else {
         // Append mode: concatenate new content to existing
-        const newContent = await convertContent(parsed.content!, parsed.format);
+        const newContent = await convertContent(parsed.content ?? '', parsed.format);
         finalContent = existingContent + newContent;
       }
       await client.updateNoteContent(parsed.noteId, finalContent);

@@ -243,7 +243,7 @@ export async function handleAttachmentTool(
         });
       } else {
         // Full replacement mode
-        finalContent = parsed.content!;
+        finalContent = parsed.content ?? '';
       }
       await client.updateAttachmentContent(parsed.attachmentId, finalContent);
       return {
