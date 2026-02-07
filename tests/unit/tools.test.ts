@@ -1379,6 +1379,40 @@ describe('Search Tools', () => {
       const result = await handleSearchTool(mockClient, 'unknown_tool', {});
       expect(result).toBeNull();
     });
+
+    describe('search query preprocessing', () => {
+      it('should preprocess OR in fulltext queries before calling client', async () => {
+        const mockClient = createMockClient({
+          searchNotes: vi.fn().mockResolvedValue({ results: [] }),
+        });
+
+        await handleSearchTool(mockClient, 'search_notes', {
+          query: 'authentication OR authorization',
+        });
+
+        expect(mockClient.searchNotes).toHaveBeenCalledWith(
+          expect.objectContaining({
+            search: 'note.content *=* authentication OR note.content *=* authorization',
+          })
+        );
+      });
+
+      it('should pass attribute OR queries through unchanged', async () => {
+        const mockClient = createMockClient({
+          searchNotes: vi.fn().mockResolvedValue({ results: [] }),
+        });
+
+        await handleSearchTool(mockClient, 'search_notes', {
+          query: '#book or #article',
+        });
+
+        expect(mockClient.searchNotes).toHaveBeenCalledWith(
+          expect.objectContaining({
+            search: '#book or #article',
+          })
+        );
+      });
+    });
   });
 });
 

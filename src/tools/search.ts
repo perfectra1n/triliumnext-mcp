@@ -3,6 +3,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { orderDirectionSchema, searchLimitSchema } from './validators.js';
+import { preprocessSearchQuery } from './queryPreprocessor.js';
 
 const searchNotesSchema = z.object({
   query: z
@@ -85,7 +86,7 @@ export async function handleSearchTool(
     case 'search_notes': {
       const parsed = searchNotesSchema.parse(args);
       const result = await client.searchNotes({
-        search: parsed.query,
+        search: preprocessSearchQuery(parsed.query),
         fastSearch: parsed.fastSearch,
         includeArchivedNotes: parsed.includeArchivedNotes,
         ancestorNoteId: parsed.ancestorNoteId,
