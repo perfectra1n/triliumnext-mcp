@@ -35,7 +35,7 @@ function isBareFulltextSegment(tokens: string[]): boolean {
     if (token.startsWith('#') || token.startsWith('~')) return false;
     if (token.startsWith('note.')) return false;
     if (token.startsWith('not(')) return false;
-    if (/[=!<>]/.test(token)) return false;
+    if (/[=<>]/.test(token)) return false;
     if (token.startsWith('(') || token.startsWith(')')) return false;
     return true;
   });

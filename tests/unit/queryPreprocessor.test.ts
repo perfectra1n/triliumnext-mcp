@@ -65,4 +65,58 @@ describe('preprocessSearchQuery', () => {
         .toBe('note.content *=* authentication OR note.content *=* "access control"');
     });
   });
+
+  describe('mixed fulltext and attribute OR', () => {
+    it('should wrap only the bare side of mixed OR', () => {
+      expect(preprocessSearchQuery('meeting or #project'))
+        .toBe('note.content *=* meeting OR #project');
+    });
+
+    it('should wrap bare side with property expression on other', () => {
+      expect(preprocessSearchQuery('meeting or note.title *=* project'))
+        .toBe('note.content *=* meeting OR note.title *=* project');
+    });
+  });
+
+  describe('multi-word bare segments with OR', () => {
+    it('should wrap each word in multi-word bare segment', () => {
+      expect(preprocessSearchQuery('meeting notes or project updates'))
+        .toBe('(note.content *=* meeting AND note.content *=* notes) OR (note.content *=* project AND note.content *=* updates)');
+    });
+
+    it('should handle single vs multi-word segments', () => {
+      expect(preprocessSearchQuery('auth or "access control" or security'))
+        .toBe('note.content *=* auth OR note.content *=* "access control" OR note.content *=* security');
+    });
+  });
+
+  describe('edge cases', () => {
+    it('should handle extra whitespace around OR', () => {
+      const result = preprocessSearchQuery('meeting   OR   project');
+      expect(result).toBe('note.content *=* meeting OR note.content *=* project');
+    });
+
+    it('should not treat "or" inside quoted strings as operator', () => {
+      expect(preprocessSearchQuery('"this or that"')).toBe('"this or that"');
+    });
+
+    it('should handle OR with negation attribute (leave unchanged)', () => {
+      expect(preprocessSearchQuery('#!archived or #!deleted')).toBe('#!archived or #!deleted');
+    });
+
+    it('should handle parenthesized attribute expressions (leave unchanged)', () => {
+      expect(preprocessSearchQuery('(#year >= 1950 AND #year <= 1960) or #classic'))
+        .toBe('(#year >= 1950 AND #year <= 1960) or #classic');
+    });
+
+    it('should handle relation syntax OR (leave unchanged)', () => {
+      expect(preprocessSearchQuery('~myRelation or ~otherRelation'))
+        .toBe('~myRelation or ~otherRelation');
+    });
+
+    it('should treat tokens with ! as bare fulltext (not operators)', () => {
+      expect(preprocessSearchQuery('important! or urgent!'))
+        .toBe('note.content *=* important! OR note.content *=* urgent!');
+    });
+  });
 });
