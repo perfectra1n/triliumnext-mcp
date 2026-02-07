@@ -13,7 +13,7 @@ const searchNotesSchema = z.object({
       'Trilium search query. Fulltext: "word1 word2" (implicit AND), "exact phrase" (quotes). ' +
         'Labels: #label, #label=value, #!label (negation). Relations: ~relation. ' +
         'Operators: = != *=* =* *= >= > < <=. ' +
-        'Boolean: "or" between terms, AND with parentheses. ' +
+        'Boolean: "term1 or term2" for OR between any terms, AND with parentheses. ' +
         'Examples: "meeting", "#project", "#status = active", "meeting #project"'
     ),
   fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
@@ -54,6 +54,7 @@ export function registerSearchTools(): Tool[] {
 
 **Combining searches:**
 - \`tolkien #book\` - Fulltext AND attribute (space = implicit AND)
+- \`meeting or project\` - OR between fulltext terms
 - \`#book or #article\` - OR between attributes
 - \`(#year >= 1950 AND #year <= 1960)\` - AND with parentheses for grouping
 
@@ -66,7 +67,8 @@ export function registerSearchTools(): Tool[] {
 - \`#project\` - Notes with "project" label
 - \`#status = active\` - Notes where status label equals "active"
 - \`meeting #project\` - Notes containing "meeting" with "project" label
-- \`#type = task #priority = high\` - Multiple label conditions (implicit AND)`,
+- \`#type = task #priority = high\` - Multiple label conditions (implicit AND)
+- \`meeting or project\` - Notes containing "meeting" OR "project"`,
       searchNotesSchema
     ),
     defineTool(
