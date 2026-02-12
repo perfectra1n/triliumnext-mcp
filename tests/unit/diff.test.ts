@@ -3,6 +3,7 @@ import {
   applySearchReplace,
   applyUnifiedDiff,
   resolveContent,
+  verifySearchReplaceResults,
   DiffApplicationError,
 } from '../../src/tools/diff.js';
 
@@ -202,6 +203,72 @@ describe('Diff Module', () => {
     it('should throw if none of content/changes/patch provided', async () => {
       await expect(resolveContent('existing', {})).rejects.toThrow(DiffApplicationError);
       await expect(resolveContent('existing', {})).rejects.toThrow('No content mode specified');
+    });
+  });
+
+  describe('verifySearchReplaceResults', () => {
+    it('should pass when all new_strings are present in read-back', () => {
+      expect(() =>
+        verifySearchReplaceResults('<p>Goodbye World</p>', [
+          { old_string: 'Hello', new_string: 'Goodbye' },
+        ])
+      ).not.toThrow();
+    });
+
+    it('should pass with multiple changes all present', () => {
+      expect(() =>
+        verifySearchReplaceResults('<p>Goodbye World, Goodbye Again</p>', [
+          { old_string: 'Hello World', new_string: 'Goodbye World' },
+          { old_string: 'Hello Again', new_string: 'Goodbye Again' },
+        ])
+      ).not.toThrow();
+    });
+
+    it('should throw when new_string is missing from read-back', () => {
+      expect(() =>
+        verifySearchReplaceResults('<p>Hello World</p>', [
+          { old_string: 'Hello', new_string: 'Goodbye' },
+        ])
+      ).toThrow(DiffApplicationError);
+      expect(() =>
+        verifySearchReplaceResults('<p>Hello World</p>', [
+          { old_string: 'Hello', new_string: 'Goodbye' },
+        ])
+      ).toThrow('read-back verification failed');
+    });
+
+    it('should skip verification for empty new_string (deletions)', () => {
+      expect(() =>
+        verifySearchReplaceResults('<p>World</p>', [
+          { old_string: 'Hello ', new_string: '' },
+        ])
+      ).not.toThrow();
+    });
+
+    it('should truncate long missing strings in error message', () => {
+      const longString = 'x'.repeat(300);
+      try {
+        verifySearchReplaceResults('unchanged', [
+          { old_string: 'a', new_string: longString },
+        ]);
+        expect.fail('should have thrown');
+      } catch (e) {
+        expect((e as Error).message).toContain('x'.repeat(200) + '...');
+        expect((e as Error).message).not.toContain('x'.repeat(201));
+      }
+    });
+
+    it('should report only the missing changes, not all', () => {
+      try {
+        verifySearchReplaceResults('<p>First is here</p>', [
+          { old_string: 'a', new_string: 'First is here' },
+          { old_string: 'b', new_string: 'Second is missing' },
+        ]);
+        expect.fail('should have thrown');
+      } catch (e) {
+        expect((e as Error).message).toContain('Second is missing');
+        expect((e as Error).message).not.toContain('First is here');
+      }
     });
   });
 });

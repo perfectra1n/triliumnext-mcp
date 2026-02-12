@@ -871,7 +871,9 @@ describe('Note Tools', () => {
 
     describe('update_note_content - diff modes', () => {
       it('should apply search/replace changes to existing content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello World</p>');
+        vi.mocked(mockClient.getNoteContent)
+          .mockResolvedValueOnce('<p>Hello World</p>') // initial read
+          .mockResolvedValueOnce('<p>Goodbye World</p>'); // verification read-back
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'update_note_content', {
@@ -884,9 +886,9 @@ describe('Note Tools', () => {
       });
 
       it('should apply multiple search/replace changes sequentially', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(
-          '<p>Hello World, Hello Again</p>'
-        );
+        vi.mocked(mockClient.getNoteContent)
+          .mockResolvedValueOnce('<p>Hello World, Hello Again</p>') // initial read
+          .mockResolvedValueOnce('<p>Goodbye World, Goodbye Again</p>'); // verification read-back
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'update_note_content', {
@@ -918,6 +920,20 @@ describe('Note Tools', () => {
           'abc123',
           'line1\nline2_modified\nline3\n'
         );
+      });
+
+      it('should throw when read-back verification fails (content not persisted)', async () => {
+        vi.mocked(mockClient.getNoteContent)
+          .mockResolvedValueOnce('<p>Hello World</p>') // initial read
+          .mockResolvedValueOnce('<p>Hello World</p>'); // read-back returns UNCHANGED content
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await expect(
+          handleNoteTool(mockClient, 'update_note_content', {
+            noteId: 'abc123',
+            changes: [{ old_string: 'Hello', new_string: 'Goodbye' }],
+          })
+        ).rejects.toThrow('read-back verification failed');
       });
 
       it('should not fetch existing content for full replacement mode', async () => {
@@ -1065,7 +1081,9 @@ describe('Note Tools', () => {
 
     describe('append_note_content - diff modes', () => {
       it('should apply search/replace changes to existing content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
+        vi.mocked(mockClient.getNoteContent)
+          .mockResolvedValueOnce('<p>Existing</p>') // initial read
+          .mockResolvedValueOnce('<p>Modified</p>'); // verification read-back
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'append_note_content', {
@@ -2597,7 +2615,9 @@ describe('Attachment Tools', () => {
 
     describe('update_attachment_content - diff modes', () => {
       it('should apply search/replace changes to existing attachment content', async () => {
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('old text content');
+        vi.mocked(mockClient.getAttachmentContent)
+          .mockResolvedValueOnce('old text content') // initial read
+          .mockResolvedValueOnce('new text content'); // verification read-back
         vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
 
         await handleAttachmentTool(mockClient, 'update_attachment_content', {

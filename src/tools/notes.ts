@@ -13,7 +13,7 @@ import {
 import { marked } from 'marked';
 import TurndownService from 'turndown';
 import { isImageMimeType } from './attachments.js';
-import { searchReplaceBlockSchema, resolveContent } from './diff.js';
+import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 
 /**
  * Convert markdown content to HTML if format is 'markdown'.
@@ -505,6 +505,13 @@ export async function handleNoteTool(
         }, parsed.format === 'markdown' ? (c) => convertContent(c, 'markdown') : undefined);
       }
       await client.updateNoteContent(parsed.noteId, finalContent);
+
+      // Verify search/replace changes were actually persisted
+      if (parsed.changes !== undefined) {
+        const readBack = await client.getNoteContent(parsed.noteId);
+        verifySearchReplaceResults(readBack, parsed.changes);
+      }
+
       return {
         content: [{ type: 'text', text: 'Note content updated successfully' }],
       };
@@ -526,6 +533,13 @@ export async function handleNoteTool(
         finalContent = existingContent + newContent;
       }
       await client.updateNoteContent(parsed.noteId, finalContent);
+
+      // Verify search/replace changes were actually persisted
+      if (parsed.changes !== undefined) {
+        const readBack = await client.getNoteContent(parsed.noteId);
+        verifySearchReplaceResults(readBack, parsed.changes);
+      }
+
       return {
         content: [{ type: 'text', text: 'Content appended to note successfully' }],
       };

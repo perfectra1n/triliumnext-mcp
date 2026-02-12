@@ -3,7 +3,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { positionSchema } from './validators.js';
-import { searchReplaceBlockSchema, resolveContent } from './diff.js';
+import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 
 // Supported image MIME types for visual content display
 export const IMAGE_MIME_TYPES = new Set([
@@ -246,6 +246,13 @@ export async function handleAttachmentTool(
         finalContent = parsed.content ?? '';
       }
       await client.updateAttachmentContent(parsed.attachmentId, finalContent);
+
+      // Verify search/replace changes were actually persisted
+      if (parsed.changes !== undefined) {
+        const readBack = await client.getAttachmentContent(parsed.attachmentId);
+        verifySearchReplaceResults(readBack, parsed.changes);
+      }
+
       return {
         content: [{ type: 'text', text: 'Attachment content updated successfully' }],
       };

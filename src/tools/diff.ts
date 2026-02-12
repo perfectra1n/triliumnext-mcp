@@ -80,6 +80,37 @@ export function applyUnifiedDiff(content: string, patch: string): string {
 }
 
 /**
+ * Verify that search/replace changes were persisted by checking that each
+ * non-empty new_string appears in the read-back content.
+ *
+ * Throws DiffApplicationError if verification fails.
+ */
+export function verifySearchReplaceResults(
+  readBackContent: string,
+  changes: SearchReplaceBlock[]
+): void {
+  const missing: string[] = [];
+  for (const { new_string } of changes) {
+    if (new_string !== '' && !readBackContent.includes(new_string)) {
+      const truncated =
+        new_string.length > 200 ? new_string.slice(0, 200) + '...' : new_string;
+      missing.push(truncated);
+    }
+  }
+
+  if (missing.length > 0) {
+    throw new DiffApplicationError(
+      `Content was sent to Trilium but read-back verification failed. ` +
+        `The following replacement strings were not found after saving:\n` +
+        missing.map((s) => `- "${s}"`).join('\n') +
+        '\n\n' +
+        `Trilium may have normalized or sanitized the HTML. ` +
+        `Use get_note_content to see what was actually saved, then retry with corrected HTML if needed.`
+    );
+  }
+}
+
+/**
  * Unified entry point for resolving content from one of three modes:
  * - Full replacement: `content` is provided directly
  * - Search/replace: `changes` array is applied to existing content
