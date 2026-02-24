@@ -135,7 +135,7 @@ export async function handleAttributeTool(
       }
 
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: `Attribute set successfully. attributeId: ${result.attributeId}, type: ${result.type}, name: ${result.name}` }],
       };
     }
 

@@ -173,7 +173,7 @@ export async function handleAttachmentTool(
         position: parsed.position,
       });
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: `Attachment created successfully. attachmentId: ${result.attachmentId}, title: ${result.title}` }],
       };
     }
 
@@ -194,7 +194,7 @@ export async function handleAttachmentTool(
       if (parsed.position) patch.position = parsed.position;
       const result = await client.updateAttachment(parsed.attachmentId, patch);
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: `Attachment ${result.attachmentId} updated successfully` }],
       };
     }
 

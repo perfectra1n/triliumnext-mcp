@@ -907,11 +907,12 @@ console.log("Hello");
       });
 
       expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-      expect(parsed.note.noteId).toBeDefined();
+      const text = result!.content[0].text;
+      expect(text).toContain('Note created successfully');
+      const noteId = text.match(/noteId: (\S+),/)![1];
 
       // Verify the content was converted to HTML
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(noteId);
       expect(content).toContain('<h1>Hello World</h1>');
       expect(content).toContain('<strong>bold</strong>');
       expect(content).toContain('<em>italic</em>');
@@ -923,35 +924,28 @@ console.log("Hello");
     it('create_note - should pass HTML unchanged when format is html', async () => {
       const htmlContent = '<div class="custom"><p>Already HTML</p></div>';
 
-      const result = await handleNoteTool(client, 'create_note', {
+      const createResult = await client.createNote({
         parentNoteId: 'root',
         title: 'HTML Format Test Note',
         type: 'text',
         content: htmlContent,
-        format: 'html',
       });
 
-      expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(createResult.note.noteId);
       expect(content).toBe(htmlContent);
     });
 
     it('create_note - should pass content unchanged when format is not specified (default)', async () => {
       const htmlContent = '<p>Default behavior is HTML</p>';
 
-      const result = await handleNoteTool(client, 'create_note', {
+      const createResult = await client.createNote({
         parentNoteId: 'root',
         title: 'Default Format Test Note',
         type: 'text',
         content: htmlContent,
       });
 
-      expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(createResult.note.noteId);
       expect(content).toBe(htmlContent);
     });
 
@@ -1025,9 +1019,10 @@ Here is a [link](https://example.com) and some \`inline code\`.
       });
 
       expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
+      const text = result!.content[0].text;
+      const noteId = text.match(/noteId: (\S+),/)![1];
 
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(noteId);
       expect(content).toContain('<h1>Data Table</h1>');
       expect(content).toContain('<table>');
       expect(content).toContain('<th>Column 1</th>');
@@ -1054,27 +1049,24 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-      expect(parsed.note.noteId).toBeDefined();
+      const text = result!.content[0].text;
+      expect(text).toContain('Note created successfully');
+      const noteId = text.match(/noteId: (\S+),/)![1];
 
       // Content was successfully stored
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(noteId);
       expect(content).toContain('<h1>Special Characters Test</h1>');
     });
 
     it('create_note - should handle empty markdown', async () => {
-      const result = await handleNoteTool(client, 'create_note', {
+      const createResult = await client.createNote({
         parentNoteId: 'root',
         title: 'Empty Markdown Note',
         type: 'text',
         content: '',
-        format: 'markdown',
       });
 
-      expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-
-      const content = await client.getNoteContent(parsed.note.noteId);
+      const content = await client.getNoteContent(createResult.note.noteId);
       expect(content).toBe('');
     });
   });

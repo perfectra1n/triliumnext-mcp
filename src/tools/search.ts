@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { orderDirectionSchema, searchLimitSchema } from './validators.js';
 import { preprocessSearchQuery } from './queryPreprocessor.js';
@@ -58,6 +59,16 @@ export function registerSearchTools(): Tool[] {
 - \`#book or #article\` - OR between attributes
 - \`(#year >= 1950 AND #year <= 1960)\` - AND with parentheses for grouping
 
+**Direct note lookup:**
+- \`id:abc123\` - Look up a note directly by its ID
+- Single alphanumeric tokens with digits are auto-detected as note IDs (e.g., \`abc123\`)
+
+**Title search:**
+- \`title:meeting\` - Search notes by title containing "meeting"
+- \`title:meeting notes\` - Title containing "meeting notes" (auto-quoted)
+- \`title:"exact title"\` - Title containing exact phrase
+- \`title:meeting or title:project\` - Title OR search
+
 **String operators:** = (exact), != (not equal), *=* (contains), =* (starts with), *= (ends with), %= (regex)
 
 **Note properties:** note.title, note.dateCreated, note.dateModified, note.parents.title, note.ancestors.title
@@ -68,7 +79,9 @@ export function registerSearchTools(): Tool[] {
 - \`#status = active\` - Notes where status label equals "active"
 - \`meeting #project\` - Notes containing "meeting" with "project" label
 - \`#type = task #priority = high\` - Multiple label conditions (implicit AND)
-- \`meeting or project\` - Notes containing "meeting" OR "project"`,
+- \`meeting or project\` - Notes containing "meeting" OR "project"
+- \`id:abc123def\` - Direct lookup of note by ID
+- \`title:weekly meeting\` - Notes with "weekly meeting" in title`,
       searchNotesSchema
     ),
     defineTool(
@@ -87,8 +100,37 @@ export async function handleSearchTool(
   switch (name) {
     case 'search_notes': {
       const parsed = searchNotesSchema.parse(args);
+      const preprocessed = preprocessSearchQuery(parsed.query);
+
+      if (preprocessed.type === 'noteIdLookup') {
+        try {
+          const note = await client.getNote(preprocessed.query);
+          const result = { results: [note] };
+          return {
+            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          };
+        } catch (error) {
+          if (error instanceof TriliumClientError && error.status === 404) {
+            // Note not found — fall back to regular search
+            const result = await client.searchNotes({
+              search: preprocessed.query,
+              fastSearch: parsed.fastSearch,
+              includeArchivedNotes: parsed.includeArchivedNotes,
+              ancestorNoteId: parsed.ancestorNoteId,
+              orderBy: parsed.orderBy,
+              orderDirection: parsed.orderDirection,
+              limit: parsed.limit,
+            });
+            return {
+              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+            };
+          }
+          throw error;
+        }
+      }
+
       const result = await client.searchNotes({
-        search: preprocessSearchQuery(parsed.query),
+        search: preprocessed.query,
         fastSearch: parsed.fastSearch,
         includeArchivedNotes: parsed.includeArchivedNotes,
         ancestorNoteId: parsed.ancestorNoteId,

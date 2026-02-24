@@ -415,7 +415,7 @@ export async function handleNoteTool(
         utcDateCreated: parsed.utcDateCreated,
       });
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: `Note created successfully. noteId: ${result.note.noteId}, branchId: ${result.branch.branchId}, title: ${result.note.title}` }],
       };
     }
 
@@ -484,7 +484,7 @@ export async function handleNoteTool(
       if (parsed.mime) patch.mime = parsed.mime;
       const result = await client.updateNote(parsed.noteId, patch);
       return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        content: [{ type: 'text', text: `Note ${result.noteId} updated successfully` }],
       };
     }
 
