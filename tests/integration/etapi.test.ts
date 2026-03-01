@@ -814,6 +814,108 @@ describe('TriliumNext ETAPI Integration Tests', () => {
     });
   });
 
+  describe('get_note_content with image attachments', () => {
+    it('should return image content blocks for note with image attachment', async () => {
+      // Create a note
+      const noteResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note With Image Attachment',
+        type: 'text',
+        content: '<p>Note with an attached image</p>',
+      });
+      const noteId = noteResult.note.noteId;
+
+      // Attach a 1x1 PNG pixel
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      await client.createAttachment({
+        ownerId: noteId,
+        role: 'image',
+        mime: 'image/png',
+        title: 'pixel.png',
+        content: pngBase64,
+      });
+
+      // Call handleNoteTool with includeImages (default true)
+      const result = await handleNoteTool(client, 'get_note_content', { noteId });
+
+      expect(result).not.toBeNull();
+      // Should have text block + image block
+      expect(result!.content.length).toBeGreaterThanOrEqual(2);
+      expect(result!.content[0]).toEqual({
+        type: 'text',
+        text: expect.stringContaining('Note with an attached image'),
+      });
+
+      const imageBlock = result!.content.find((b) => b.type === 'image') as {
+        type: 'image';
+        data: string;
+        mimeType: string;
+      };
+      expect(imageBlock).toBeDefined();
+      expect(imageBlock.mimeType).toBe('image/png');
+      expect(imageBlock.data).toBe(pngBase64);
+    });
+
+    it('should list non-image attachments in text output', async () => {
+      const noteResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note With PDF Attachment',
+        type: 'text',
+        content: '<p>Note with a PDF</p>',
+      });
+      const noteId = noteResult.note.noteId;
+
+      await client.createAttachment({
+        ownerId: noteId,
+        role: 'file',
+        mime: 'application/pdf',
+        title: 'report.pdf',
+        content: 'fake-pdf-content',
+      });
+
+      const result = await handleNoteTool(client, 'get_note_content', { noteId });
+
+      expect(result).not.toBeNull();
+      // Only text block, no image block
+      expect(result!.content).toHaveLength(1);
+      const text = (result!.content[0] as { type: 'text'; text: string }).text;
+      expect(text).toContain('report.pdf');
+      expect(text).toContain('application/pdf');
+      expect(text).toContain('get_attachment_content');
+    });
+
+    it('should skip attachment discovery when includeImages is false', async () => {
+      const noteResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note With Opt-Out',
+        type: 'text',
+        content: '<p>Opt out of images</p>',
+      });
+      const noteId = noteResult.note.noteId;
+
+      await client.createAttachment({
+        ownerId: noteId,
+        role: 'image',
+        mime: 'image/png',
+        title: 'ignored.png',
+        content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+      });
+
+      const result = await handleNoteTool(client, 'get_note_content', {
+        noteId,
+        includeImages: false,
+      });
+
+      expect(result).not.toBeNull();
+      expect(result!.content).toHaveLength(1);
+      expect(result!.content[0]).toEqual({
+        type: 'text',
+        text: '<p>Opt out of images</p>',
+      });
+    });
+  });
+
   describe('Enhanced create_note', () => {
     it('should create note with notePosition', async () => {
       const result = await client.createNote({

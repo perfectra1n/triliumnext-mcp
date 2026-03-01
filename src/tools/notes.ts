@@ -37,82 +37,6 @@ function convertHtmlToMarkdown(html: string): string {
   return turndownService.turndown(html);
 }
 
-// Regex patterns for Trilium attachment URLs
-const ATTACHMENT_URL_PATTERNS: RegExp[] = [
-  /api\/attachments\/([a-zA-Z0-9_]{4,32})\/image/g,
-  /api\/attachments\/([a-zA-Z0-9_]{4,32})\/content/g,
-  /api\/attachments\/([a-zA-Z0-9_]{4,32})(?:\/|"|'|\s|$)/g,
-  /data-attachment-id=["']([a-zA-Z0-9_]{4,32})["']/g,
-];
-
-/**
- * Extract attachment IDs from HTML content.
- */
-function extractAttachmentIds(html: string): string[] {
-  const ids = new Set<string>();
-  for (const pattern of ATTACHMENT_URL_PATTERNS) {
-    pattern.lastIndex = 0;
-    let match;
-    while ((match = pattern.exec(html)) !== null) {
-      ids.add(match[1]);
-    }
-  }
-  return Array.from(ids);
-}
-
-interface AttachmentFetchResult {
-  attachmentId: string;
-  success: boolean;
-  isImage: boolean;
-  error?: string;
-  data?: string;
-  mimeType?: string;
-  title?: string;
-}
-
-/**
- * Fetch an attachment's metadata and content (if image).
- * For images: fetches the actual image data.
- * For other types: returns metadata only so LLM can decide to fetch separately.
- */
-async function fetchAttachment(
-  client: TriliumClient,
-  attachmentId: string
-): Promise<AttachmentFetchResult> {
-  try {
-    const attachment = await client.getAttachment(attachmentId);
-    const isImage = isImageMimeType(attachment.mime);
-
-    if (isImage) {
-      const data = await client.getAttachmentContentAsBase64(attachmentId);
-      return {
-        attachmentId,
-        success: true,
-        isImage: true,
-        data,
-        mimeType: attachment.mime,
-        title: attachment.title,
-      };
-    }
-
-    // For non-images, return metadata only
-    return {
-      attachmentId,
-      success: true,
-      isImage: false,
-      mimeType: attachment.mime,
-      title: attachment.title,
-    };
-  } catch (error) {
-    return {
-      attachmentId,
-      success: false,
-      isImage: false,
-      error: error instanceof Error ? error.message : String(error),
-    };
-  }
-}
-
 // Zod schemas for validation
 const createNoteSchema = z.object({
   parentNoteId: z
@@ -188,7 +112,7 @@ const getNoteContentSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      'When true (default), parses HTML for embedded images and includes them as image content blocks. ' +
+      'When true (default), fetches note attachments and includes images as image content blocks. ' +
         'Set false for text-only.'
     ),
 });
@@ -467,21 +391,34 @@ export async function handleNoteTool(
       > = [];
 
       if (parsed.includeImages !== false) {
-        const attachmentIds = extractAttachmentIds(rawHtml);
-        const attachmentResults = await Promise.all(
-          attachmentIds.map((id) => fetchAttachment(client, id))
+        const attachments = await client.getNoteAttachments(parsed.noteId);
+        const imageAttachments = attachments.filter((a) => isImageMimeType(a.mime));
+        const otherAttachments = attachments.filter((a) => !isImageMimeType(a.mime));
+
+        // Fetch image content in parallel
+        const imageResults = await Promise.all(
+          imageAttachments.map(async (a) => {
+            try {
+              const data = await client.getAttachmentContentAsBase64(a.attachmentId);
+              return { attachmentId: a.attachmentId, success: true as const, data, mimeType: a.mime };
+            } catch (error) {
+              return {
+                attachmentId: a.attachmentId,
+                success: false as const,
+                error: error instanceof Error ? error.message : String(error),
+              };
+            }
+          })
         );
 
-        const images = attachmentResults.filter((r) => r.success && r.isImage);
-        const otherAttachments = attachmentResults.filter((r) => r.success && !r.isImage);
-        const failed = attachmentResults.filter((r) => !r.success);
+        const fetched = imageResults.filter((r) => r.success);
+        const failed = imageResults.filter((r) => !r.success);
 
         let finalText = textContent;
 
-        // Add info about other attachments that the LLM can fetch if needed
         if (otherAttachments.length > 0) {
           const attachmentList = otherAttachments
-            .map((a) => `- **${a.title || a.attachmentId}** (${a.mimeType}) - ID: \`${a.attachmentId}\``)
+            .map((a) => `- **${a.title || a.attachmentId}** (${a.mime}) - ID: \`${a.attachmentId}\``)
             .join('\n');
           finalText +=
             `\n\n---\n**Attachments:** This note has ${otherAttachments.length} non-image attachment(s) ` +
@@ -494,10 +431,8 @@ export async function handleNoteTool(
         }
 
         content.push({ type: 'text', text: finalText });
-        for (const img of images) {
-          if (img.data && img.mimeType) {
-            content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
-          }
+        for (const img of fetched) {
+          content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
         }
       } else {
         content.push({ type: 'text', text: textContent });
