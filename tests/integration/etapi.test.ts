@@ -1455,6 +1455,90 @@ This has <angle brackets> and "quotes" & ampersands.
     });
   });
 
+  describe('Data URL Support', () => {
+    it('create_note with image data URL - should extract mime and base64 from data URL', async () => {
+      // 1x1 PNG as a data URL
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const dataUrl = `data:image/png;base64,${pngBase64}`;
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Data URL Image Test',
+        type: 'text',
+        content: '<img src="image:0">',
+        images: [{
+          data: dataUrl,
+          mime: 'text/plain',  // should be overridden by data URL
+          filename: 'from-data-url.png',
+        }],
+      });
+
+      const text = result!.content[0].text;
+      const noteId = text.match(/noteId: (\S+),/)![1];
+
+      // Verify the attachment was created with the correct mime from the data URL
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments.length).toBe(1);
+      expect(attachments[0].mime).toBe('image/png');  // from data URL, not 'text/plain'
+      expect(attachments[0].title).toBe('from-data-url.png');
+
+      // Verify content was resolved
+      const content = await client.getNoteContent(noteId);
+      expect(content).not.toContain('image:0');
+      expect(content).toContain('api/attachments/');
+    });
+
+    it('create_note with file data URL - should extract mime and base64', async () => {
+      const csvContent = btoa('name,value\nfoo,1\nbar,2');
+      const dataUrl = `data:text/csv;base64,${csvContent}`;
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Data URL File Test',
+        type: 'text',
+        content: '<a href="file:0">CSV Data</a>',
+        files: [{
+          data: dataUrl,
+          mime: 'application/octet-stream',  // should be overridden
+          filename: 'data.csv',
+        }],
+      });
+
+      const text = result!.content[0].text;
+      const noteId = text.match(/noteId: (\S+),/)![1];
+
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments.length).toBe(1);
+      expect(attachments[0].mime).toBe('text/csv');  // from data URL
+      expect(attachments[0].title).toBe('data.csv');
+    });
+
+    it('raw base64 should still work with explicit mime', async () => {
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Raw Base64 Test',
+        type: 'text',
+        content: '<img src="image:0">',
+        images: [{
+          data: pngBase64,  // raw base64, not a data URL
+          mime: 'image/png',
+          filename: 'raw.png',
+        }],
+      });
+
+      const text = result!.content[0].text;
+      const noteId = text.match(/noteId: (\S+),/)![1];
+
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments.length).toBe(1);
+      expect(attachments[0].mime).toBe('image/png');
+    });
+  });
+
   describe('Attachment Inline Viewing and Download', () => {
     let testNoteId: string;
 

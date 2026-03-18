@@ -1333,6 +1333,108 @@ describe('Note Tools', () => {
       });
     });
 
+    describe('data URL support', () => {
+      it('should parse data URL and extract mime for images', async () => {
+        const mockResult = {
+          note: { noteId: 'note123', title: 'Data URL Test' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+        vi.mocked(mockClient.createAttachment).mockResolvedValue({
+          attachmentId: 'att001',
+          title: 'photo.png',
+        } as any);
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Data URL Test',
+          type: 'text',
+          content: '<img src="image:0">',
+          images: [{
+            data: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4IBIAAAAwAQCdASoBAAEAAkA4JYgCdAEO/hepAA==',
+            mime: 'image/png',  // should be overridden by data URL mime
+            filename: 'photo.png',
+          }],
+        });
+
+        // The mime should come from the data URL (image/webp), not the explicit field (image/png)
+        expect(mockClient.createAttachment).toHaveBeenCalledWith({
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'image/webp',
+          title: 'photo.png',
+          content: 'UklGRh4AAABXRUJQVlA4IBIAAAAwAQCdASoBAAEAAkA4JYgCdAEO/hepAA==',
+        });
+      });
+
+      it('should parse data URL and extract mime for files', async () => {
+        const mockResult = {
+          note: { noteId: 'note123', title: 'File Data URL' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+        vi.mocked(mockClient.createAttachment).mockResolvedValue({
+          attachmentId: 'att001',
+          title: 'doc.pdf',
+        } as any);
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'File Data URL',
+          type: 'text',
+          content: '<a href="file:0">Doc</a>',
+          files: [{
+            data: 'data:application/pdf;base64,JVBERi0xLjQ=',
+            mime: 'text/plain',  // should be overridden
+            filename: 'doc.pdf',
+          }],
+        });
+
+        expect(mockClient.createAttachment).toHaveBeenCalledWith({
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'application/pdf',
+          title: 'doc.pdf',
+          content: 'JVBERi0xLjQ=',
+        });
+      });
+
+      it('should use raw base64 and explicit mime when not a data URL', async () => {
+        const mockResult = {
+          note: { noteId: 'note123', title: 'Raw Base64' },
+          branch: { branchId: 'branch123' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+        vi.mocked(mockClient.createAttachment).mockResolvedValue({
+          attachmentId: 'att001',
+          title: 'photo.png',
+        } as any);
+        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Raw Base64',
+          type: 'text',
+          content: '<img src="image:0">',
+          images: [{
+            data: 'iVBORw0KGgo=',
+            mime: 'image/png',
+            filename: 'photo.png',
+          }],
+        });
+
+        expect(mockClient.createAttachment).toHaveBeenCalledWith({
+          ownerId: 'note123',
+          role: 'image',
+          mime: 'image/png',
+          title: 'photo.png',
+          content: 'iVBORw0KGgo=',
+        });
+      });
+    });
+
     describe('file embedding', () => {
       const mockFile = { data: 'cGRmLWNvbnRlbnQ=', mime: 'application/pdf', filename: 'report.pdf' };
 

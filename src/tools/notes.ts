@@ -16,16 +16,41 @@ import { isImageMimeType } from './attachments.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 
 /**
+ * Parse a data URL (data:mime;base64,content) and extract the MIME type and base64 content.
+ * Returns null if the string is not a data URL.
+ */
+function parseDataUrl(data: string): { mime: string; base64: string } | null {
+  const match = data.match(/^data:([^;]+);base64,(.+)$/s);
+  if (!match) return null;
+  return { mime: match[1], base64: match[2] };
+}
+
+/**
+ * Resolve the data field: if it's a data URL, extract base64 + mime (overriding explicit mime).
+ * If it's raw base64, return as-is with the explicit mime.
+ */
+function resolveAttachmentData(entry: { data: string; mime: string }): { data: string; mime: string } {
+  const parsed = parseDataUrl(entry.data);
+  if (parsed) {
+    return { data: parsed.base64, mime: parsed.mime };
+  }
+  return { data: entry.data, mime: entry.mime };
+}
+
+/**
  * Schema for an image to embed in a note.
  */
 const imageEntrySchema = z.object({
-  data: z.string().describe('Base64-encoded image data'),
-  mime: z.string().describe('MIME type of the image (e.g., "image/png", "image/jpeg")'),
+  data: z.string().describe(
+    'Image data as base64 string or data URL (data:image/png;base64,...). ' +
+    'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
+  ),
+  mime: z.string().describe('MIME type of the image (e.g., "image/png", "image/jpeg"). Ignored if data is a data URL.'),
   filename: z.string().describe('Filename for the image attachment (e.g., "screenshot.png")'),
 });
 
 const imagesFieldSchema = z.array(imageEntrySchema).optional().describe(
-  'Optional array of images to embed in the note. Each image has base64 data, MIME type, and filename. ' +
+  'Optional array of images to embed in the note. The data field accepts raw base64 or a data URL (data:image/png;base64,...). ' +
   'Reference images in your content using placeholder URLs: in markdown use ![alt](image:0), ![alt](image:1), etc. ' +
   'In HTML use <img src="image:0">. The number is the zero-based index into this array. ' +
   'Images without a corresponding placeholder are appended at the end of the content.'
@@ -42,17 +67,18 @@ async function processImages(
   htmlContent: string,
   images: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
-  // Create all attachments in parallel
+  // Create all attachments in parallel (resolve data URLs first)
   const attachments = await Promise.all(
-    images.map((img) =>
-      client.createAttachment({
+    images.map((img) => {
+      const resolved = resolveAttachmentData(img);
+      return client.createAttachment({
         ownerId,
         role: 'image',
-        mime: img.mime,
+        mime: resolved.mime,
         title: img.filename,
-        content: img.data,
-      })
-    )
+        content: resolved.data,
+      });
+    })
   );
 
   // Replace placeholder references: src="image:N" -> real Trilium URL
@@ -85,13 +111,16 @@ async function processImages(
  * Schema for a file to embed in a note.
  */
 const fileEntrySchema = z.object({
-  data: z.string().describe('Base64-encoded file data'),
-  mime: z.string().describe('MIME type of the file (e.g., "application/pdf", "text/csv")'),
+  data: z.string().describe(
+    'File data as base64 string or data URL (data:application/pdf;base64,...). ' +
+    'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
+  ),
+  mime: z.string().describe('MIME type of the file (e.g., "application/pdf", "text/csv"). Ignored if data is a data URL.'),
   filename: z.string().describe('Filename for the file attachment (e.g., "report.pdf")'),
 });
 
 const filesFieldSchema = z.array(fileEntrySchema).optional().describe(
-  'Optional array of files to attach and embed as download links in the note. Each file has base64 data, MIME type, and filename. ' +
+  'Optional array of files to attach and embed as download links in the note. The data field accepts raw base64 or a data URL. ' +
   'Reference files in your content using placeholder URLs: in markdown use [label](file:0), [label](file:1), etc. ' +
   'In HTML use <a href="file:0">label</a>. The number is the zero-based index into this array. ' +
   'Files without a corresponding placeholder are appended at the end of the content as download links.'
@@ -108,17 +137,18 @@ async function processFiles(
   htmlContent: string,
   files: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
-  // Create all attachments in parallel
+  // Create all attachments in parallel (resolve data URLs first)
   const attachments = await Promise.all(
-    files.map((file) =>
-      client.createAttachment({
+    files.map((file) => {
+      const resolved = resolveAttachmentData(file);
+      return client.createAttachment({
         ownerId,
         role: 'file',
-        mime: file.mime,
+        mime: resolved.mime,
         title: file.filename,
-        content: file.data,
-      })
-    )
+        content: resolved.data,
+      });
+    })
   );
 
   // Replace placeholder references: href="file:N" -> real Trilium URL
