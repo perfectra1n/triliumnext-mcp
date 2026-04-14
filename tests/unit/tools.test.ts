@@ -822,7 +822,8 @@ describe('Note Tools', () => {
           'abc123',
           '<p>Updated content</p>'
         );
-        expect(result!.content[0].text).toContain('updated successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
       });
 
       it('should update with empty content', async () => {
@@ -1056,7 +1057,8 @@ describe('Note Tools', () => {
           'abc123',
           '<p>Existing content</p><p>New content</p>'
         );
-        expect(result!.content[0].text).toContain('appended');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
       });
 
       it('should append to empty note', async () => {
@@ -1592,7 +1594,8 @@ describe('Note Tools', () => {
 
         expect(result).not.toBeNull();
         expect(mockClient.deleteNote).toHaveBeenCalledWith('abc123');
-        expect(result!.content[0].text).toContain('deleted successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
       });
 
       it('should reject missing noteId', async () => {
@@ -2069,7 +2072,8 @@ describe('Organization Tools', () => {
         });
 
         expect(mockClient.deleteBranch).toHaveBeenCalledWith('branch123');
-        expect(result?.content[0].text).toContain('Branch branch123 deleted successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, branchId: 'branch123' });
       });
 
       it('should reject missing branchId', async () => {
@@ -2370,7 +2374,8 @@ describe('Attribute Tools', () => {
 
         expect(result).not.toBeNull();
         expect(mockClient.deleteAttribute).toHaveBeenCalledWith('attr123');
-        expect(result!.content[0].text).toContain('deleted successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, attributeId: 'attr123' });
       });
 
       it('should reject missing attributeId', async () => {
@@ -2850,7 +2855,8 @@ describe('Attachment Tools', () => {
 
         expect(result).not.toBeNull();
         expect(mockClient.deleteAttachment).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0].text).toContain('deleted successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, attachmentId: 'attach123' });
       });
 
       it('should reject missing attachmentId', async () => {
@@ -3043,7 +3049,8 @@ describe('Attachment Tools', () => {
           'attach123',
           'Updated content'
         );
-        expect(result!.content[0].text).toContain('updated successfully');
+        const parsed = JSON.parse(result!.content[0].text);
+        expect(parsed).toEqual({ success: true, attachmentId: 'attach123' });
       });
 
       it('should handle large content', async () => {

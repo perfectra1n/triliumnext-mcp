@@ -588,7 +588,7 @@ export async function handleNoteTool(
       }
 
       return {
-        content: [{ type: 'text', text: `Note created successfully. noteId: ${result.note.noteId}, branchId: ${result.branch.branchId}, title: ${result.note.title}` }],
+        content: [{ type: 'text', text: JSON.stringify({ note: result.note, branch: result.branch }, null, 2) }],
       };
     }
 
@@ -668,7 +668,7 @@ export async function handleNoteTool(
       if (parsed.mime) patch.mime = parsed.mime;
       const result = await client.updateNote(parsed.noteId, patch);
       return {
-        content: [{ type: 'text', text: `Note ${result.noteId} updated successfully` }],
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     }
 
@@ -706,7 +706,7 @@ export async function handleNoteTool(
       }
 
       return {
-        content: [{ type: 'text', text: 'Note content updated successfully' }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
       };
     }
 
@@ -743,7 +743,7 @@ export async function handleNoteTool(
       }
 
       return {
-        content: [{ type: 'text', text: 'Content appended to note successfully' }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
       };
     }
 
@@ -751,7 +751,7 @@ export async function handleNoteTool(
       const parsed = deleteNoteSchema.parse(args);
       await client.deleteNote(parsed.noteId);
       return {
-        content: [{ type: 'text', text: `Note ${parsed.noteId} deleted successfully` }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
       };
     }
 
@@ -762,9 +762,7 @@ export async function handleNoteTool(
         content: [
           {
             type: 'text',
-            text: result.success
-              ? `Note ${parsed.noteId} has been restored successfully.`
-              : `Failed to restore note ${parsed.noteId}.`,
+            text: JSON.stringify(result, null, 2),
           },
         ],
       };

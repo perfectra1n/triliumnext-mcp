@@ -135,7 +135,7 @@ export async function handleAttributeTool(
       }
 
       return {
-        content: [{ type: 'text', text: `Attribute set successfully. attributeId: ${result.attributeId}, type: ${result.type}, name: ${result.name}` }],
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     }
 
@@ -143,7 +143,7 @@ export async function handleAttributeTool(
       const parsed = deleteAttributeSchema.parse(args);
       await client.deleteAttribute(parsed.attributeId);
       return {
-        content: [{ type: 'text', text: `Attribute ${parsed.attributeId} deleted successfully` }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, attributeId: parsed.attributeId }, null, 2) }],
       };
     }
 

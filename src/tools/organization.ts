@@ -145,7 +145,7 @@ export async function handleOrganizationTool(
       const parsed = deleteBranchSchema.parse(args);
       await client.deleteBranch(parsed.branchId);
       return {
-        content: [{ type: 'text', text: `Branch ${parsed.branchId} deleted successfully` }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, branchId: parsed.branchId }, null, 2) }],
       };
     }
 

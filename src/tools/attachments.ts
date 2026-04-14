@@ -194,7 +194,7 @@ export async function handleAttachmentTool(
       if (parsed.position) patch.position = parsed.position;
       const result = await client.updateAttachment(parsed.attachmentId, patch);
       return {
-        content: [{ type: 'text', text: `Attachment ${result.attachmentId} updated successfully` }],
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     }
 
@@ -202,7 +202,7 @@ export async function handleAttachmentTool(
       const parsed = deleteAttachmentSchema.parse(args);
       await client.deleteAttachment(parsed.attachmentId);
       return {
-        content: [{ type: 'text', text: `Attachment ${parsed.attachmentId} deleted successfully` }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
       };
     }
 
@@ -254,7 +254,7 @@ export async function handleAttachmentTool(
       }
 
       return {
-        content: [{ type: 'text', text: 'Attachment content updated successfully' }],
+        content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
       };
     }
 
