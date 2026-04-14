@@ -1010,8 +1010,9 @@ console.log("Hello");
 
       expect(result).not.toBeNull();
       const text = result!.content[0].text;
-      expect(text).toContain('Note created successfully');
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const parsed = JSON.parse(text);
+      expect(parsed.note).toBeDefined();
+      const noteId = parsed.note.noteId;
 
       // Verify the content was converted to HTML
       const content = await client.getNoteContent(noteId);
@@ -1122,7 +1123,7 @@ Here is a [link](https://example.com) and some \`inline code\`.
 
       expect(result).not.toBeNull();
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).toContain('<h1>Data Table</h1>');
@@ -1152,8 +1153,9 @@ This has <angle brackets> and "quotes" & ampersands.
 
       expect(result).not.toBeNull();
       const text = result!.content[0].text;
-      expect(text).toContain('Note created successfully');
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const parsed = JSON.parse(text);
+      expect(parsed.note).toBeDefined();
+      const noteId = parsed.note.noteId;
 
       // Content was successfully stored
       const content = await client.getNoteContent(noteId);
@@ -1189,8 +1191,9 @@ This has <angle brackets> and "quotes" & ampersands.
 
       expect(result).not.toBeNull();
       const text = result!.content[0].text;
-      expect(text).toContain('Note created successfully');
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const parsed = JSON.parse(text);
+      expect(parsed.note).toBeDefined();
+      const noteId = parsed.note.noteId;
 
       // Verify the content has resolved attachment URL (not placeholder)
       const content = await client.getNoteContent(noteId);
@@ -1217,7 +1220,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).toContain('<p>No placeholder here</p>');
@@ -1238,7 +1241,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).not.toContain('image:0');
@@ -1262,7 +1265,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).toContain('<h1>Hello</h1>');
@@ -1280,7 +1283,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).toBe('<p>Just text</p>');
@@ -1350,7 +1353,7 @@ This has <angle brackets> and "quotes" & ampersands.
 
       expect(result).not.toBeNull();
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       // Verify the content has resolved attachment URL (not placeholder)
       const content = await client.getNoteContent(noteId);
@@ -1377,7 +1380,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).toContain('<p>No file placeholder here</p>');
@@ -1399,7 +1402,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const content = await client.getNoteContent(noteId);
       expect(content).not.toContain('image:0');
@@ -1475,7 +1478,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       // Verify the attachment was created with the correct mime from the data URL
       const attachments = await client.getNoteAttachments(noteId);
@@ -1506,7 +1509,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const attachments = await client.getNoteAttachments(noteId);
       expect(attachments.length).toBe(1);
@@ -1531,7 +1534,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const text = result!.content[0].text;
-      const noteId = text.match(/noteId: (\S+),/)![1];
+      const noteId = JSON.parse(text).note.noteId;
 
       const attachments = await client.getNoteAttachments(noteId);
       expect(attachments.length).toBe(1);

@@ -71,11 +71,10 @@ describe('MCP Transport Integration Tests', () => {
         },
       });
       const createContent = createResponse.content as Array<{ type: string; text: string }>;
-      expect(createContent[0].text).toContain('Note created successfully');
-      expect(createContent[0].text).toContain('Stdio Test Note');
-      const noteIdMatch = createContent[0].text.match(/noteId: (\w+)/);
-      expect(noteIdMatch).toBeTruthy();
-      const noteId = noteIdMatch![1];
+      const parsed = JSON.parse(createContent[0].text);
+      expect(parsed.note).toBeDefined();
+      expect(parsed.note.title).toBe('Stdio Test Note');
+      const noteId = parsed.note.noteId;
 
       // Delete
       const deleteResponse = await client.callTool({
@@ -136,13 +135,12 @@ describe('MCP Transport Integration Tests', () => {
         },
       });
       const createContent = createResponse.content as Array<{ type: string; text: string }>;
-      expect(createContent[0].text).toContain('Note created successfully');
-      expect(createContent[0].text).toContain('HTTP Test Note');
-      const noteIdMatch = createContent[0].text.match(/noteId: (\w+)/);
-      expect(noteIdMatch).toBeTruthy();
+      const parsed = JSON.parse(createContent[0].text);
+      expect(parsed.note).toBeDefined();
+      expect(parsed.note.title).toBe('HTTP Test Note');
 
       // Delete
-      await client.callTool({ name: 'delete_note', arguments: { noteId: noteIdMatch![1] } });
+      await client.callTool({ name: 'delete_note', arguments: { noteId: parsed.note.noteId } });
     });
 
     it('should handle search_notes', async () => {
