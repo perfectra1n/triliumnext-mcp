@@ -5,10 +5,11 @@ import { registerOrganizationTools, handleOrganizationTool } from '../../src/too
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from '../../src/tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
-import { registerAttachmentTools, handleAttachmentTool } from '../../src/tools/attachments.js';
+import { registerAttachmentTools, handleAttachmentTool, isBinaryMimeType } from '../../src/tools/attachments.js';
 import { registerRevisionTools, handleRevisionTool } from '../../src/tools/revisions.js';
 import type { TriliumClient } from '../../src/client/trilium.js';
 import { DiffApplicationError } from '../../src/tools/diff.js';
+import { NOTE_TYPES } from '../../src/tools/validators.js';
 
 // Mock client factory
 function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient {
@@ -51,9 +52,51 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     getAttachmentContent: vi.fn(),
     getAttachmentContentAsBase64: vi.fn(),
     updateAttachmentContent: vi.fn(),
+    updateAttachmentContentBinary: vi.fn(),
+    updateNoteContentBinary: vi.fn(),
     ...overrides,
   } as unknown as TriliumClient;
 }
+
+describe('NOTE_TYPES and NoteType sync', () => {
+  it('should contain all 15 expected note types', () => {
+    expect(NOTE_TYPES).toHaveLength(15);
+    const types = new Set(NOTE_TYPES);
+    expect(types.has('text')).toBe(true);
+    expect(types.has('code')).toBe(true);
+    expect(types.has('render')).toBe(true);
+    expect(types.has('file')).toBe(true);
+    expect(types.has('image')).toBe(true);
+    expect(types.has('search')).toBe(true);
+    expect(types.has('relationMap')).toBe(true);
+    expect(types.has('book')).toBe(true);
+    expect(types.has('noteMap')).toBe(true);
+    expect(types.has('mermaid')).toBe(true);
+    expect(types.has('webView')).toBe(true);
+    expect(types.has('shortcut')).toBe(true);
+    expect(types.has('doc')).toBe(true);
+    expect(types.has('contentWidget')).toBe(true);
+    expect(types.has('launcher')).toBe(true);
+  });
+});
+
+describe('isBinaryMimeType', () => {
+  it('should return true for binary MIME types', () => {
+    expect(isBinaryMimeType('image/png')).toBe(true);
+    expect(isBinaryMimeType('image/jpeg')).toBe(true);
+    expect(isBinaryMimeType('application/pdf')).toBe(true);
+    expect(isBinaryMimeType('application/octet-stream')).toBe(true);
+  });
+
+  it('should return false for text MIME types', () => {
+    expect(isBinaryMimeType('text/plain')).toBe(false);
+    expect(isBinaryMimeType('text/html')).toBe(false);
+    expect(isBinaryMimeType('text/csv')).toBe(false);
+    expect(isBinaryMimeType('application/json')).toBe(false);
+    expect(isBinaryMimeType('application/javascript')).toBe(false);
+    expect(isBinaryMimeType('image/svg+xml')).toBe(false);
+  });
+});
 
 describe('Note Tools', () => {
   describe('registerNoteTools', () => {
@@ -346,6 +389,50 @@ describe('Note Tools', () => {
             content: 'content',
           })
         ).rejects.toThrow();
+      });
+
+      it('should accept mermaid note type', async () => {
+        const mockResult = { note: { noteId: 'merm1' }, branch: { branchId: 'b1' } };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Mermaid Diagram',
+          type: 'mermaid',
+          content: 'graph TD; A-->B;',
+        });
+
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'mermaid' })
+        );
+      });
+
+      it('should create binary note with two-step upload', async () => {
+        const mockResult = {
+          note: { noteId: 'img123' },
+          branch: { branchId: 'b1' },
+        };
+        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
+        vi.mocked(mockClient.updateNoteContentBinary).mockResolvedValue(undefined);
+
+        const pngBase64 = 'iVBORw0KGgo=';
+        await handleNoteTool(mockClient, 'create_note', {
+          parentNoteId: 'root',
+          title: 'Test Image',
+          type: 'image',
+          mime: 'image/png',
+          content: pngBase64,
+        });
+
+        // Should create note with empty content for binary types
+        expect(mockClient.createNote).toHaveBeenCalledWith(
+          expect.objectContaining({ content: '' })
+        );
+        // Should PUT decoded binary content
+        expect(mockClient.updateNoteContentBinary).toHaveBeenCalledWith(
+          'img123',
+          expect.any(Buffer)
+        );
       });
 
       it('should convert markdown to HTML when format is markdown', async () => {
@@ -1161,7 +1248,7 @@ describe('Note Tools', () => {
     describe('image embedding', () => {
       const mockImage = { data: 'base64data', mime: 'image/png', filename: 'photo.png' };
 
-      it('should create note with images and resolve placeholders', async () => {
+      it('should create note with images using two-step binary upload', async () => {
         const mockResult = {
           note: { noteId: 'note123', title: 'With Image' },
           branch: { branchId: 'branch123' },
@@ -1171,6 +1258,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         const result = await handleNoteTool(mockClient, 'create_note', {
@@ -1182,13 +1270,19 @@ describe('Note Tools', () => {
         });
 
         expect(result).not.toBeNull();
+        // Step 1: create attachment with empty content
         expect(mockClient.createAttachment).toHaveBeenCalledWith({
           ownerId: 'note123',
           role: 'image',
           mime: 'image/png',
           title: 'photo.png',
-          content: 'base64data',
+          content: '',
         });
+        // Step 2: upload decoded binary content
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
           'note123',
           '<p>Hello</p><img src="api/attachments/att001/image/photo.png">'
@@ -1205,6 +1299,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1248,6 +1343,7 @@ describe('Note Tools', () => {
         vi.mocked(mockClient.createAttachment)
           .mockResolvedValueOnce({ attachmentId: 'att001', title: 'a.png' } as any)
           .mockResolvedValueOnce({ attachmentId: 'att002', title: 'b.jpg' } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1262,6 +1358,7 @@ describe('Note Tools', () => {
         });
 
         expect(mockClient.createAttachment).toHaveBeenCalledTimes(2);
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledTimes(2);
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
           'note123',
           '<img src="api/attachments/att001/image/a.png"><p>Text</p><img src="api/attachments/att002/image/b.jpg">'
@@ -1273,6 +1370,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'update_note_content', {
@@ -1286,8 +1384,12 @@ describe('Note Tools', () => {
           role: 'image',
           mime: 'image/png',
           title: 'photo.png',
-          content: 'base64data',
+          content: '',
         });
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
           'note123',
           '<p>New content</p><img src="api/attachments/att001/image/photo.png">'
@@ -1300,6 +1402,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'append_note_content', {
@@ -1346,6 +1449,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1366,8 +1470,13 @@ describe('Note Tools', () => {
           role: 'image',
           mime: 'image/webp',
           title: 'photo.png',
-          content: 'UklGRh4AAABXRUJQVlA4IBIAAAAwAQCdASoBAAEAAkA4JYgCdAEO/hepAA==',
+          content: '',
         });
+        // Binary content should have been uploaded separately
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
       });
 
       it('should parse data URL and extract mime for files', async () => {
@@ -1380,6 +1489,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'doc.pdf',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1394,13 +1504,18 @@ describe('Note Tools', () => {
           }],
         });
 
+        // Mime overridden by data URL to application/pdf (binary), so two-step
         expect(mockClient.createAttachment).toHaveBeenCalledWith({
           ownerId: 'note123',
           role: 'file',
           mime: 'application/pdf',
           title: 'doc.pdf',
-          content: 'JVBERi0xLjQ=',
+          content: '',
         });
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
       });
 
       it('should use raw base64 and explicit mime when not a data URL', async () => {
@@ -1413,6 +1528,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'photo.png',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1427,20 +1543,25 @@ describe('Note Tools', () => {
           }],
         });
 
+        // image/png is binary, so two-step with empty content
         expect(mockClient.createAttachment).toHaveBeenCalledWith({
           ownerId: 'note123',
           role: 'image',
           mime: 'image/png',
           title: 'photo.png',
-          content: 'iVBORw0KGgo=',
+          content: '',
         });
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
       });
     });
 
     describe('file embedding', () => {
       const mockFile = { data: 'cGRmLWNvbnRlbnQ=', mime: 'application/pdf', filename: 'report.pdf' };
 
-      it('should create note with files and resolve placeholders', async () => {
+      it('should create note with binary files using two-step upload', async () => {
         const mockResult = {
           note: { noteId: 'note123', title: 'With File' },
           branch: { branchId: 'branch123' },
@@ -1450,6 +1571,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'report.pdf',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1460,13 +1582,18 @@ describe('Note Tools', () => {
           files: [mockFile],
         });
 
+        // application/pdf is binary, so two-step
         expect(mockClient.createAttachment).toHaveBeenCalledWith({
           ownerId: 'note123',
           role: 'file',
           mime: 'application/pdf',
           title: 'report.pdf',
-          content: 'cGRmLWNvbnRlbnQ=',
+          content: '',
         });
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'att001',
+          expect.any(Buffer)
+        );
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
           'note123',
           '<p>Download: <a href="api/attachments/att001/download">Report</a></p>'
@@ -1483,6 +1610,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'report.pdf',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1508,6 +1636,7 @@ describe('Note Tools', () => {
         vi.mocked(mockClient.createAttachment)
           .mockResolvedValueOnce({ attachmentId: 'img001', title: 'photo.png' } as any)
           .mockResolvedValueOnce({ attachmentId: 'file001', title: 'report.pdf' } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'create_note', {
@@ -1520,6 +1649,7 @@ describe('Note Tools', () => {
         });
 
         expect(mockClient.createAttachment).toHaveBeenCalledTimes(2);
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledTimes(2);
         expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
           'note123',
           '<img src="api/attachments/img001/image/photo.png"><a href="api/attachments/file001/download">Report</a>'
@@ -1551,6 +1681,7 @@ describe('Note Tools', () => {
           attachmentId: 'att001',
           title: 'report.pdf',
         } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
         vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
 
         await handleNoteTool(mockClient, 'append_note_content', {
@@ -2714,22 +2845,47 @@ describe('Attachment Tools', () => {
         });
       });
 
-      it('should create attachment with position', async () => {
+      it('should create binary attachment with two-step upload', async () => {
         const mockAttachment = { attachmentId: 'attach123', position: 100 };
         vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
 
         await handleAttachmentTool(mockClient, 'create_attachment', {
           ownerId: 'note123',
           role: 'image',
           mime: 'image/png',
           title: 'image.png',
-          content: 'base64data',
+          content: 'iVBORw0KGgo=',
           position: 100,
         });
 
+        // Step 1: create with empty content
         expect(mockClient.createAttachment).toHaveBeenCalledWith(
-          expect.objectContaining({ position: 100 })
+          expect.objectContaining({ content: '', position: 100 })
         );
+        // Step 2: PUT binary
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'attach123',
+          expect.any(Buffer)
+        );
+      });
+
+      it('should create text attachment with single-step', async () => {
+        const mockAttachment = { attachmentId: 'attach456' };
+        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
+
+        await handleAttachmentTool(mockClient, 'create_attachment', {
+          ownerId: 'note123',
+          role: 'file',
+          mime: 'text/csv',
+          title: 'data.csv',
+          content: 'name,value',
+        });
+
+        expect(mockClient.createAttachment).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'name,value' })
+        );
+        expect(mockClient.updateAttachmentContentBinary).not.toHaveBeenCalled();
       });
 
       it('should reject missing required fields', async () => {
@@ -3036,7 +3192,8 @@ describe('Attachment Tools', () => {
     });
 
     describe('update_attachment_content', () => {
-      it('should update attachment content', async () => {
+      it('should update text attachment content', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
         vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
 
         const result = await handleAttachmentTool(mockClient, 'update_attachment_content', {
@@ -3053,7 +3210,25 @@ describe('Attachment Tools', () => {
         expect(parsed).toEqual({ success: true, attachmentId: 'attach123' });
       });
 
+      it('should update binary attachment content with two-step', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'image/png' } as any);
+        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
+
+        const result = await handleAttachmentTool(mockClient, 'update_attachment_content', {
+          attachmentId: 'attach123',
+          content: 'iVBORw0KGgo=',
+        });
+
+        expect(result).not.toBeNull();
+        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
+          'attach123',
+          expect.any(Buffer)
+        );
+        expect(mockClient.updateAttachmentContent).not.toHaveBeenCalled();
+      });
+
       it('should handle large content', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
         vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
         const largeContent = 'x'.repeat(100000);
 
@@ -3111,6 +3286,7 @@ describe('Attachment Tools', () => {
       });
 
       it('should still support full replacement (backward compat)', async () => {
+        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
         vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
 
         await handleAttachmentTool(mockClient, 'update_attachment_content', {

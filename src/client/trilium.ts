@@ -84,9 +84,11 @@ export class TriliumClient {
       headers,
       body:
         body !== undefined
-          ? contentType === 'application/json'
-            ? JSON.stringify(body)
-            : String(body)
+          ? body instanceof Buffer || body instanceof Uint8Array
+            ? body
+            : contentType === 'application/json'
+              ? JSON.stringify(body)
+              : String(body)
           : undefined,
     });
 
@@ -142,6 +144,13 @@ export class TriliumClient {
     await this.request<undefined>('PUT', `/notes/${noteId}/content`, {
       body: content,
       contentType: 'text/plain',
+    });
+  }
+
+  async updateNoteContentBinary(noteId: EntityId, content: Buffer): Promise<void> {
+    await this.request<undefined>('PUT', `/notes/${noteId}/content`, {
+      body: content,
+      contentType: 'application/octet-stream',
     });
   }
 
@@ -352,6 +361,13 @@ export class TriliumClient {
     await this.request<undefined>('PUT', `/attachments/${attachmentId}/content`, {
       body: content,
       contentType: 'text/plain',
+    });
+  }
+
+  async updateAttachmentContentBinary(attachmentId: EntityId, content: Buffer): Promise<void> {
+    await this.request<undefined>('PUT', `/attachments/${attachmentId}/content`, {
+      body: content,
+      contentType: 'application/octet-stream',
     });
   }
 }

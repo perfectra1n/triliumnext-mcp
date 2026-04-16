@@ -19,6 +19,33 @@ export function isImageMimeType(mime: string): boolean {
   return IMAGE_MIME_TYPES.has(mime.toLowerCase());
 }
 
+/**
+ * MIME types that TriliumNext treats as text (string) content.
+ * Mirrors TriliumNext's isStringNote() logic in services/utils.ts.
+ * Anything NOT matching these is binary.
+ */
+const TEXT_MIME_EXACT = new Set([
+  'application/javascript',
+  'application/x-javascript',
+  'application/json',
+  'application/x-sql',
+  'image/svg+xml',
+]);
+
+export function isBinaryMimeType(mime: string): boolean {
+  const lower = mime.toLowerCase();
+  if (lower.startsWith('text/')) return false;
+  if (TEXT_MIME_EXACT.has(lower)) return false;
+  return true;
+}
+
+/**
+ * Decode a base64 string to a Buffer of binary bytes.
+ */
+export function base64ToBuffer(base64: string): Buffer {
+  return Buffer.from(base64, 'base64');
+}
+
 // Zod schemas for validation
 const createAttachmentSchema = z.object({
   ownerId: z
@@ -164,6 +191,23 @@ export async function handleAttachmentTool(
   switch (name) {
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
+      if (isBinaryMimeType(parsed.mime)) {
+        // Two-step binary upload: create metadata, then PUT decoded binary content
+        const result = await client.createAttachment({
+          ownerId: parsed.ownerId,
+          role: parsed.role,
+          mime: parsed.mime,
+          title: parsed.title,
+          content: '',
+          position: parsed.position,
+        });
+        const binaryContent = base64ToBuffer(parsed.content);
+        await client.updateAttachmentContentBinary(result.attachmentId, binaryContent);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+      // Text content: single-step creation
       const result = await client.createAttachment({
         ownerId: parsed.ownerId,
         role: parsed.role,
@@ -233,6 +277,19 @@ export async function handleAttachmentTool(
 
     case 'update_attachment_content': {
       const parsed = updateAttachmentContentSchema.parse(args);
+
+      // For full replacement of binary attachments, decode base64 and PUT binary
+      if (parsed.content !== undefined && parsed.changes === undefined && parsed.patch === undefined) {
+        const attachment = await client.getAttachment(parsed.attachmentId);
+        if (isBinaryMimeType(attachment.mime)) {
+          const binaryContent = base64ToBuffer(parsed.content);
+          await client.updateAttachmentContentBinary(parsed.attachmentId, binaryContent);
+          return {
+            content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
+          };
+        }
+      }
+
       let finalContent: string;
       if (parsed.changes !== undefined || parsed.patch !== undefined) {
         // Diff modes: fetch existing content first
@@ -242,7 +299,7 @@ export async function handleAttachmentTool(
           patch: parsed.patch,
         });
       } else {
-        // Full replacement mode
+        // Full replacement mode (text content)
         finalContent = parsed.content ?? '';
       }
       await client.updateAttachmentContent(parsed.attachmentId, finalContent);

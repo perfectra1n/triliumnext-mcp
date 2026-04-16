@@ -6,12 +6,19 @@ import { z } from 'zod';
 export const NOTE_TYPES = [
   'text',
   'code',
+  'render',
   'file',
   'image',
   'search',
-  'book',
   'relationMap',
-  'render',
+  'book',
+  'noteMap',
+  'mermaid',
+  'webView',
+  'shortcut',
+  'doc',
+  'contentWidget',
+  'launcher',
 ] as const;
 
 /**

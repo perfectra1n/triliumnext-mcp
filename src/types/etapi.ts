@@ -3,6 +3,8 @@
  * Generated from etapi.openapi.yaml
  */
 
+import { NOTE_TYPES } from '../tools/validators.js';
+
 // Entity ID pattern: [a-zA-Z0-9_]{4,32}
 export type EntityId = string;
 
@@ -10,23 +12,8 @@ export type EntityId = string;
 export type LocalDateTime = string; // YYYY-MM-DD HH:mm:ss.SSS+ZZZZ
 export type UtcDateTime = string; // YYYY-MM-DD HH:mm:ss.SSSZ
 
-// Note types
-export type NoteType =
-  | 'text'
-  | 'code'
-  | 'render'
-  | 'file'
-  | 'image'
-  | 'search'
-  | 'relationMap'
-  | 'book'
-  | 'noteMap'
-  | 'mermaid'
-  | 'webView'
-  | 'shortcut'
-  | 'doc'
-  | 'contentWidget'
-  | 'launcher';
+// Note types — derived from NOTE_TYPES array so they cannot drift apart
+export type NoteType = (typeof NOTE_TYPES)[number];
 
 // Attribute types
 export type AttributeType = 'label' | 'relation';

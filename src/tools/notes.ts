@@ -12,7 +12,7 @@ import {
 } from './validators.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
-import { isImageMimeType } from './attachments.js';
+import { isImageMimeType, isBinaryMimeType, base64ToBuffer } from './attachments.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 
 /**
@@ -68,16 +68,20 @@ async function processImages(
   images: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
   // Create all attachments in parallel (resolve data URLs first)
+  // Uses two-step process: create metadata with empty content, then PUT binary
   const attachments = await Promise.all(
-    images.map((img) => {
+    images.map(async (img) => {
       const resolved = resolveAttachmentData(img);
-      return client.createAttachment({
+      const attachment = await client.createAttachment({
         ownerId,
         role: 'image',
         mime: resolved.mime,
         title: img.filename,
-        content: resolved.data,
+        content: '',
       });
+      const binaryContent = base64ToBuffer(resolved.data);
+      await client.updateAttachmentContentBinary(attachment.attachmentId, binaryContent);
+      return attachment;
     })
   );
 
@@ -138,9 +142,22 @@ async function processFiles(
   files: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
   // Create all attachments in parallel (resolve data URLs first)
+  // Uses two-step process for binary MIME types to avoid content corruption
   const attachments = await Promise.all(
-    files.map((file) => {
+    files.map(async (file) => {
       const resolved = resolveAttachmentData(file);
+      if (isBinaryMimeType(resolved.mime)) {
+        const attachment = await client.createAttachment({
+          ownerId,
+          role: 'file',
+          mime: resolved.mime,
+          title: file.filename,
+          content: '',
+        });
+        const binaryContent = base64ToBuffer(resolved.data);
+        await client.updateAttachmentContentBinary(attachment.attachmentId, binaryContent);
+        return attachment;
+      }
       return client.createAttachment({
         ownerId,
         role: 'file',
@@ -561,11 +578,12 @@ export async function handleNoteTool(
     case 'create_note': {
       const parsed = createNoteSchema.parse(args);
       let content = await convertContent(parsed.content, parsed.format);
+      const isBinary = parsed.mime ? isBinaryMimeType(parsed.mime) : false;
       const result = await client.createNote({
         parentNoteId: parsed.parentNoteId,
         title: parsed.title,
         type: parsed.type as NoteType,
-        content,
+        content: isBinary ? '' : content,
         mime: parsed.mime,
         notePosition: parsed.notePosition,
         prefix: parsed.prefix,
@@ -575,6 +593,12 @@ export async function handleNoteTool(
         dateCreated: parsed.dateCreated,
         utcDateCreated: parsed.utcDateCreated,
       });
+
+      // For binary note types (image, file), decode base64 and upload binary content
+      if (isBinary && content) {
+        const binaryContent = base64ToBuffer(content);
+        await client.updateNoteContentBinary(result.note.noteId, binaryContent);
+      }
 
       // If images or files provided, create attachments and update content with resolved references
       if ((parsed.images && parsed.images.length > 0) || (parsed.files && parsed.files.length > 0)) {
