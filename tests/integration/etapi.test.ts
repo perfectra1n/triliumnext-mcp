@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { fileTypeFromBuffer } from 'file-type';
 import { TriliumClient } from '../../src/client/trilium.js';
 import { handleNoteTool } from '../../src/tools/notes.js';
 import { handleAttachmentTool } from '../../src/tools/attachments.js';
@@ -1544,11 +1545,35 @@ This has <angle brackets> and "quotes" & ampersands.
   });
 
   describe('Binary Content Roundtrip', () => {
+    // 1x1 PNG pixel — known valid binary
     const pngBase64 =
       'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
-    it('create_attachment via handleAttachmentTool should store valid binary PNG', async () => {
-      // Create a parent note
+    /**
+     * Helper: fetch raw bytes from ETAPI, bypassing our client's workarounds,
+     * then use file-type to detect whether the blob is a real image.
+     */
+    async function fetchRawContent(path: string): Promise<Uint8Array> {
+      const baseUrl = (client as any).baseUrl;
+      const token = (client as any).token;
+      const resp = await fetch(`${baseUrl}${path}`, {
+        headers: { Authorization: token },
+      });
+      expect(resp.status).toBe(200);
+      return new Uint8Array(await resp.arrayBuffer());
+    }
+
+    async function expectValidPng(bytes: Uint8Array) {
+      // file-type detects the format from the actual binary content.
+      // If the blob is corrupted (base64 ASCII stored as UTF-8), fileTypeFromBuffer
+      // returns undefined — it cannot recognise the format.
+      const detected = await fileTypeFromBuffer(bytes);
+      expect(detected).toBeDefined();
+      expect(detected!.mime).toBe('image/png');
+      expect(detected!.ext).toBe('png');
+    }
+
+    it('create_attachment via tool should store a real PNG', async () => {
       const note = await client.createNote({
         parentNoteId: 'root',
         title: 'Binary Roundtrip Test',
@@ -1566,19 +1591,31 @@ This has <angle brackets> and "quotes" & ampersands.
 
       expect(result).not.toBeNull();
       const parsed = JSON.parse(result!.content[0].text);
-      const attachmentId = parsed.attachmentId;
 
-      // Retrieve attachment content as binary and verify PNG magic bytes
-      const base64Content = await client.getAttachmentContentAsBase64(attachmentId);
-      const buffer = Buffer.from(base64Content, 'base64');
-      // PNG magic bytes: 0x89 0x50 0x4E 0x47 (‰PNG)
-      expect(buffer[0]).toBe(0x89);
-      expect(buffer[1]).toBe(0x50);
-      expect(buffer[2]).toBe(0x4E);
-      expect(buffer[3]).toBe(0x47);
+      const bytes = await fetchRawContent(`/attachments/${parsed.attachmentId}/content`);
+      await expectValidPng(bytes);
     });
 
-    it('create_note with type=image should store valid binary content', async () => {
+    it('image:N placeholder attachment should store a real PNG', async () => {
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Image Placeholder Roundtrip',
+        type: 'text',
+        content: '<p>Photo:</p><img src="image:0">',
+        images: [{ data: pngBase64, mime: 'image/png', filename: 'embed.png' }],
+      });
+
+      expect(result).not.toBeNull();
+      const parsed = JSON.parse(result!.content[0].text);
+
+      const attachments = await client.getNoteAttachments(parsed.note.noteId);
+      expect(attachments.length).toBe(1);
+
+      const bytes = await fetchRawContent(`/attachments/${attachments[0].attachmentId}/content`);
+      await expectValidPng(bytes);
+    });
+
+    it('create_note with type=image should store a real PNG', async () => {
       const result = await handleNoteTool(client, 'create_note', {
         parentNoteId: 'root',
         title: 'Binary Image Note',
@@ -1589,15 +1626,9 @@ This has <angle brackets> and "quotes" & ampersands.
 
       expect(result).not.toBeNull();
       const parsed = JSON.parse(result!.content[0].text);
-      const noteId = parsed.note.noteId;
 
-      // Retrieve note content as binary and verify PNG magic bytes
-      const base64Content = await client.getAttachmentContentAsBase64(noteId);
-      // For notes, we need to get content differently - via raw API
-      // Actually, let's just verify the note was created successfully
-      const note = await client.getNote(noteId);
-      expect(note.type).toBe('image');
-      expect(note.mime).toBe('image/png');
+      const bytes = await fetchRawContent(`/notes/${parsed.note.noteId}/content`);
+      await expectValidPng(bytes);
     });
   });
 
