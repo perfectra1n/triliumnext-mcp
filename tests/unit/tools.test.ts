@@ -1436,6 +1436,77 @@ describe('Note Tools', () => {
           })
         ).rejects.toThrow();
       });
+
+      describe('unresolved placeholder guard', () => {
+        it('should reject update_note_content with image placeholder but no images array', async () => {
+          await expect(
+            handleNoteTool(mockClient, 'update_note_content', {
+              noteId: 'note123',
+              content: '<p>Hi</p><img src="image:0">',
+            })
+          ).rejects.toThrow(/Unresolved placeholder/);
+          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
+        });
+
+        it('should reject update_note_content with out-of-range image index', async () => {
+          vi.mocked(mockClient.createAttachment).mockResolvedValue({
+            attachmentId: 'att001',
+            title: 'photo.png',
+          } as any);
+          vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
+
+          await expect(
+            handleNoteTool(mockClient, 'update_note_content', {
+              noteId: 'note123',
+              content: '<img src="image:0"><img src="image:1">',
+              images: [mockImage],
+            })
+          ).rejects.toThrow(/Unresolved placeholder.*image:1/);
+          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
+        });
+
+        it('should reject update_note_content with file placeholder but no files array', async () => {
+          await expect(
+            handleNoteTool(mockClient, 'update_note_content', {
+              noteId: 'note123',
+              content: '<p>See <a href="file:0">report</a></p>',
+            })
+          ).rejects.toThrow(/Unresolved placeholder.*file:0/);
+          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
+        });
+
+        it('should reject create_note with image placeholder but no images array', async () => {
+          await expect(
+            handleNoteTool(mockClient, 'create_note', {
+              parentNoteId: 'root',
+              title: 'Bad',
+              type: 'text',
+              content: '<img src="image:0">',
+            })
+          ).rejects.toThrow(/Unresolved placeholder/);
+          expect(mockClient.createNote).not.toHaveBeenCalled();
+        });
+
+        it('should reject append_note_content with image placeholder but no images array', async () => {
+          vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
+          await expect(
+            handleNoteTool(mockClient, 'append_note_content', {
+              noteId: 'note123',
+              content: '<img src="image:0">',
+            })
+          ).rejects.toThrow(/Unresolved placeholder/);
+          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
+        });
+
+        it('should reject single-quoted image placeholder to surface attribute-format mistakes', async () => {
+          await expect(
+            handleNoteTool(mockClient, 'update_note_content', {
+              noteId: 'note123',
+              content: "<img src='image:0'>",
+            })
+          ).rejects.toThrow(/Unresolved placeholder/);
+        });
+      });
     });
 
     describe('data URL support', () => {

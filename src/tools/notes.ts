@@ -52,8 +52,10 @@ const imageEntrySchema = z.object({
 const imagesFieldSchema = z.array(imageEntrySchema).optional().describe(
   'Optional array of images to embed in the note. The data field accepts raw base64 or a data URL (data:image/png;base64,...). ' +
   'Reference images in your content using placeholder URLs: in markdown use ![alt](image:0), ![alt](image:1), etc. ' +
-  'In HTML use <img src="image:0">. The number is the zero-based index into this array. ' +
-  'Images without a corresponding placeholder are appended at the end of the content.'
+  'In HTML use <img src="image:0"> (double quotes required). The number is the zero-based index into THIS array — ' +
+  'placeholders do NOT reference attachments uploaded in earlier calls. Images and placeholders must be provided together in the same call. ' +
+  'Images without a corresponding placeholder are appended at the end of the content. ' +
+  'To reference an attachment you uploaded separately, use its real URL: <img src="api/attachments/{attachmentId}/image/{filename}">.'
 );
 
 /**
@@ -126,8 +128,10 @@ const fileEntrySchema = z.object({
 const filesFieldSchema = z.array(fileEntrySchema).optional().describe(
   'Optional array of files to attach and embed as download links in the note. The data field accepts raw base64 or a data URL. ' +
   'Reference files in your content using placeholder URLs: in markdown use [label](file:0), [label](file:1), etc. ' +
-  'In HTML use <a href="file:0">label</a>. The number is the zero-based index into this array. ' +
-  'Files without a corresponding placeholder are appended at the end of the content as download links.'
+  'In HTML use <a href="file:0">label</a> (double quotes required). The number is the zero-based index into THIS array — ' +
+  'placeholders do NOT reference attachments uploaded in earlier calls. Files and placeholders must be provided together in the same call. ' +
+  'Files without a corresponding placeholder are appended at the end of the content as download links. ' +
+  'To reference an attachment you uploaded separately, use its real URL: <a href="api/attachments/{attachmentId}/download">label</a>.'
 );
 
 /**
@@ -192,6 +196,30 @@ async function processFiles(
   }
 
   return result;
+}
+
+/**
+ * Scan final HTML for any remaining image:N / file:N placeholders that didn't get
+ * resolved by processImages / processFiles. Trilium silently strips unknown src/href
+ * values, so we fail loudly here with guidance instead of writing broken content.
+ */
+function assertPlaceholdersResolved(html: string): void {
+  const unresolved = new Set<string>();
+  const imgPattern = /src=["']image:(\d+)["']/g;
+  const filePattern = /href=["']file:(\d+)["']/g;
+  for (const match of html.matchAll(imgPattern)) unresolved.add(`image:${match[1]}`);
+  for (const match of html.matchAll(filePattern)) unresolved.add(`file:${match[1]}`);
+  if (unresolved.size === 0) return;
+  const list = Array.from(unresolved).join(', ');
+  throw new Error(
+    `Unresolved placeholder(s) in content: ${list}. ` +
+      'Placeholders like <img src="image:N"> and <a href="file:N"> are only resolved when the ' +
+      '`images`/`files` array is provided in the SAME call (N indexes into that array). ' +
+      'Common causes: missing `images`/`files` array, index out of range, or single-quoted attributes. ' +
+      'To reference an attachment you uploaded separately, use its real URL instead: ' +
+      '<img src="api/attachments/{attachmentId}/image/{filename}"> or ' +
+      '<a href="api/attachments/{attachmentId}/download">label</a>.'
+  );
 }
 
 /**
@@ -506,7 +534,9 @@ export function registerNoteTools(): Tool[] {
     defineTool(
       'create_note',
       'Create a new note with title, content, type, and parent. Returns the created note and its branch. Supports positioning, tree display, and date options. For text notes, content can be HTML (default) or markdown (set format to "markdown"). ' +
-        'Supports embedding images and files: pass "images" and/or "files" arrays with base64 data, and reference them in content using image:0/file:0 placeholders (e.g., <img src="image:0"> or <a href="file:0">).',
+        'Supports embedding images and files: pass "images" and/or "files" arrays with base64 data IN THE SAME CALL, and reference them in content using image:0/file:0 placeholders (e.g., <img src="image:0"> or <a href="file:0">). ' +
+        'The N in image:N / file:N indexes into the array provided in this call — it does NOT reference attachments uploaded previously. ' +
+        'Unresolved placeholders will cause the call to fail with a clear error.',
       createNoteSchema
     ),
     defineTool(
@@ -532,7 +562,10 @@ export function registerNoteTools(): Tool[] {
         '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
         '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
         'Exactly one mode must be used per call. ' +
-        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders.',
+        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders. ' +
+        'Placeholders index into the arrays provided in THIS call — they do NOT reference attachments uploaded in earlier calls. ' +
+        'To reference an existing attachment, use its real URL instead: <img src="api/attachments/{attachmentId}/image/{filename}">. ' +
+        'Unresolved placeholders will cause the call to fail with a clear error.',
       updateNoteContentSchema
     ),
     defineTool(
@@ -541,7 +574,9 @@ export function registerNoteTools(): Tool[] {
         '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
         '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
         'Exactly one mode must be used per call. ' +
-        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders.',
+        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders. ' +
+        'Placeholders index into the arrays provided in THIS call — they do NOT reference attachments uploaded in earlier calls. ' +
+        'Unresolved placeholders will cause the call to fail with a clear error.',
       appendNoteContentSchema
     ),
     defineTool(
@@ -579,6 +614,15 @@ export async function handleNoteTool(
       const parsed = createNoteSchema.parse(args);
       let content = await convertContent(parsed.content, parsed.format);
       const isBinary = parsed.mime ? isBinaryMimeType(parsed.mime) : false;
+      const hasAttachments =
+        (parsed.images && parsed.images.length > 0) ||
+        (parsed.files && parsed.files.length > 0);
+      // When no attachments are provided, the initial createNote call is the final write,
+      // so guard here. When attachments are provided, we defer the guard until after
+      // processImages/processFiles, since they're what resolve placeholders.
+      if (!isBinary && !hasAttachments) {
+        assertPlaceholdersResolved(content);
+      }
       const result = await client.createNote({
         parentNoteId: parsed.parentNoteId,
         title: parsed.title,
@@ -601,13 +645,14 @@ export async function handleNoteTool(
       }
 
       // If images or files provided, create attachments and update content with resolved references
-      if ((parsed.images && parsed.images.length > 0) || (parsed.files && parsed.files.length > 0)) {
+      if (hasAttachments) {
         if (parsed.images && parsed.images.length > 0) {
           content = await processImages(client, result.note.noteId, content, parsed.images);
         }
         if (parsed.files && parsed.files.length > 0) {
           content = await processFiles(client, result.note.noteId, content, parsed.files);
         }
+        assertPlaceholdersResolved(content);
         await client.updateNoteContent(result.note.noteId, content);
       }
 
@@ -721,6 +766,7 @@ export async function handleNoteTool(
         finalContent = await processFiles(client, parsed.noteId, finalContent, parsed.files);
       }
 
+      assertPlaceholdersResolved(finalContent);
       await client.updateNoteContent(parsed.noteId, finalContent);
 
       // Verify search/replace changes were actually persisted
@@ -758,6 +804,7 @@ export async function handleNoteTool(
         finalContent = await processFiles(client, parsed.noteId, finalContent, parsed.files);
       }
 
+      assertPlaceholdersResolved(finalContent);
       await client.updateNoteContent(parsed.noteId, finalContent);
 
       // Verify search/replace changes were actually persisted

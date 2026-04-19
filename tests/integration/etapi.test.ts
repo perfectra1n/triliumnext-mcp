@@ -1339,6 +1339,31 @@ This has <angle brackets> and "quotes" & ampersands.
       expect(content).toContain('api/attachments/');
       expect(content).toContain('/image/appended.png');
     });
+
+    it('update_note_content with image placeholder but no images array - should throw and leave content unchanged', async () => {
+      // Reproduces the reported bug: LLM uploaded attachments separately, then called
+      // update_note_content with <img src="image:0"> but no images array. Previously this
+      // silently succeeded (Trilium stripped the unknown src). Now it should throw.
+      const original = '<p>Pristine original</p>';
+      const createResult = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Note that should stay pristine',
+        type: 'text',
+        content: original,
+      });
+      const noteId = createResult.note.noteId;
+
+      await expect(
+        handleNoteTool(client, 'update_note_content', {
+          noteId,
+          content: '<p>Should not land</p><img src="image:0">',
+          // deliberately omitting images
+        })
+      ).rejects.toThrow(/Unresolved placeholder/);
+
+      const after = await client.getNoteContent(noteId);
+      expect(after).toBe(original);
+    });
   });
 
   describe('File Embedding via handleNoteTool', () => {
