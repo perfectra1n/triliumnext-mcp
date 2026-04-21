@@ -1,0 +1,292 @@
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
+
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
+
+import { normalizeServerUrl, type Config } from '../config.js';
+import { TriliumClient, TriliumClientError } from '../client/trilium.js';
+import { buildMcpServer } from '../server.js';
+import { GatewayAuth } from './auth.js';
+import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
+
+/** Upper bound on a single MCP JSON-RPC message POST body. SDK also enforces
+ *  4MB inside handlePostMessage; we cap tighter here to fail fast on
+ *  obviously-oversized payloads before the SDK even reads the body. */
+const MAX_POST_BYTES = 1 * 1024 * 1024;
+
+/** Keep-alive ping cadence for SSE streams; prevents idle proxies from
+ *  closing the connection while the client is just waiting for server events. */
+const SSE_KEEPALIVE_INTERVAL_MS = 30_000;
+
+/** Hard ceiling on the validation probe during /sse connect. Without this,
+ *  a client pointing X-Trilium-Url at a black-hole host could park a
+ *  connection indefinitely. */
+const TRILIUM_VALIDATE_TIMEOUT_MS = 10_000;
+
+interface Session {
+  transport: SSEServerTransport;
+  mcpServer: McpServer;
+  keepAlive: NodeJS.Timeout;
+}
+
+export async function startHttp(config: Config): Promise<void> {
+  const sessions = new Map<string, Session>();
+  const gatewayAuth =
+    config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
+
+  if (config.allowPrivateUrls && config.multiTenant) {
+    // Loud but not fatal: private-IP block is the primary SSRF defense, and
+    // some homelab operators legitimately need to disable it.
+    console.error(
+      '[triliumnext-mcp] WARNING: --allow-private-urls is set. Client-supplied X-Trilium-Url may target LAN/loopback hosts.'
+    );
+  }
+
+  const httpServer = createHttpServer((req, res) => {
+    handleRequest(req, res, config, sessions, gatewayAuth).catch((err) => {
+      console.error('[triliumnext-mcp] request handler error:', err);
+      if (!res.headersSent) {
+        respondJson(res, 500, { error: 'internal_error' });
+      } else {
+        try {
+          res.end();
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+  });
+
+  httpServer.listen(config.httpPort, () => {
+    const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
+    const auth = config.gatewayAuth === 'bearer' ? `bearer (${config.gatewayTokens.length} token(s))` : 'none';
+    console.error(
+      `TriliumNext MCP server listening on port ${config.httpPort} [${mode}, gateway-auth=${auth}]`
+    );
+  });
+}
+
+async function handleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: Config,
+  sessions: Map<string, Session>,
+  gatewayAuth: GatewayAuth | null
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const url = req.url ?? '/';
+
+  if (method === 'GET' && url === '/health') {
+    respondJson(res, 200, { status: 'ok' });
+    return;
+  }
+
+  if (method === 'GET' && url === '/sse') {
+    await handleSseConnect(req, res, config, sessions, gatewayAuth);
+    return;
+  }
+
+  if (method === 'POST' && url.startsWith('/message')) {
+    await handleSsePost(req, res, sessions);
+    return;
+  }
+
+  respondJson(res, 404, { error: 'not_found' });
+}
+
+async function handleSseConnect(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: Config,
+  sessions: Map<string, Session>,
+  gatewayAuth: GatewayAuth | null
+): Promise<void> {
+  // 1. Gateway auth gate
+  if (gatewayAuth && !gatewayAuth.isAuthorized(req)) {
+    respondJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+
+  // 2. Resolve backend creds (per-connection headers, falling back to startup defaults)
+  const headerUrl = firstHeader(req.headers['x-trilium-url']);
+  const headerToken = firstHeader(req.headers['x-trilium-token']);
+
+  const clientUrlRaw = headerUrl ?? config.triliumUrl ?? null;
+  const clientToken = headerToken ?? config.triliumToken ?? null;
+
+  if (!clientUrlRaw || !clientToken) {
+    // Don't distinguish "no URL" from "no token" — generic for unauth'd callers.
+    respondJson(res, 401, { error: 'missing_trilium_credentials' });
+    return;
+  }
+
+  // 3. SSRF guard — only applies to client-supplied URLs in multi-tenant mode.
+  // Startup-configured URLs were chosen by the operator and are trusted.
+  const isClientSupplied = headerUrl !== null && headerUrl !== undefined;
+  if (config.multiTenant && isClientSupplied) {
+    try {
+      await assertUrlIsSafe(clientUrlRaw, {
+        allowlist: config.urlAllowlist,
+        allowPrivate: config.allowPrivateUrls,
+      });
+    } catch (err) {
+      if (err instanceof UrlGuardError) {
+        respondJson(res, 400, { error: 'url_rejected', reason: err.reason });
+        return;
+      }
+      throw err;
+    }
+  }
+
+  // 4. Build the client and validate creds BEFORE we let the SSE transport
+  // write response headers (once start() runs, we can't return a clean JSON error).
+  const triliumUrl = normalizeServerUrl(clientUrlRaw);
+  const client = new TriliumClient(triliumUrl, clientToken);
+  try {
+    await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
+  } catch (err) {
+    if (err instanceof TriliumClientError) {
+      const status = err.status === 401 || err.status === 403 ? 401 : 502;
+      respondJson(res, status, {
+        error: 'trilium_auth_failed',
+        status: err.status,
+        code: err.code,
+      });
+      return;
+    }
+    if (err instanceof Error && err.message === 'timeout') {
+      respondJson(res, 504, { error: 'trilium_validate_timeout' });
+      return;
+    }
+    respondJson(res, 502, { error: 'trilium_unreachable' });
+    return;
+  }
+
+  // 5. Create the per-connection MCP Server + SSE transport.
+  const mcpServer = buildMcpServer(client);
+  const transport = new SSEServerTransport('/message', res);
+  const sessionId = transport.sessionId;
+
+  // 6. Register the session BEFORE awaiting connect(). server.connect() calls
+  // transport.start() which writes the endpoint event; a very fast client
+  // could otherwise POST before we've inserted into the map.
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': ping\n\n');
+    } catch {
+      // Stream may have closed between check and write; onclose will clean up.
+    }
+  }, SSE_KEEPALIVE_INTERVAL_MS);
+  // Never let the keep-alive timer hold the process open.
+  keepAlive.unref?.();
+
+  const session: Session = { transport, mcpServer, keepAlive };
+  sessions.set(sessionId, session);
+
+  // The transport's onclose fires either (a) when the SSE response closes —
+  // the transport is already torn down, so mcpServer.close() MUST NOT recurse
+  // back into transport.close() — or (b) when we explicitly initiate close
+  // from the Server side. Either way, at this point the wire is dead and we
+  // just need to drop our bookkeeping. The Server itself has no resources
+  // outside the (already-closed) transport, so GC handles the rest.
+  transport.onclose = () => {
+    sessions.delete(sessionId);
+    clearInterval(keepAlive);
+  };
+
+  try {
+    await mcpServer.connect(transport);
+  } catch (err) {
+    // Roll back the session entry if connect failed. onclose will also fire
+    // eventually, but we want to avoid a stale entry in the meantime.
+    sessions.delete(sessionId);
+    clearInterval(keepAlive);
+    console.error('[triliumnext-mcp] SSE connect failed:', err);
+    if (!res.headersSent) {
+      respondJson(res, 500, { error: 'sse_connect_failed' });
+    } else {
+      try {
+        res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+}
+
+async function handleSsePost(
+  req: IncomingMessage,
+  res: ServerResponse,
+  sessions: Map<string, Session>
+): Promise<void> {
+  // Enforce our tight body cap upstream of the SDK's 4MB limit.
+  const contentLengthRaw = req.headers['content-length'];
+  if (contentLengthRaw) {
+    const contentLength = parseInt(Array.isArray(contentLengthRaw) ? contentLengthRaw[0] : contentLengthRaw, 10);
+    if (!Number.isNaN(contentLength) && contentLength > MAX_POST_BYTES) {
+      respondJson(res, 413, { error: 'payload_too_large' });
+      return;
+    }
+  }
+
+  const parsed = parsePath(req.url);
+  const sessionId = parsed.query.get('sessionId');
+  if (!sessionId) {
+    respondJson(res, 400, { error: 'missing_session_id' });
+    return;
+  }
+
+  const session = sessions.get(sessionId);
+  if (!session) {
+    // 404 (not 503) — unknown session looks like a nonexistent resource.
+    respondJson(res, 404, { error: 'unknown_session' });
+    return;
+  }
+
+  await session.transport.handlePostMessage(req, res);
+}
+
+function parsePath(urlPath: string | undefined): { pathname: string; query: URLSearchParams } {
+  const parsed = new URL(urlPath ?? '/', 'http://dummy');
+  return { pathname: parsed.pathname, query: parsed.searchParams };
+}
+
+function firstHeader(value: string | string[] | undefined): string | null {
+  if (!value) return null;
+  const v = Array.isArray(value) ? value[0] : value;
+  const trimmed = v.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error('timeout')), ms);
+    p.then(
+      (v) => {
+        clearTimeout(t);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(t);
+        reject(e);
+      }
+    );
+  });
+}
+
+function respondJson(res: ServerResponse, status: number, body: unknown): void {
+  if (res.headersSent) {
+    try {
+      res.end();
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Content-Length': Buffer.byteLength(payload),
+  });
+  res.end(payload);
+}

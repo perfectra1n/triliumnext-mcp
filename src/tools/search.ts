@@ -39,7 +39,7 @@ export function registerSearchTools(): Tool[] {
   return [
     defineTool(
       'search_notes',
-      `Search notes using full-text search and/or attribute filters. Supports Trilium search syntax.
+      `Search notes using full-text search and/or attribute filters. Supports Trilium search syntax. Use this tool to find existing notes, discover the note hierarchy, and identify the best parent before creating or moving notes.
 
 **Full-text search:**
 - \`rings tolkien\` - Both terms must appear (implicit AND between words)
@@ -86,7 +86,9 @@ export function registerSearchTools(): Tool[] {
     ),
     defineTool(
       'get_note_tree',
-      'Get children of a note for tree navigation. Returns the note with its childNoteIds populated.',
+      'Get children of a note for tree navigation. Returns the note with its childNoteIds populated. ' +
+        'Use this tool to explore the note hierarchy before creating or moving notes — start from "root" to see top-level structure, then drill into child notes to find the best placement. ' +
+        'When the user asks to create or organize notes, proactively explore the tree and suggest where the note should go.',
       getNoteTreeSchema
     ),
   ];

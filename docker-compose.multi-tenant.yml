@@ -1,0 +1,44 @@
+# Multi-tenant MCP server overlay.
+#
+# Unlike docker-compose.yml (which runs a single-tenant MCP bound to one
+# Trilium instance), this compose stack runs the MCP server standalone so
+# remote clients can supply their own X-Trilium-Url + X-Trilium-Token on
+# every SSE connection.
+#
+# Usage:
+#   export MCP_GATEWAY_TOKEN=$(openssl rand -hex 32)
+#   docker compose -f docker-compose.multi-tenant.yml up -d
+#
+# Clients connect with:
+#   Authorization: Bearer $MCP_GATEWAY_TOKEN
+#   X-Trilium-Url: https://notes.example.com
+#   X-Trilium-Token: <their own ETAPI token>
+#
+# Security notes:
+# - Terminate TLS in a reverse proxy (nginx/caddy/traefik) in front of this
+#   container. Bearer tokens must never traverse plain HTTP in production.
+# - MCP_GATEWAY_TOKEN is the shared secret you hand out to authorized clients.
+#   Rotate by restarting with a new value.
+# - X-Trilium-Url targets that resolve to private/loopback IPs are blocked
+#   by default. Add hostnames via TRILIUM_URL_ALLOWLIST if needed, or
+#   TRILIUM_ALLOW_PRIVATE_URLS=true to disable the block entirely.
+
+services:
+  mcp-server:
+    build:
+      context: .
+    container_name: triliumnext-mcp-multi-tenant
+    environment:
+      - TRILIUM_TRANSPORT=http
+      - TRILIUM_HTTP_PORT=3000
+      - TRILIUM_MULTI_TENANT=true
+      - TRILIUM_GATEWAY_AUTH=bearer
+      - TRILIUM_GATEWAY_TOKENS=${MCP_GATEWAY_TOKEN}
+      # Optional — comma-separated hostnames allowed in X-Trilium-Url.
+      # Takes precedence over the private-IP block.
+      # - TRILIUM_URL_ALLOWLIST=notes.example.com,trilium.internal
+      # Uncomment if you need to allow private IPs (homelab only):
+      # - TRILIUM_ALLOW_PRIVATE_URLS=true
+    ports:
+      - "3000:3000"
+    restart: unless-stopped

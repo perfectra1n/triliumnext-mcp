@@ -9,7 +9,7 @@ const moveNoteSchema = z.object({
   newParentNoteId: z
     .string()
     .min(1, 'New parent note ID is required')
-    .describe('ID of the new parent note'),
+    .describe('ID of the new parent note. Use search_notes and get_note_tree first to find the right destination.'),
   prefix: z.string().optional().describe('Optional prefix for the note in its new location'),
 });
 
@@ -48,7 +48,8 @@ export function registerOrganizationTools(): Tool[] {
   return [
     defineTool(
       'move_note',
-      'Move a note to a different parent. This deletes the old branch and creates a new one under the target parent.',
+      'Move a note to a different parent. This deletes the old branch and creates a new one under the target parent. ' +
+        'IMPORTANT: Before moving, use search_notes and get_note_tree to explore the note hierarchy, understand the current structure, and identify the best destination. Suggest the target location to the user and confirm before moving.',
       moveNoteSchema
     ),
     defineTool(

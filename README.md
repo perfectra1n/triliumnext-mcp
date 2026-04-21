@@ -10,7 +10,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - **Three content update modes** — full replacement, search/replace, and unified diff
 - **Markdown support** — write in markdown, stored as HTML automatically
 - **Image-aware content retrieval** — `get_note_content` returns embedded images as visual content blocks
-- Support for both STDIO and HTTP (SSE) transports
+- Support for both STDIO and HTTP (SSE) transports, including **multi-tenant SSE mode** where each client brings its own Trilium URL + ETAPI token
 - Flexible configuration via CLI, environment variables, or config file
 - TypeScript with full type safety
 
@@ -51,10 +51,17 @@ triliumnext-mcp --url http://localhost:37740/etapi --token YOUR_TOKEN
 
 Options:
 - `-u, --url <url>` — Trilium ETAPI URL (default: `http://localhost:37740/etapi`)
-- `-t, --token <token>` — Trilium ETAPI token (required)
+- `-t, --token <token>` — Trilium ETAPI token (required in single-tenant mode)
 - `--transport <type>` — Transport type: `stdio` or `http` (default: `stdio`)
 - `-p, --port <port>` — HTTP server port when using http transport (default: `3000`)
 - `-h, --help` — Show help message
+
+Multi-tenant HTTP options (see [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) below):
+- `--multi-tenant` — each SSE client supplies its own Trilium URL + token
+- `--gateway-auth <mode>` — `none` or `bearer` (default: `bearer` when multi-tenant)
+- `--gateway-token <token>` — accepted bearer token (repeatable)
+- `--trilium-url-allowlist <hosts>` — comma-separated allowed hostnames for client URLs
+- `--allow-private-urls` — skip the private/loopback IP SSRF block
 
 ### Environment Variables
 
@@ -63,6 +70,13 @@ export TRILIUM_URL=http://localhost:37740/etapi
 export TRILIUM_TOKEN=your-etapi-token
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
+
+# Multi-tenant (see section below):
+export TRILIUM_MULTI_TENANT=true
+export TRILIUM_GATEWAY_AUTH=bearer
+export TRILIUM_GATEWAY_TOKENS=tok1,tok2
+export TRILIUM_URL_ALLOWLIST=notes.example.com,trilium.internal
+export TRILIUM_ALLOW_PRIVATE_URLS=false
 ```
 
 ### Config File
@@ -237,6 +251,83 @@ The `update_note_content` and `append_note_content` tools support three modes (i
 2. **Search/replace** (`changes`) — array of `{old_string, new_string}` blocks applied sequentially
 3. **Unified diff** (`patch`) — a unified diff string applied to existing content
 
+## Multi-tenant HTTP deployment
+
+By default the server is single-tenant: `TRILIUM_URL` and `TRILIUM_TOKEN` are loaded once at startup and every MCP client that connects talks to the same Trilium instance. That's fine for a personal setup, but if you want to run **one MCP server process that serves multiple users**, each with their own Trilium and their own ETAPI token, switch it into multi-tenant mode.
+
+### What changes
+
+With `--multi-tenant`:
+
+1. **Each SSE connection brings its own Trilium credentials** via HTTP headers:
+   - `X-Trilium-Url` — the client's Trilium base URL
+   - `X-Trilium-Token` — the client's ETAPI token
+2. **A per-connection `TriliumClient` is created** — connections are isolated; one user's tool calls never hit another's Trilium.
+3. **Credentials are verified at connect time** by calling `/etapi/app-info`. A bad token fails fast with a `401` on the SSE handshake, not with silent tool-call errors later.
+4. **A gateway bearer token is required** (`--gateway-auth bearer`, enabled by default in multi-tenant mode). Clients authenticate to *you* with a shared secret you hand out.
+5. **Client-supplied URLs are SSRF-checked.** By default, hostnames that resolve to private/loopback/link-local IPs (including cloud metadata `169.254.169.254`) are rejected. Adjust with `--trilium-url-allowlist` or `--allow-private-urls`.
+
+Startup-configured `TRILIUM_URL` / `TRILIUM_TOKEN` become optional *defaults* — used only when a client connects without supplying its own headers.
+
+### Quick start (Docker)
+
+```bash
+export MCP_GATEWAY_TOKEN=$(openssl rand -hex 32)
+docker compose -f docker-compose.multi-tenant.yml up -d
+```
+
+Distribute `MCP_GATEWAY_TOKEN` to authorized clients. **Put a TLS-terminating reverse proxy (nginx, Caddy, Traefik) in front of this container** — bearer tokens in plaintext HTTP are unsafe.
+
+### Quick start (local)
+
+```bash
+npm run build
+node dist/index.js \
+  --transport http \
+  --port 3000 \
+  --multi-tenant \
+  --gateway-token "$(openssl rand -hex 32)"
+```
+
+### Connecting a client
+
+Claude Desktop, [mcp-remote](https://github.com/geelen/mcp-remote), and other MCP clients that support custom headers on SSE connections will work. A raw `curl` smoke test:
+
+```bash
+curl -N \
+  -H "Authorization: Bearer $MCP_GATEWAY_TOKEN" \
+  -H "X-Trilium-Url: https://notes.example.com" \
+  -H "X-Trilium-Token: $YOUR_ETAPI_TOKEN" \
+  http://mcp-server.example.com:3000/sse
+```
+
+On success you'll see an `endpoint` SSE event with a `/message?sessionId=<uuid>` URL — that's where your client POSTs JSON-RPC requests.
+
+### SSRF configuration
+
+| Flag | Behavior |
+|------|----------|
+| *(default)* | Reject any `X-Trilium-Url` whose hostname resolves to a private / loopback / link-local / CGNAT / multicast address. |
+| `--trilium-url-allowlist host1,host2` | Only hostnames matching the list (exact or suffix — `example.com` matches `a.example.com`) are accepted. Takes precedence over the private-IP block. |
+| `--allow-private-urls` | Disable the private-IP block entirely. Use only on trusted/homelab networks. |
+
+### Health check
+
+`GET /health` returns `{"status":"ok"}` with no auth required. Used by the Docker healthcheck; also useful for load-balancer probes.
+
+### Security model
+
+- **Gateway auth** (who can connect at all) is an operator-issued shared bearer token. Constant-time comparison, tokens hashed at startup.
+- **Backend auth** (which Trilium to talk to) is each client's own ETAPI token. It's only ever used to construct that client's `TriliumClient`; it's never logged.
+- **No TLS in-process.** Use a reverse proxy. The server listens on plain HTTP and expects to run behind one.
+- **No per-user identity.** The gateway token is a capability — anyone holding it can open a session and provide any Trilium credentials. If you need per-principal identity (OIDC, JWT), handle it at the reverse-proxy layer and pass through.
+
+### What's not (yet) supported
+
+- StreamableHTTP transport (MCP's newer replacement for SSE) — on the roadmap; the routing layer is structured to allow it alongside `/sse`.
+- Rate limiting — handle at the reverse-proxy layer for now.
+- CORS — no browser MCP clients today; add if/when they appear.
+
 ## Debugging with MCP Inspector
 
 [MCP Inspector](https://github.com/modelcontextprotocol/inspector) provides a web UI for testing tools interactively:
@@ -271,14 +362,13 @@ npm run format       # Format code
 Start Trilium and the MCP server:
 
 ```bash
-cd docker
 TRILIUM_TOKEN=your-token docker compose up -d
 ```
 
 Build the Docker image:
 
 ```bash
-docker build -t triliumnext-mcp -f docker/Dockerfile .
+docker build -t triliumnext-mcp .
 ```
 
 ## Getting an ETAPI Token

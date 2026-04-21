@@ -249,7 +249,7 @@ const createNoteSchema = z.object({
   parentNoteId: z
     .string()
     .min(1, 'Parent note ID is required')
-    .describe('ID of the parent note (use "root" for top-level)'),
+    .describe('ID of the parent note. Before choosing a parent, use search_notes and get_note_tree to explore the existing note hierarchy and find the most appropriate location. Only use "root" when the note truly belongs at the top level — most notes belong under an existing section or folder.'),
   title: z.string().min(1, 'Title is required').describe('Title of the new note'),
   type: noteTypeSchema.describe('Type of the note'),
   content: z
@@ -533,7 +533,9 @@ export function registerNoteTools(): Tool[] {
   return [
     defineTool(
       'create_note',
-      'Create a new note with title, content, type, and parent. Returns the created note and its branch. Supports positioning, tree display, and date options. For text notes, content can be HTML (default) or markdown (set format to "markdown"). ' +
+      'Create a new note with title, content, type, and parent. Returns the created note and its branch. ' +
+        'IMPORTANT: Before creating a note, use search_notes and get_note_tree to explore the existing note hierarchy and find the best parent. Suggest a location to the user and confirm before creating. Avoid placing notes at root unless they truly belong there. ' +
+        'Supports positioning, tree display, and date options. For text notes, content can be HTML (default) or markdown (set format to "markdown"). ' +
         'Supports embedding images and files: pass "images" and/or "files" arrays with base64 data IN THE SAME CALL, and reference them in content using image:0/file:0 placeholders (e.g., <img src="image:0"> or <a href="file:0">). ' +
         'The N in image:N / file:N indexes into the array provided in this call — it does NOT reference attachments uploaded previously. ' +
         'Unresolved placeholders will cause the call to fail with a clear error.',

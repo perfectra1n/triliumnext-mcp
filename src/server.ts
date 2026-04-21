@@ -21,10 +21,15 @@ import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from './tools/system.js';
 import { registerAttachmentTools, handleAttachmentTool } from './tools/attachments.js';
 import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js';
+import { startHttp } from './http/server.js';
 
-export async function createServer(config: Config): Promise<void> {
-  const client = new TriliumClient(config.triliumUrl, config.triliumToken);
-
+/**
+ * Builds a fully-configured MCP Server bound to the given Trilium client.
+ * One instance per logical connection: in multi-tenant SSE mode each SSE
+ * session owns its own Server + client pair so tool handlers cannot see
+ * state from other tenants.
+ */
+export function buildMcpServer(client: TriliumClient): Server {
   const server = new Server(
     {
       name: 'triliumnext-mcp',
@@ -37,7 +42,6 @@ export async function createServer(config: Config): Promise<void> {
     }
   );
 
-  // Collect all tools
   const allTools = [
     ...registerNoteTools(),
     ...registerSearchTools(),
@@ -49,18 +53,14 @@ export async function createServer(config: Config): Promise<void> {
     ...registerRevisionTools(),
   ];
 
-  // Handle list tools request
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     return { tools: allTools };
   });
 
-  // Handle tool calls
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
     try {
-      // Try each tool category
-      // Type supports both text and image content blocks (for attachment images)
       let result: {
         content: Array<
           | { type: 'text'; text: string }
@@ -95,7 +95,6 @@ export async function createServer(config: Config): Promise<void> {
         isError: true,
       };
     } catch (error) {
-      // Format errors with structured information and actionable guidance
       let structured;
       if (error instanceof TriliumClientError) {
         structured = formatTriliumError(error);
@@ -110,36 +109,24 @@ export async function createServer(config: Config): Promise<void> {
     }
   });
 
-  // Start the appropriate transport
+  return server;
+}
+
+async function startStdio(config: Config): Promise<void> {
+  if (!config.triliumUrl || !config.triliumToken) {
+    // Unreachable: loadConfig enforces this invariant for stdio. Defensive.
+    throw new Error('stdio transport requires TRILIUM_URL and TRILIUM_TOKEN');
+  }
+  const client = new TriliumClient(config.triliumUrl, config.triliumToken);
+  const server = buildMcpServer(client);
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+}
+
+export async function createServer(config: Config): Promise<void> {
   if (config.transport === 'stdio') {
-    const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await startStdio(config);
   } else {
-    const { SSEServerTransport } = await import('@modelcontextprotocol/sdk/server/sse.js');
-    const http = await import('node:http');
-
-    // Store active transport to route POST messages
-    let activeTransport: InstanceType<typeof SSEServerTransport> | null = null;
-
-    const httpServer = http.createServer(async (req, res) => {
-      if (req.method === 'GET' && req.url === '/sse') {
-        activeTransport = new SSEServerTransport('/message', res);
-        await server.connect(activeTransport);
-      } else if (req.method === 'POST' && req.url?.startsWith('/message')) {
-        if (activeTransport) {
-          await activeTransport.handlePostMessage(req, res);
-        } else {
-          res.writeHead(503);
-          res.end('No active SSE connection');
-        }
-      } else {
-        res.writeHead(404);
-        res.end('Not found');
-      }
-    });
-
-    httpServer.listen(config.httpPort, () => {
-      console.error(`TriliumNext MCP server listening on port ${config.httpPort}`);
-    });
+    await startHttp(config);
   }
 }

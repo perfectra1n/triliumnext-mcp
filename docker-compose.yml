@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   trilium:
     image: triliumnext/notes:latest
@@ -20,8 +18,7 @@ services:
 
   mcp-server:
     build:
-      context: ..
-      dockerfile: docker/Dockerfile
+      context: .
     container_name: triliumnext-mcp
     depends_on:
       trilium:
