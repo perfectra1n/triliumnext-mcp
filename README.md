@@ -2,6 +2,24 @@
 
 A Model Context Protocol (MCP) server for interacting with [TriliumNext](https://github.com/TriliumNext/Notes) via its ETAPI. Enables LLMs to create, read, update, and organize notes — including embedding images and files directly into note content.
 
+## Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Configuration](#configuration) — CLI, env vars, config file
+- [Available Tools](#available-tools)
+- [Embedding Images and Files](#embedding-images-and-files)
+- [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) — run one server for many users
+  - [Architecture](#architecture)
+  - [Quick start (Docker)](#quick-start-docker) / [(local)](#quick-start-local)
+  - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses)
+  - [Connecting clients](#connecting-clients) — Claude Desktop, Claude Code, SDK
+  - [SSRF configuration](#ssrf-configuration) · [Reverse-proxy](#reverse-proxy-tls-termination)
+  - [Security model](#security-model) · [Production checklist](#production-checklist) · [Troubleshooting](#troubleshooting)
+- [Debugging with MCP Inspector](#debugging-with-mcp-inspector)
+- [Development](#development) — build, test, docker
+- [Getting an ETAPI Token](#getting-an-etapi-token)
+
 ## Features
 
 - **35 tools** across 8 categories for full note management, search, organization, attachments, revisions, and system operations
@@ -89,6 +107,20 @@ Create `trilium-mcp.json` in the current directory or `~/.trilium-mcp.json`:
   "token": "your-etapi-token",
   "transport": "stdio",
   "httpPort": 3000
+}
+```
+
+For multi-tenant HTTP deployments, the same precedence applies (CLI > env > file > default). Multi-tenant keys:
+
+```json
+{
+  "transport": "http",
+  "httpPort": 3000,
+  "multiTenant": true,
+  "gatewayAuth": "bearer",
+  "gatewayTokens": ["pick-a-long-random-token"],
+  "urlAllowlist": ["notes.example.com", "trilium.internal"],
+  "allowPrivateUrls": false
 }
 ```
 
@@ -259,15 +291,37 @@ By default the server is single-tenant: `TRILIUM_URL` and `TRILIUM_TOKEN` are lo
 
 With `--multi-tenant`:
 
-1. **Each SSE connection brings its own Trilium credentials** via HTTP headers:
+1. **Each SSE connection MUST supply its own Trilium credentials** via HTTP headers, as an atomic pair:
    - `X-Trilium-Url` — the client's Trilium base URL
    - `X-Trilium-Token` — the client's ETAPI token
 2. **A per-connection `TriliumClient` is created** — connections are isolated; one user's tool calls never hit another's Trilium.
-3. **Credentials are verified at connect time** by calling `/etapi/app-info`. A bad token fails fast with a `401` on the SSE handshake, not with silent tool-call errors later.
+3. **Credentials are verified at connect time** by calling `/etapi/app-info` (with a 10s timeout). A bad token fails fast with a `401` on the SSE handshake, not with silent tool-call errors later.
 4. **A gateway bearer token is required** (`--gateway-auth bearer`, enabled by default in multi-tenant mode). Clients authenticate to *you* with a shared secret you hand out.
 5. **Client-supplied URLs are SSRF-checked.** By default, hostnames that resolve to private/loopback/link-local IPs (including cloud metadata `169.254.169.254`) are rejected. Adjust with `--trilium-url-allowlist` or `--allow-private-urls`.
 
-Startup-configured `TRILIUM_URL` / `TRILIUM_TOKEN` become optional *defaults* — used only when a client connects without supplying its own headers.
+**Startup-supplied `TRILIUM_URL` / `TRILIUM_TOKEN` are rejected in multi-tenant mode.** The server will refuse to start if either is set alongside `--multi-tenant`. This prevents a subtle token-leak where a client sending only one header would cause the operator's default to be mixed with client-supplied values.
+
+### Architecture
+
+```
+                  ┌───────────────────────────────────┐
+   Client A ─────►│ /sse                              │   ┌────────────────┐
+   (Auth: Bearer  │   1. gateway bearer check          │──►│ Trilium A      │
+    X-Trilium-*)  │   2. SSRF guard on X-Trilium-Url  │   │ (notes-a.tld)  │
+                  │   3. validate via /etapi/app-info │   └────────────────┘
+   Client B ─────►│   4. new TriliumClient (per conn) │   ┌────────────────┐
+                  │   5. new MCP Server (per conn)    │──►│ Trilium B      │
+                  │                                   │   │ (notes-b.tld)  │
+   Client N ─────►│ sessions: Map<sessionId, Session> │   └────────────────┘
+                  │                                   │           ...
+                  │ POST /message?sessionId=<uuid>    │
+                  │   routes to the right session     │
+                  │                                   │
+                  │ GET /health  (no auth)            │
+                  └───────────────────────────────────┘
+```
+
+Each SSE connection owns an independent `Server` + `TriliumClient`. Tool handlers close over the client, so tenant isolation is a property of the code, not something to enforce per-request.
 
 ### Quick start (Docker)
 
@@ -289,9 +343,19 @@ node dist/index.js \
   --gateway-token "$(openssl rand -hex 32)"
 ```
 
-### Connecting a client
+### HTTP endpoints
 
-Claude Desktop, [mcp-remote](https://github.com/geelen/mcp-remote), and other MCP clients that support custom headers on SSE connections will work. A raw `curl` smoke test:
+| Method | Path        | Auth                     | Purpose |
+|--------|-------------|--------------------------|---------|
+| `GET`  | `/health`   | none                     | Liveness probe — returns `{"status":"ok"}`. |
+| `GET`  | `/sse`      | gateway + per-connection | Open an SSE stream. Server replies with an `endpoint` event containing `/message?sessionId=<uuid>`. |
+| `POST` | `/message`  | implicit via `sessionId` | Client sends JSON-RPC messages here. `Content-Type: application/json`, up to 1 MB. |
+
+### Connecting clients
+
+Any MCP client that can attach custom HTTP headers to an SSE connection will work.
+
+**Smoke test with `curl`:**
 
 ```bash
 curl -N \
@@ -301,7 +365,58 @@ curl -N \
   http://mcp-server.example.com:3000/sse
 ```
 
-On success you'll see an `endpoint` SSE event with a `/message?sessionId=<uuid>` URL — that's where your client POSTs JSON-RPC requests.
+On success you'll see the `endpoint` SSE event, followed by message events as your client POSTs to `/message`.
+
+**Claude Desktop via [mcp-remote](https://github.com/geelen/mcp-remote):**
+
+Claude Desktop speaks stdio, so bridge it through `mcp-remote` which can carry custom headers to a remote SSE server. Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "trilium": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "mcp-remote",
+        "https://mcp.example.com/sse",
+        "--header", "Authorization: Bearer YOUR_GATEWAY_TOKEN",
+        "--header", "X-Trilium-Url: https://notes.example.com",
+        "--header", "X-Trilium-Token: YOUR_ETAPI_TOKEN"
+      ]
+    }
+  }
+}
+```
+
+**Claude Code (native SSE):**
+
+```bash
+claude mcp add trilium --scope user \
+  --transport sse https://mcp.example.com/sse \
+  --header "Authorization: Bearer YOUR_GATEWAY_TOKEN" \
+  --header "X-Trilium-Url: https://notes.example.com" \
+  --header "X-Trilium-Token: YOUR_ETAPI_TOKEN"
+```
+
+**TypeScript SDK:**
+
+```ts
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+
+const transport = new SSEClientTransport(new URL('https://mcp.example.com/sse'), {
+  requestInit: {
+    headers: {
+      Authorization: `Bearer ${GATEWAY_TOKEN}`,
+      'X-Trilium-Url': 'https://notes.example.com',
+      'X-Trilium-Token': ETAPI_TOKEN,
+    },
+  },
+});
+const client = new Client({ name: 'my-app', version: '1.0.0' });
+await client.connect(transport);
+```
 
 ### SSRF configuration
 
@@ -311,22 +426,109 @@ On success you'll see an `endpoint` SSE event with a `/message?sessionId=<uuid>`
 | `--trilium-url-allowlist host1,host2` | Only hostnames matching the list (exact or suffix — `example.com` matches `a.example.com`) are accepted. Takes precedence over the private-IP block. |
 | `--allow-private-urls` | Disable the private-IP block entirely. Use only on trusted/homelab networks. |
 
+### Error responses
+
+All errors are `application/json` with an `error` string. Common responses on `GET /sse`:
+
+| Status | `error` value                      | Meaning |
+|--------|------------------------------------|---------|
+| `401`  | `unauthorized`                     | Missing or wrong `Authorization: Bearer`. |
+| `401`  | `missing_trilium_credentials`      | `X-Trilium-Url` and `X-Trilium-Token` are required together; one or both missing. |
+| `401`  | `trilium_auth_failed`              | Trilium rejected the ETAPI token. |
+| `400`  | `url_rejected` (reason varies)     | Bad scheme, embedded credentials, private IP (no allowlist), or not in allowlist. |
+| `502`  | `trilium_unreachable`              | Can't reach the Trilium host at all. |
+| `504`  | `trilium_validate_timeout`         | `getAppInfo` probe exceeded 10 s (suggests a black-hole or slow host). |
+
+On `POST /message`:
+
+| Status | `error` value           | Meaning |
+|--------|-------------------------|---------|
+| `400`  | `missing_session_id`    | No `?sessionId=` query parameter. |
+| `404`  | `unknown_session`       | `sessionId` doesn't match any live SSE connection (typical after a disconnect / restart). |
+| `413`  | `payload_too_large`     | `Content-Length` exceeded 1 MB. |
+
+### Reverse-proxy (TLS termination)
+
+**Caddy** — simplest setup, automatic Let's Encrypt:
+
+```
+mcp.example.com {
+    # preserve the client's Authorization + X-Trilium-* headers (default behavior)
+    reverse_proxy 127.0.0.1:3000 {
+        # SSE needs large/indefinite response buffering disabled
+        flush_interval -1
+    }
+}
+```
+
+**nginx** — explicit SSE tuning:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name mcp.example.com;
+    # ssl_certificate / ssl_certificate_key configured elsewhere
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+
+        # SSE essentials
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 24h;
+    }
+}
+```
+
+Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Trilium-Token`. Both examples above do by default.
+
 ### Health check
 
-`GET /health` returns `{"status":"ok"}` with no auth required. Used by the Docker healthcheck; also useful for load-balancer probes.
+`GET /health` returns `{"status":"ok"}` with no auth required. Used by the Docker `HEALTHCHECK`; also useful for load-balancer probes.
 
 ### Security model
 
-- **Gateway auth** (who can connect at all) is an operator-issued shared bearer token. Constant-time comparison, tokens hashed at startup.
+- **Gateway auth** (who can connect at all) is an operator-issued shared bearer token. Constant-time comparison, tokens stored as SHA-256 hashes at startup.
 - **Backend auth** (which Trilium to talk to) is each client's own ETAPI token. It's only ever used to construct that client's `TriliumClient`; it's never logged.
+- **Creds are validated at connect time** with a 10-second timeout, so a bad or slow Trilium target fails the SSE handshake instead of hanging the connection.
 - **No TLS in-process.** Use a reverse proxy. The server listens on plain HTTP and expects to run behind one.
 - **No per-user identity.** The gateway token is a capability — anyone holding it can open a session and provide any Trilium credentials. If you need per-principal identity (OIDC, JWT), handle it at the reverse-proxy layer and pass through.
+
+### Production checklist
+
+- [ ] TLS terminated by a reverse proxy (Caddy / nginx / Traefik) — never expose port 3000 directly to the public internet.
+- [ ] Gateway token generated from a CSPRNG (`openssl rand -hex 32`) and rotated on compromise by restarting with a new token.
+- [ ] `--trilium-url-allowlist` set to the hostnames your users should legitimately reach, or the default private-IP block left in place.
+- [ ] `/health` exposed internally only (behind the proxy), so external scanners can't fingerprint the service.
+- [ ] Container runs as non-root (the shipped `Dockerfile` already uses `USER node`).
+- [ ] Reverse proxy logs scrubbed of `Authorization` / `X-Trilium-Token` headers if you forward request headers to an APM.
+- [ ] Firewall rules restrict ingress to the proxy host(s).
 
 ### What's not (yet) supported
 
 - StreamableHTTP transport (MCP's newer replacement for SSE) — on the roadmap; the routing layer is structured to allow it alongside `/sse`.
 - Rate limiting — handle at the reverse-proxy layer for now.
 - CORS — no browser MCP clients today; add if/when they appear.
+- Per-principal gateway identity (OIDC, JWT) — use reverse-proxy auth (mod_auth_openidc, oauth2-proxy) if you need it.
+- Per-tenant audit logs / metrics — the per-connection `Server` makes this straightforward to add but isn't implemented yet.
+
+### Troubleshooting
+
+**Connection immediately returns `401 unauthorized`.** Missing or malformed `Authorization: Bearer`. Check your client logs — some MCP clients strip non-standard headers on SSE.
+
+**Connection returns `401 trilium_auth_failed`.** The ETAPI token was rejected by Trilium. Test it directly: `curl -H "Authorization: $TOKEN" https://trilium.example.com/etapi/app-info`.
+
+**Connection returns `400 url_rejected` with `reason=private_address`.** You're pointing at a private/loopback IP (common in homelabs). Either add the hostname to `--trilium-url-allowlist` or pass `--allow-private-urls`.
+
+**Connection returns `504 trilium_validate_timeout`.** `getAppInfo` didn't respond within 10 seconds. Usually a DNS black hole, a firewall dropping packets, or Trilium is actually down.
+
+**Connection succeeds but tool calls hang.** Reverse proxy is buffering SSE. Verify `proxy_buffering off` (nginx) / `flush_interval -1` (Caddy).
+
+**`/health` returns 200 but clients get 502/504 from the proxy.** Proxy can reach the MCP server, but the server can't reach Trilium from its own network namespace (e.g., Docker bridge vs. host). Check `docker exec triliumnext-mcp wget -qO- http://trilium:8080/etapi/app-info`.
 
 ## Debugging with MCP Inspector
 

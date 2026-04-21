@@ -107,23 +107,24 @@ async function handleSseConnect(
     return;
   }
 
-  // 2. Resolve backend creds (per-connection headers, falling back to startup defaults)
-  const headerUrl = firstHeader(req.headers['x-trilium-url']);
-  const headerToken = firstHeader(req.headers['x-trilium-token']);
+  // 2. Resolve backend creds. In multi-tenant mode, require BOTH X-Trilium-Url
+  // and X-Trilium-Token from the client as an atomic pair — no fallback to
+  // server-side defaults (which config.ts rejects anyway). In single-tenant
+  // mode, ignore any incoming headers and always use the startup creds.
+  let clientUrlRaw: string;
+  let clientToken: string;
 
-  const clientUrlRaw = headerUrl ?? config.triliumUrl ?? null;
-  const clientToken = headerToken ?? config.triliumToken ?? null;
+  if (config.multiTenant) {
+    const headerUrl = firstHeader(req.headers['x-trilium-url']);
+    const headerToken = firstHeader(req.headers['x-trilium-token']);
+    if (!headerUrl || !headerToken) {
+      respondJson(res, 401, { error: 'missing_trilium_credentials' });
+      return;
+    }
+    clientUrlRaw = headerUrl;
+    clientToken = headerToken;
 
-  if (!clientUrlRaw || !clientToken) {
-    // Don't distinguish "no URL" from "no token" — generic for unauth'd callers.
-    respondJson(res, 401, { error: 'missing_trilium_credentials' });
-    return;
-  }
-
-  // 3. SSRF guard — only applies to client-supplied URLs in multi-tenant mode.
-  // Startup-configured URLs were chosen by the operator and are trusted.
-  const isClientSupplied = headerUrl !== null && headerUrl !== undefined;
-  if (config.multiTenant && isClientSupplied) {
+    // 3. SSRF guard — only applies to client-supplied URLs.
     try {
       await assertUrlIsSafe(clientUrlRaw, {
         allowlist: config.urlAllowlist,
@@ -136,6 +137,14 @@ async function handleSseConnect(
       }
       throw err;
     }
+  } else {
+    // Single-tenant: config guarantees these are non-null at this point.
+    if (!config.triliumUrl || !config.triliumToken) {
+      respondJson(res, 500, { error: 'server_misconfigured' });
+      return;
+    }
+    clientUrlRaw = config.triliumUrl;
+    clientToken = config.triliumToken;
   }
 
   // 4. Build the client and validate creds BEFORE we let the SSE transport

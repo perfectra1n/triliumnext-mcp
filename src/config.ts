@@ -226,6 +226,11 @@ Priority (highest to lowest):
 `);
 }
 
+function emptyToUndefined(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  return value.length > 0 ? value : undefined;
+}
+
 function parseBoolean(value: string | undefined): boolean | undefined {
   if (value === undefined) return undefined;
   const lower = value.toLowerCase();
@@ -244,8 +249,13 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
 
   const file = loadConfigFile();
 
-  const rawUrl = cli.url ?? process.env.TRILIUM_URL ?? file.url;
-  const rawToken = cli.token ?? process.env.TRILIUM_TOKEN ?? file.token ?? '';
+  // Empty string env vars are treated as unset. Docker compose overrides
+  // frequently resolve unset vars to "", and we want those to behave like
+  // "not configured" rather than "explicitly empty".
+  const rawUrl =
+    cli.url ?? emptyToUndefined(process.env.TRILIUM_URL) ?? file.url;
+  const rawToken =
+    cli.token ?? emptyToUndefined(process.env.TRILIUM_TOKEN) ?? file.token ?? '';
 
   const transportValue =
     cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
@@ -306,6 +316,19 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     process.exit(1);
   }
 
+  // Multi-tenant mode: startup-supplied TRILIUM_URL/TRILIUM_TOKEN are NOT
+  // allowed. Mixing them with per-connection headers used to fall back
+  // independently, which meant a client sending X-Trilium-Url alone would
+  // cause the operator's default token to leak to the client-chosen URL.
+  // In multi-tenant mode, creds MUST travel together as a pair.
+  if (multiTenant && (rawUrl !== undefined || rawToken !== '')) {
+    console.error(
+      'Error: --multi-tenant does not accept startup TRILIUM_URL or TRILIUM_TOKEN. ' +
+        'Clients must supply both as X-Trilium-Url and X-Trilium-Token headers.'
+    );
+    process.exit(1);
+  }
+
   // Bearer auth without any configured tokens is pointless and dangerous-looking
   // (would accept nothing / confuse operators); fail loudly.
   if (gatewayAuth === 'bearer' && gatewayTokens.length === 0) {
@@ -314,8 +337,12 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     process.exit(1);
   }
 
-  const triliumUrl = rawUrl ? normalizeServerUrl(rawUrl) : multiTenant ? null : normalizeServerUrl('http://localhost:37740');
-  const triliumToken = rawToken ? rawToken : multiTenant ? null : '';
+  const triliumUrl = multiTenant
+    ? null
+    : rawUrl
+      ? normalizeServerUrl(rawUrl)
+      : normalizeServerUrl('http://localhost:37740');
+  const triliumToken = multiTenant ? null : rawToken;
 
   return {
     triliumUrl,

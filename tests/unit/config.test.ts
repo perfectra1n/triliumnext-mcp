@@ -213,16 +213,65 @@ describe('loadConfig', () => {
       errSpy.mockRestore();
     });
 
-    it('keeps startup defaults usable in multi-tenant mode', () => {
+    it('rejects --url passed alongside --multi-tenant', () => {
+      const exitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(() => { throw new Error('exit'); });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(() =>
+        loadConfig([
+          '--transport', 'http',
+          '--multi-tenant',
+          '--gateway-token', 'abc',
+          '--url', 'http://trilium.example.com',
+        ])
+      ).toThrow();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+
+    it('rejects --token passed alongside --multi-tenant', () => {
+      const exitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(() => { throw new Error('exit'); });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(() =>
+        loadConfig([
+          '--transport', 'http',
+          '--multi-tenant',
+          '--gateway-token', 'abc',
+          '--token', 'default-etapi-token',
+        ])
+      ).toThrow();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+
+    it('rejects env TRILIUM_URL set alongside multi-tenant', () => {
+      process.env.TRILIUM_TRANSPORT = 'http';
+      process.env.TRILIUM_MULTI_TENANT = 'true';
+      process.env.TRILIUM_GATEWAY_TOKENS = 'abc';
+      process.env.TRILIUM_URL = 'http://trilium.example.com';
+      const exitSpy = vi
+        .spyOn(process, 'exit')
+        .mockImplementation(() => { throw new Error('exit'); });
+      const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect(() => loadConfig([])).toThrow();
+      expect(exitSpy).toHaveBeenCalledWith(1);
+      exitSpy.mockRestore();
+      errSpy.mockRestore();
+    });
+
+    it('multi-tenant config has null triliumUrl and triliumToken', () => {
       const config = loadConfig([
         '--transport', 'http',
         '--multi-tenant',
         '--gateway-token', 'abc',
-        '--url', 'http://trilium.example.com',
-        '--token', 'default-etapi-token',
       ]);
-      expect(config!.triliumUrl).toBe('http://trilium.example.com/etapi');
-      expect(config!.triliumToken).toBe('default-etapi-token');
+      expect(config!.triliumUrl).toBeNull();
+      expect(config!.triliumToken).toBeNull();
     });
   });
 });
