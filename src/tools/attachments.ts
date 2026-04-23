@@ -2,10 +2,9 @@ import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
-import { positionSchema } from './validators.js';
+import { positionSchema, required } from './validators.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 
-// Supported image MIME types for visual content display
 export const IMAGE_MIME_TYPES = new Set([
   'image/png',
   'image/jpeg',
@@ -22,7 +21,6 @@ export function isImageMimeType(mime: string): boolean {
 /**
  * MIME types that TriliumNext treats as text (string) content.
  * Mirrors TriliumNext's isStringNote() logic in services/utils.ts.
- * Anything NOT matching these is binary.
  */
 const TEXT_MIME_EXACT = new Set([
   'application/javascript',
@@ -39,14 +37,14 @@ export function isBinaryMimeType(mime: string): boolean {
   return true;
 }
 
-/**
- * Decode a base64 string to a Buffer of binary bytes.
- */
 export function base64ToBuffer(base64: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
-// Zod schemas for validation
+// ============================================================================
+// Schemas
+// ============================================================================
+
 const createAttachmentSchema = z.object({
   ownerId: z
     .string()
@@ -65,23 +63,137 @@ const createAttachmentSchema = z.object({
   position: positionSchema.optional().describe('Position for ordering (10, 20, 30...)'),
 });
 
-const getAttachmentSchema = z.object({
-  attachmentId: z
-    .string()
-    .min(1, 'Attachment ID is required')
-    .describe('ID of the attachment to retrieve'),
-});
+const getAttachmentSchema = z
+  .object({
+    attachmentId: z
+      .string()
+      .optional()
+      .describe('If provided, returns the single attachment with this ID.'),
+    noteId: z
+      .string()
+      .optional()
+      .describe('If provided, returns an array of all attachments for this note (metadata only).'),
+    include_content: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe(
+        'Only meaningful with "attachmentId". When true, returns the attachment body: ' +
+          'image attachments come back as MCP image blocks, text attachments as text, binary as base64-wrapped text.'
+      ),
+  })
+  .check((ctx) => {
+    const { attachmentId, noteId } = ctx.value;
+    const provided = [attachmentId !== undefined, noteId !== undefined].filter(Boolean).length;
+    if (provided === 0) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Exactly one of "attachmentId" or "noteId" is required',
+        path: [],
+      });
+    } else if (provided > 1) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Provide either "attachmentId" or "noteId", not both',
+        path: [],
+      });
+    }
+  });
 
-const updateAttachmentSchema = z.object({
-  attachmentId: z
-    .string()
-    .min(1, 'Attachment ID is required')
-    .describe('ID of the attachment to update'),
-  role: z.string().optional().describe('New role for the attachment'),
-  mime: z.string().optional().describe('New MIME type for the attachment'),
-  title: z.string().optional().describe('New title/filename for the attachment'),
-  position: positionSchema.optional().describe('New position for ordering'),
-});
+const writeAttachmentSchema = z
+  .object({
+    attachmentId: z
+      .string()
+      .min(1, 'Attachment ID is required')
+      .describe('ID of the attachment to write to'),
+    mode: z
+      .enum(['metadata', 'replace', 'edit'])
+      .describe(
+        'Write mode. ' +
+          '"metadata" — update role/mime/title/position only. ' +
+          '"replace" — overwrite attachment content (base64 for binary MIME types). ' +
+          '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to existing text content.'
+      ),
+    role: z.string().optional().describe('New role (metadata mode only).'),
+    mime: z.string().optional().describe('New MIME type (metadata mode only).'),
+    title: z.string().optional().describe('New title/filename (metadata mode only).'),
+    position: positionSchema.optional().describe('New position for ordering (metadata mode only).'),
+    content: z
+      .string()
+      .optional()
+      .describe(
+        'New content for "replace" mode. For binary MIME types, provide base64-encoded data.'
+      ),
+    changes: z
+      .array(searchReplaceBlockSchema)
+      .optional()
+      .describe(
+        '"edit" mode: array of {old_string, new_string} blocks applied sequentially to existing content.'
+      ),
+    patch: z
+      .string()
+      .optional()
+      .describe('"edit" mode: unified diff to apply to existing content.'),
+  })
+  .check((ctx) => {
+    const { mode, role, mime, title, position, content, changes, patch } = ctx.value;
+    if (mode === 'metadata') {
+      const hasMeta = role !== undefined || mime !== undefined || title !== undefined || position !== undefined;
+      if (!hasMeta) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="metadata" requires at least one of "role", "mime", "title", or "position"',
+          path: [],
+        });
+      }
+      if (content !== undefined || changes !== undefined || patch !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="metadata" cannot include content/changes/patch',
+          path: [],
+        });
+      }
+    } else if (mode === 'replace') {
+      if (content === undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="replace" requires "content"',
+          path: ['content'],
+        });
+      }
+      if (changes !== undefined || patch !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="replace" cannot include "changes" or "patch" (use mode="edit")',
+          path: [],
+        });
+      }
+    } else if (mode === 'edit') {
+      const diffModes = [changes !== undefined, patch !== undefined].filter(Boolean).length;
+      if (diffModes !== 1) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" requires exactly one of "changes" or "patch"',
+          path: [],
+        });
+      }
+      if (content !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" cannot include "content" (use mode="replace" instead)',
+          path: ['content'],
+        });
+      }
+    }
+  });
 
 const deleteAttachmentSchema = z.object({
   attachmentId: z
@@ -90,93 +202,66 @@ const deleteAttachmentSchema = z.object({
     .describe('ID of the attachment to delete'),
 });
 
-const getAttachmentContentSchema = z.object({
-  attachmentId: z
-    .string()
-    .min(1, 'Attachment ID is required')
-    .describe('ID of the attachment to get content from'),
-});
-
-const updateAttachmentContentSchema = z
-  .object({
-    attachmentId: z
-      .string()
-      .min(1, 'Attachment ID is required')
-      .describe('ID of the attachment to update'),
-    content: z
-      .string()
-      .optional()
-      .describe('Full replacement content for the attachment'),
-    changes: z
-      .array(searchReplaceBlockSchema)
-      .optional()
-      .describe(
-        'Array of search/replace blocks to apply sequentially. Each block has old_string (exact match to find) ' +
-          'and new_string (replacement).'
-      ),
-    patch: z
-      .string()
-      .optional()
-      .describe('Unified diff patch to apply to the existing attachment content.'),
-  })
-  .check((ctx) => {
-    const { content, changes, patch } = ctx.value;
-    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
-      Boolean
-    ).length;
-    if (modes === 0) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Exactly one of "content", "changes", or "patch" must be provided',
-        path: [],
-      });
-    } else if (modes > 1) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
-        path: [],
-      });
-    }
-  });
+// ============================================================================
+// Registration
+// ============================================================================
 
 export function registerAttachmentTools(): Tool[] {
   return [
     defineTool(
-      'create_attachment',
-      'Create a new attachment for a note. Attachments are files or images attached to notes. Returns the created attachment metadata.',
-      createAttachmentSchema
-    ),
-    defineTool(
       'get_attachment',
-      'Get attachment metadata by ID. Returns attachment properties including owner note ID, role, MIME type, title, and position.',
-      getAttachmentSchema
+      'Read an attachment or list attachments. Two modes:\n' +
+        '- Pass "noteId" to get an array of all attachments for that note (metadata only)\n' +
+        '- Pass "attachmentId" to get one attachment. Set include_content=true to also fetch the body\n\n' +
+        'When include_content=true with an attachmentId: images return an MCP image block, text returns the raw string, other binary content returns base64-wrapped text.',
+      getAttachmentSchema,
+      { title: 'Read attachment(s)', readOnlyHint: true }
     ),
     defineTool(
-      'update_attachment',
-      'Update attachment metadata (role, MIME type, title, or position). Does not update content - use update_attachment_content for that.',
-      updateAttachmentSchema
+      'create_attachment',
+      'Create a new attachment on a note. Returns the created attachment metadata. ' +
+        'For binary MIME types (images, PDFs, most file types), provide content as base64-encoded data. ' +
+        'For text MIME types (text/*, application/json, application/javascript), provide content as a raw string.',
+      createAttachmentSchema,
+      {
+        title: 'Create attachment',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+      }
+    ),
+    defineTool(
+      'write_attachment',
+      'Update an attachment. Three modes via "mode":\n' +
+        '- "metadata": update role/mime/title/position (no content change)\n' +
+        '- "replace": overwrite the attachment body (base64 for binary MIME types)\n' +
+        '- "edit": apply "changes" (search/replace blocks) or "patch" (unified diff) to existing text content\n\n' +
+        '"edit" mode only works for text content — it fetches existing content, applies the diff, and verifies the result.',
+      writeAttachmentSchema,
+      {
+        title: 'Write attachment',
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+      }
     ),
     defineTool(
       'delete_attachment',
       'Delete an attachment by ID. This permanently removes the attachment and its content.',
-      deleteAttachmentSchema
-    ),
-    defineTool(
-      'get_attachment_content',
-      'Get the content/body of an attachment. For text notes, returns the raw content as text. For image attachments (PNG, JPEG, GIF, WebP, SVG), returns the image for visual viewing.',
-      getAttachmentContentSchema
-    ),
-    defineTool(
-      'update_attachment_content',
-      'Update the content/body of an attachment. Three modes: (1) Full replacement via "content". ' +
-        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially. ' +
-        '(3) Unified diff via "patch". Exactly one mode must be used per call.',
-      updateAttachmentContentSchema
+      deleteAttachmentSchema,
+      {
+        title: 'Delete attachment',
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+      }
     ),
   ];
 }
+
+// ============================================================================
+// Dispatch
+// ============================================================================
 
 export async function handleAttachmentTool(
   client: TriliumClient,
@@ -192,7 +277,6 @@ export async function handleAttachmentTool(
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
       if (isBinaryMimeType(parsed.mime)) {
-        // Two-step binary upload: create metadata, then PUT decoded binary content
         const result = await client.createAttachment({
           ownerId: parsed.ownerId,
           role: parsed.role,
@@ -207,7 +291,6 @@ export async function handleAttachmentTool(
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       }
-      // Text content: single-step creation
       const result = await client.createAttachment({
         ownerId: parsed.ownerId,
         role: parsed.role,
@@ -223,40 +306,24 @@ export async function handleAttachmentTool(
 
     case 'get_attachment': {
       const parsed = getAttachmentSchema.parse(args);
-      const result = await client.getAttachment(parsed.attachmentId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
-    }
 
-    case 'update_attachment': {
-      const parsed = updateAttachmentSchema.parse(args);
-      const patch: { role?: string; mime?: string; title?: string; position?: number } = {};
-      if (parsed.role) patch.role = parsed.role;
-      if (parsed.mime) patch.mime = parsed.mime;
-      if (parsed.title) patch.title = parsed.title;
-      if (parsed.position) patch.position = parsed.position;
-      const result = await client.updateAttachment(parsed.attachmentId, patch);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
-    }
+      if (parsed.noteId) {
+        const attachments = await client.getNoteAttachments(parsed.noteId);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(attachments, null, 2) }],
+        };
+      }
 
-    case 'delete_attachment': {
-      const parsed = deleteAttachmentSchema.parse(args);
-      await client.deleteAttachment(parsed.attachmentId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
-      };
-    }
-
-    case 'get_attachment_content': {
-      const parsed = getAttachmentContentSchema.parse(args);
-      const attachment = await client.getAttachment(parsed.attachmentId);
+      const attachmentId = required(parsed.attachmentId, 'attachmentId');
+      const attachment = await client.getAttachment(attachmentId);
+      if (!parsed.include_content) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify(attachment, null, 2) }],
+        };
+      }
 
       if (isImageMimeType(attachment.mime)) {
-        // Fetch as binary and convert to base64 for proper MCP image content
-        const base64Content = await client.getAttachmentContentAsBase64(parsed.attachmentId);
+        const base64Content = await client.getAttachmentContentAsBase64(attachmentId);
         return {
           content: [
             {
@@ -268,50 +335,87 @@ export async function handleAttachmentTool(
         };
       }
 
-      // For non-images, fetch as text
-      const content = await client.getAttachmentContent(parsed.attachmentId);
+      const content = await client.getAttachmentContent(attachmentId);
       return {
         content: [{ type: 'text', text: content }],
       };
     }
 
-    case 'update_attachment_content': {
-      const parsed = updateAttachmentContentSchema.parse(args);
+    case 'write_attachment': {
+      const parsed = writeAttachmentSchema.parse(args);
 
-      // For full replacement of binary attachments, decode base64 and PUT binary
-      if (parsed.content !== undefined && parsed.changes === undefined && parsed.patch === undefined) {
+      if (parsed.mode === 'metadata') {
+        const patch: { role?: string; mime?: string; title?: string; position?: number } = {};
+        if (parsed.role !== undefined) patch.role = parsed.role;
+        if (parsed.mime !== undefined) patch.mime = parsed.mime;
+        if (parsed.title !== undefined) patch.title = parsed.title;
+        if (parsed.position !== undefined) patch.position = parsed.position;
+        const result = await client.updateAttachment(parsed.attachmentId, patch);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
+      if (parsed.mode === 'replace') {
+        const content = required(parsed.content, 'content');
         const attachment = await client.getAttachment(parsed.attachmentId);
         if (isBinaryMimeType(attachment.mime)) {
-          const binaryContent = base64ToBuffer(parsed.content);
+          const binaryContent = base64ToBuffer(content);
           await client.updateAttachmentContentBinary(parsed.attachmentId, binaryContent);
-          return {
-            content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
-          };
+        } else {
+          await client.updateAttachmentContent(parsed.attachmentId, content);
         }
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                { success: true, attachmentId: parsed.attachmentId, mode: 'replace' },
+                null,
+                2
+              ),
+            },
+          ],
+        };
       }
 
-      let finalContent: string;
-      if (parsed.changes !== undefined || parsed.patch !== undefined) {
-        // Diff modes: fetch existing content first
-        const existingContent = await client.getAttachmentContent(parsed.attachmentId);
-        finalContent = await resolveContent(existingContent, {
-          changes: parsed.changes,
-          patch: parsed.patch,
-        });
-      } else {
-        // Full replacement mode (text content)
-        finalContent = parsed.content ?? '';
-      }
+      // edit
+      const existing = await client.getAttachmentContent(parsed.attachmentId);
+      const finalContent = await resolveContent(existing, {
+        changes: parsed.changes,
+        patch: parsed.patch,
+      });
       await client.updateAttachmentContent(parsed.attachmentId, finalContent);
 
-      // Verify search/replace changes were actually persisted
       if (parsed.changes !== undefined) {
         const readBack = await client.getAttachmentContent(parsed.attachmentId);
         verifySearchReplaceResults(readBack, parsed.changes);
       }
 
       return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              { success: true, attachmentId: parsed.attachmentId, mode: 'edit' },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+
+    case 'delete_attachment': {
+      const parsed = deleteAttachmentSchema.parse(args);
+      await client.deleteAttachment(parsed.attachmentId);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, attachmentId: parsed.attachmentId }, null, 2),
+          },
+        ],
       };
     }
 

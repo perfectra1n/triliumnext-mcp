@@ -5,13 +5,19 @@ import { registerOrganizationTools, handleOrganizationTool } from '../../src/too
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from '../../src/tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
-import { registerAttachmentTools, handleAttachmentTool, isBinaryMimeType } from '../../src/tools/attachments.js';
+import {
+  registerAttachmentTools,
+  handleAttachmentTool,
+  isBinaryMimeType,
+} from '../../src/tools/attachments.js';
 import { registerRevisionTools, handleRevisionTool } from '../../src/tools/revisions.js';
 import type { TriliumClient } from '../../src/client/trilium.js';
-import { DiffApplicationError } from '../../src/tools/diff.js';
 import { NOTE_TYPES } from '../../src/tools/validators.js';
 
+// ============================================================================
 // Mock client factory
+// ============================================================================
+
 function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient {
   return {
     createNote: vi.fn(),
@@ -34,11 +40,7 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     updateAttribute: vi.fn(),
     deleteAttribute: vi.fn(),
     getDayNote: vi.fn(),
-    getWeekNote: vi.fn(),
-    getMonthNote: vi.fn(),
-    getYearNote: vi.fn(),
     getInboxNote: vi.fn(),
-    getAppInfo: vi.fn(),
     createRevision: vi.fn(),
     getNoteRevisions: vi.fn(),
     getRevision: vi.fn(),
@@ -58,3687 +60,1058 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
   } as unknown as TriliumClient;
 }
 
-describe('NOTE_TYPES and NoteType sync', () => {
-  it('should contain all 15 expected note types', () => {
+// ============================================================================
+// Utility / type tests
+// ============================================================================
+
+describe('NOTE_TYPES', () => {
+  it('contains the 15 note types Trilium supports', () => {
     expect(NOTE_TYPES).toHaveLength(15);
-    const types = new Set(NOTE_TYPES);
-    expect(types.has('text')).toBe(true);
-    expect(types.has('code')).toBe(true);
-    expect(types.has('render')).toBe(true);
-    expect(types.has('file')).toBe(true);
-    expect(types.has('image')).toBe(true);
-    expect(types.has('search')).toBe(true);
-    expect(types.has('relationMap')).toBe(true);
-    expect(types.has('book')).toBe(true);
-    expect(types.has('noteMap')).toBe(true);
-    expect(types.has('mermaid')).toBe(true);
-    expect(types.has('webView')).toBe(true);
-    expect(types.has('shortcut')).toBe(true);
-    expect(types.has('doc')).toBe(true);
-    expect(types.has('contentWidget')).toBe(true);
-    expect(types.has('launcher')).toBe(true);
+    expect(new Set(NOTE_TYPES)).toEqual(
+      new Set([
+        'text',
+        'code',
+        'render',
+        'file',
+        'image',
+        'search',
+        'relationMap',
+        'book',
+        'noteMap',
+        'mermaid',
+        'webView',
+        'shortcut',
+        'doc',
+        'contentWidget',
+        'launcher',
+      ])
+    );
   });
 });
 
 describe('isBinaryMimeType', () => {
-  it('should return true for binary MIME types', () => {
+  it('is true for binary MIMEs', () => {
     expect(isBinaryMimeType('image/png')).toBe(true);
     expect(isBinaryMimeType('image/jpeg')).toBe(true);
     expect(isBinaryMimeType('application/pdf')).toBe(true);
     expect(isBinaryMimeType('application/octet-stream')).toBe(true);
   });
 
-  it('should return false for text MIME types', () => {
+  it('is false for text MIMEs', () => {
     expect(isBinaryMimeType('text/plain')).toBe(false);
     expect(isBinaryMimeType('text/html')).toBe(false);
-    expect(isBinaryMimeType('text/csv')).toBe(false);
     expect(isBinaryMimeType('application/json')).toBe(false);
     expect(isBinaryMimeType('application/javascript')).toBe(false);
     expect(isBinaryMimeType('image/svg+xml')).toBe(false);
   });
 });
 
-describe('Note Tools', () => {
-  describe('registerNoteTools', () => {
-    it('should register 10 note tools', () => {
+// ============================================================================
+// Notes
+// ============================================================================
+
+describe('Note tools', () => {
+  describe('registration', () => {
+    it('registers 5 tools with reads first', () => {
       const tools = registerNoteTools();
-      expect(tools).toHaveLength(10);
       expect(tools.map((t) => t.name)).toEqual([
-        'create_note',
         'get_note',
-        'get_note_content',
-        'update_note',
-        'update_note_content',
-        'append_note_content',
-        'delete_note',
-        'undelete_note',
-        'get_note_attachments',
         'get_note_history',
+        'create_note',
+        'write_note',
+        'delete_note',
       ]);
     });
 
-    it('should have correct input schemas for all tools', () => {
+    it('sets annotations on every tool', () => {
       const tools = registerNoteTools();
-      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
-
-      // create_note schema
-      expect(toolMap['create_note'].inputSchema.required).toEqual([
-        'parentNoteId',
-        'title',
-        'type',
-        'content',
-      ]);
-      expect(toolMap['create_note'].inputSchema.properties).toHaveProperty('mime');
-      expect(toolMap['create_note'].inputSchema.properties).toHaveProperty('format');
-
-      // update_note schema - noteId required, others optional
-      expect(toolMap['update_note'].inputSchema.required).toEqual(['noteId']);
-      expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('title');
-      expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('type');
-      expect(toolMap['update_note'].inputSchema.properties).toHaveProperty('mime');
-
-      // update_note_content schema - should have format option and diff modes
-      expect(toolMap['update_note_content'].inputSchema.required).toEqual(['noteId']);
-      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('format');
-      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('content');
-      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('changes');
-      expect(toolMap['update_note_content'].inputSchema.properties).toHaveProperty('patch');
-    });
-  });
-
-  describe('handleNoteTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('create_note', () => {
-      it('should create note with required parameters', async () => {
-        const mockResult = {
-          note: { noteId: 'new123', title: 'Test' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        const result = await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Test',
-          type: 'text',
-          content: '<p>Hello</p>',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createNote).toHaveBeenCalledWith({
-          parentNoteId: 'root',
-          title: 'Test',
-          type: 'text',
-          content: '<p>Hello</p>',
-          mime: undefined,
-          notePosition: undefined,
-          prefix: undefined,
-          isExpanded: undefined,
-          noteId: undefined,
-          branchId: undefined,
-          dateCreated: undefined,
-          utcDateCreated: undefined,
-        });
-      });
-
-      it('should create note with notePosition', async () => {
-        const mockResult = {
-          note: { noteId: 'new123' },
-          branch: { branchId: 'branch123', notePosition: 5 },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'First Note',
-          type: 'text',
-          content: '<p>Content</p>',
-          notePosition: 5,
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ notePosition: 5 })
-        );
-      });
-
-      it('should create note with prefix', async () => {
-        const mockResult = {
-          note: { noteId: 'new123' },
-          branch: { branchId: 'branch123', prefix: 'Draft' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'My Note',
-          type: 'text',
-          content: '<p>Content</p>',
-          prefix: 'Draft',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ prefix: 'Draft' })
-        );
-      });
-
-      it('should create note with isExpanded', async () => {
-        const mockResult = {
-          note: { noteId: 'new123' },
-          branch: { branchId: 'branch123', isExpanded: true },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Folder Note',
-          type: 'text',
-          content: '<p>Content</p>',
-          isExpanded: true,
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ isExpanded: true })
-        );
-      });
-
-      it('should create note with dateCreated for backdating', async () => {
-        const mockResult = {
-          note: { noteId: 'new123', dateCreated: '2023-06-15 10:30:00.000+0100' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Backdated Note',
-          type: 'text',
-          content: '<p>From the past</p>',
-          dateCreated: '2023-06-15 10:30:00.000+0100',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ dateCreated: '2023-06-15 10:30:00.000+0100' })
-        );
-      });
-
-      it('should create note with forced noteId', async () => {
-        const mockResult = {
-          note: { noteId: 'customId123' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Custom ID Note',
-          type: 'text',
-          content: '<p>Content</p>',
-          noteId: 'customId123',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ noteId: 'customId123' })
-        );
-      });
-
-      it('should create note with all optional parameters', async () => {
-        const mockResult = {
-          note: { noteId: 'full123' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Full Note',
-          type: 'code',
-          content: 'print("hello")',
-          mime: 'text/x-python',
-          notePosition: 100,
-          prefix: 'Archive',
-          isExpanded: false,
-          noteId: 'customNote',
-          branchId: 'customBranch',
-          dateCreated: '2023-01-01 00:00:00.000+0000',
-          utcDateCreated: '2023-01-01 00:00:00.000Z',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith({
-          parentNoteId: 'root',
-          title: 'Full Note',
-          type: 'code',
-          content: 'print("hello")',
-          mime: 'text/x-python',
-          notePosition: 100,
-          prefix: 'Archive',
-          isExpanded: false,
-          noteId: 'customNote',
-          branchId: 'customBranch',
-          dateCreated: '2023-01-01 00:00:00.000+0000',
-          utcDateCreated: '2023-01-01 00:00:00.000Z',
-        });
-      });
-
-      it('should create note with mime type for code notes', async () => {
-        const mockResult = {
-          note: { noteId: 'code123', type: 'code' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Script',
-          type: 'code',
-          content: 'console.log("hello")',
-          mime: 'application/javascript',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith({
-          parentNoteId: 'root',
-          title: 'Script',
-          type: 'code',
-          content: 'console.log("hello")',
-          mime: 'application/javascript',
-        });
-      });
-
-      it('should create note with empty content', async () => {
-        const mockResult = { note: { noteId: 'empty123' }, branch: { branchId: 'b1' } };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Empty Note',
-          type: 'text',
-          content: '',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ content: '' })
-        );
-      });
-
-      it('should handle special characters in title', async () => {
-        const mockResult = { note: { noteId: 'special123' }, branch: { branchId: 'b1' } };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        const specialTitle = 'Test <script>alert("xss")</script> & "quotes"';
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: specialTitle,
-          type: 'text',
-          content: '<p>Content</p>',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ title: specialTitle })
-        );
-      });
-
-      it('should reject invalid note type', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'create_note', {
-            parentNoteId: 'root',
-            title: 'Test',
-            type: 'invalid_type',
-            content: 'content',
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should accept mermaid note type', async () => {
-        const mockResult = { note: { noteId: 'merm1' }, branch: { branchId: 'b1' } };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Mermaid Diagram',
-          type: 'mermaid',
-          content: 'graph TD; A-->B;',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ type: 'mermaid' })
-        );
-      });
-
-      it('should create binary note with two-step upload', async () => {
-        const mockResult = {
-          note: { noteId: 'img123' },
-          branch: { branchId: 'b1' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.updateNoteContentBinary).mockResolvedValue(undefined);
-
-        const pngBase64 = 'iVBORw0KGgo=';
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Test Image',
-          type: 'image',
-          mime: 'image/png',
-          content: pngBase64,
-        });
-
-        // Should create note with empty content for binary types
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({ content: '' })
-        );
-        // Should PUT decoded binary content
-        expect(mockClient.updateNoteContentBinary).toHaveBeenCalledWith(
-          'img123',
-          expect.any(Buffer)
-        );
-      });
-
-      it('should convert markdown to HTML when format is markdown', async () => {
-        const mockResult = {
-          note: { noteId: 'md123', title: 'Markdown Note' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Markdown Note',
-          type: 'text',
-          content: '# Hello\n\nThis is **bold** text.',
-          format: 'markdown',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({
-            content: expect.stringContaining('<h1>Hello</h1>'),
-          })
-        );
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({
-            content: expect.stringContaining('<strong>bold</strong>'),
-          })
-        );
-      });
-
-      it('should pass content unchanged when format is html', async () => {
-        const mockResult = {
-          note: { noteId: 'html123' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        const htmlContent = '<p>Already HTML</p>';
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'HTML Note',
-          type: 'text',
-          content: htmlContent,
-          format: 'html',
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({
-            content: htmlContent,
-          })
-        );
-      });
-
-      it('should pass content unchanged when format is not specified (default)', async () => {
-        const mockResult = {
-          note: { noteId: 'default123' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        const htmlContent = '<p>Default HTML</p>';
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Default Format',
-          type: 'text',
-          content: htmlContent,
-        });
-
-        expect(mockClient.createNote).toHaveBeenCalledWith(
-          expect.objectContaining({
-            content: htmlContent,
-          })
-        );
-      });
-    });
-
-    describe('get_note', () => {
-      it('should get note by ID', async () => {
-        const mockNote = {
-          noteId: 'abc123',
-          title: 'Test Note',
-          type: 'text',
-          attributes: [],
-        };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleNoteTool(mockClient, 'get_note', { noteId: 'abc123' });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getNote).toHaveBeenCalledWith('abc123');
-        expect(result!.content[0].text).toContain('abc123');
-      });
-
-      it('should reject missing noteId', async () => {
-        await expect(handleNoteTool(mockClient, 'get_note', {})).rejects.toThrow();
-      });
-    });
-
-    describe('get_note_content', () => {
-      it('should get text note content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello World</p>');
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getNoteContent).toHaveBeenCalledWith('note123');
-        expect(result!.content[0].text).toBe('<p>Hello World</p>');
-      });
-
-      it('should get code note content', async () => {
-        const codeContent = 'function test() {\n  return 42;\n}';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(codeContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'code123',
-        });
-
-        expect(result!.content[0].text).toBe(codeContent);
-      });
-
-      it('should handle empty content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('');
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'empty123',
-        });
-
-        expect(result!.content[0].text).toBe('');
-      });
-
-      it('should convert HTML to markdown when format is markdown', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(
-          '<h2>Heading</h2><p>Some <strong>bold</strong> text</p>'
-        );
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-          format: 'markdown',
-        });
-
-        expect(result!.content[0].text).toContain('## Heading');
-        expect(result!.content[0].text).toContain('**bold**');
-      });
-
-      it('should return HTML unchanged when format is html', async () => {
-        const htmlContent = '<p>HTML content</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-          format: 'html',
-        });
-
-        expect(result!.content[0].text).toBe(htmlContent);
-      });
-
-      it('should return HTML by default when format is not specified', async () => {
-        const htmlContent = '<div>Default HTML</div>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content[0].text).toBe(htmlContent);
-      });
-    });
-
-    describe('get_note_content with images', () => {
-      it('should include images by default', async () => {
-        const htmlContent = '<p>Text</p><img src="api/attachments/img123/image">';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img123', mime: 'image/png', title: 'photo.png' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('base64data');
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(result!.content).toHaveLength(2);
-        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
-        expect(result!.content[1]).toEqual({
-          type: 'image',
-          data: 'base64data',
-          mimeType: 'image/png',
-        });
-        expect(mockClient.getNoteAttachments).toHaveBeenCalledWith('note123');
-      });
-
-      it('should opt-out with includeImages: false', async () => {
-        const htmlContent = '<p>Text</p><img src="api/attachments/img123/image">';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-          includeImages: false,
-        });
-
-        expect(result).not.toBeNull();
-        expect(result!.content).toHaveLength(1);
-        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
-        expect(mockClient.getNoteAttachments).not.toHaveBeenCalled();
-      });
-
-      it('should work normally when no attachments', async () => {
-        const htmlContent = '<p>Just text, no images</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content).toHaveLength(1);
-        expect(result!.content[0]).toEqual({ type: 'text', text: htmlContent });
-      });
-
-      it('should handle failed image content fetch gracefully', async () => {
-        const htmlContent = '<p>Text</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img123', mime: 'image/png', title: 'photo.png' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockRejectedValue(new Error('Not found'));
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content).toHaveLength(1);
-        expect(result!.content[0].type).toBe('text');
-        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('Some attachments could not be loaded');
-        expect(textContent).toContain('img123');
-        expect(textContent).toContain('Not found');
-      });
-
-      it('should list non-image attachments with suggestion to fetch', async () => {
-        const htmlContent = '<p>Text</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'doc123', mime: 'application/pdf', title: 'document.pdf' } as any,
-        ]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content).toHaveLength(1);
-        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('Attachments:');
-        expect(textContent).toContain('document.pdf');
-        expect(textContent).toContain('application/pdf');
-        expect(textContent).toContain('doc123');
-        expect(textContent).toContain('get_attachment_content');
-      });
-
-      it('should fetch multiple images in parallel', async () => {
-        const htmlContent = '<p>Content</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img1', mime: 'image/png', title: 'a.png' } as any,
-          { attachmentId: 'img2', mime: 'image/jpeg', title: 'b.jpg' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64)
-          .mockResolvedValueOnce('data1')
-          .mockResolvedValueOnce('data2');
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content).toHaveLength(3);
-        expect(result!.content[0].type).toBe('text');
-        expect(result!.content[1]).toEqual({ type: 'image', data: 'data1', mimeType: 'image/png' });
-        expect(result!.content[2]).toEqual({ type: 'image', data: 'data2', mimeType: 'image/jpeg' });
-      });
-
-      it('should work with markdown format and images', async () => {
-        const htmlContent = '<h1>Title</h1>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img1', mime: 'image/png', title: 'a.png' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('imgdata');
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-          format: 'markdown',
-        });
-
-        expect(result!.content).toHaveLength(2);
-        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('# Title');
-        expect(result!.content[1]).toEqual({
-          type: 'image',
-          data: 'imgdata',
-          mimeType: 'image/png',
-        });
-      });
-
-      it('should handle empty content with images enabled', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('');
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([]);
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(result!.content).toHaveLength(1);
-        expect(result!.content[0]).toEqual({ type: 'text', text: '' });
-      });
-
-      it('should handle mixed images and other attachments', async () => {
-        const htmlContent = '<p>Content</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img1', mime: 'image/png', title: 'photo.png' } as any,
-          { attachmentId: 'pdf1', mime: 'application/pdf', title: 'report.pdf' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('imgdata');
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        // Should have text + 1 image
-        expect(result!.content).toHaveLength(2);
-
-        // Text should contain attachment info for PDF
-        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('report.pdf');
-        expect(textContent).toContain('application/pdf');
-        expect(textContent).toContain('get_attachment_content');
-
-        // Image should be included
-        expect(result!.content[1]).toEqual({
-          type: 'image',
-          data: 'imgdata',
-          mimeType: 'image/png',
-        });
-      });
-
-      it('should not call getAttachment for individual metadata', async () => {
-        const htmlContent = '<p>Text</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'img1', mime: 'image/png', title: 'a.png' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('data');
-
-        await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        expect(mockClient.getAttachment).not.toHaveBeenCalled();
-        expect(mockClient.getNoteAttachments).toHaveBeenCalledTimes(1);
-      });
-
-      it('should discover attachments not referenced in HTML', async () => {
-        // HTML has no attachment references at all, but the note has attachments via the API
-        const htmlContent = '<p>Plain text with no attachment references</p>';
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue(htmlContent);
-        vi.mocked(mockClient.getNoteAttachments).mockResolvedValue([
-          { attachmentId: 'hidden1', mime: 'image/png', title: 'unreferenced.png' } as any,
-          { attachmentId: 'hidden2', mime: 'application/pdf', title: 'unreferenced.pdf' } as any,
-        ]);
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue('hiddendata');
-
-        const result = await handleNoteTool(mockClient, 'get_note_content', {
-          noteId: 'note123',
-        });
-
-        // Should still discover and include both attachments
-        expect(result!.content).toHaveLength(2); // text + 1 image
-        const textContent = (result!.content[0] as { type: 'text'; text: string }).text;
-        expect(textContent).toContain('unreferenced.pdf');
-        expect(textContent).toContain('application/pdf');
-        expect(result!.content[1]).toEqual({
-          type: 'image',
-          data: 'hiddendata',
-          mimeType: 'image/png',
-        });
-      });
-    });
-
-    describe('update_note', () => {
-      it('should update note title only', async () => {
-        const mockNote = { noteId: 'abc123', title: 'New Title' };
-        vi.mocked(mockClient.updateNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleNoteTool(mockClient, 'update_note', {
-          noteId: 'abc123',
-          title: 'New Title',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateNote).toHaveBeenCalledWith('abc123', { title: 'New Title' });
-      });
-
-      it('should update note type', async () => {
-        const mockNote = { noteId: 'abc123', type: 'code' };
-        vi.mocked(mockClient.updateNote).mockResolvedValue(mockNote as any);
-
-        await handleNoteTool(mockClient, 'update_note', {
-          noteId: 'abc123',
-          type: 'code',
-        });
-
-        expect(mockClient.updateNote).toHaveBeenCalledWith('abc123', { type: 'code' });
-      });
-
-      it('should update note mime type', async () => {
-        const mockNote = { noteId: 'abc123', mime: 'text/markdown' };
-        vi.mocked(mockClient.updateNote).mockResolvedValue(mockNote as any);
-
-        await handleNoteTool(mockClient, 'update_note', {
-          noteId: 'abc123',
-          mime: 'text/markdown',
-        });
-
-        expect(mockClient.updateNote).toHaveBeenCalledWith('abc123', { mime: 'text/markdown' });
-      });
-
-      it('should update multiple properties at once', async () => {
-        const mockNote = { noteId: 'abc123', title: 'New', type: 'code', mime: 'text/python' };
-        vi.mocked(mockClient.updateNote).mockResolvedValue(mockNote as any);
-
-        await handleNoteTool(mockClient, 'update_note', {
-          noteId: 'abc123',
-          title: 'New',
-          type: 'code',
-          mime: 'text/python',
-        });
-
-        expect(mockClient.updateNote).toHaveBeenCalledWith('abc123', {
-          title: 'New',
-          type: 'code',
-          mime: 'text/python',
-        });
-      });
-
-      it('should reject invalid type value', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note', {
-            noteId: 'abc123',
-            type: 'invalid',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('update_note_content', () => {
-      it('should update note content', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        const result = await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: '<p>Updated content</p>',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          '<p>Updated content</p>'
-        );
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
-      });
-
-      it('should update with empty content', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: '',
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '');
-      });
-
-      it('should handle large content', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-        const largeContent = '<p>' + 'x'.repeat(100000) + '</p>';
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: largeContent,
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', largeContent);
-      });
-
-      it('should convert markdown to HTML when format is markdown', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: '## Heading\n\n- Item 1\n- Item 2',
-          format: 'markdown',
-        });
-
-        const calledContent = vi.mocked(mockClient.updateNoteContent).mock.calls[0][1];
-        expect(calledContent).toContain('<h2>Heading</h2>');
-        expect(calledContent).toContain('<li>Item 1</li>');
-        expect(calledContent).toContain('<li>Item 2</li>');
-      });
-
-      it('should pass content unchanged when format is html', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        const htmlContent = '<div>Raw HTML</div>';
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: htmlContent,
-          format: 'html',
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', htmlContent);
-      });
-
-      it('should pass content unchanged when format is not specified', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        const htmlContent = '<span>Default</span>';
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: htmlContent,
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', htmlContent);
-      });
-    });
-
-    describe('update_note_content - diff modes', () => {
-      it('should apply search/replace changes to existing content', async () => {
-        vi.mocked(mockClient.getNoteContent)
-          .mockResolvedValueOnce('<p>Hello World</p>') // initial read
-          .mockResolvedValueOnce('<p>Goodbye World</p>'); // verification read-back
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          changes: [{ old_string: 'Hello', new_string: 'Goodbye' }],
-        });
-
-        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Goodbye World</p>');
-      });
-
-      it('should apply multiple search/replace changes sequentially', async () => {
-        vi.mocked(mockClient.getNoteContent)
-          .mockResolvedValueOnce('<p>Hello World, Hello Again</p>') // initial read
-          .mockResolvedValueOnce('<p>Goodbye World, Goodbye Again</p>'); // verification read-back
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          changes: [
-            { old_string: 'Hello World', new_string: 'Goodbye World' },
-            { old_string: 'Hello Again', new_string: 'Goodbye Again' },
-          ],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          '<p>Goodbye World, Goodbye Again</p>'
-        );
-      });
-
-      it('should apply unified diff patch', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('line1\nline2\nline3\n');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          patch:
-            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
-        });
-
-        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          'line1\nline2_modified\nline3\n'
-        );
-      });
-
-      it('should throw when read-back verification fails (content not persisted)', async () => {
-        vi.mocked(mockClient.getNoteContent)
-          .mockResolvedValueOnce('<p>Hello World</p>') // initial read
-          .mockResolvedValueOnce('<p>Hello World</p>'); // read-back returns UNCHANGED content
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            changes: [{ old_string: 'Hello', new_string: 'Goodbye' }],
-          })
-        ).rejects.toThrow('read-back verification failed');
-      });
-
-      it('should not fetch existing content for full replacement mode', async () => {
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'abc123',
-          content: '<p>Replaced</p>',
-        });
-
-        expect(mockClient.getNoteContent).not.toHaveBeenCalled();
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Replaced</p>');
-      });
-
-      it('should reject when both content and changes provided', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            content: '<p>Content</p>',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject when both content and patch provided', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            content: '<p>Content</p>',
-            patch: '--- a\n+++ b\n',
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject when all three provided', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            content: '<p>Content</p>',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-            patch: '--- a\n+++ b\n',
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject when none of content/changes/patch provided', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should throw clear error when search string not found', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello</p>');
-
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            changes: [{ old_string: 'nonexistent', new_string: 'x' }],
-          })
-        ).rejects.toThrow(DiffApplicationError);
-      });
-
-      it('should throw clear error when search string is ambiguous', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Hello Hello</p>');
-
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            changes: [{ old_string: 'Hello', new_string: 'x' }],
-          })
-        ).rejects.toThrow(DiffApplicationError);
-      });
-
-      it('should reject format=markdown with changes mode', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'abc123',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-            format: 'markdown',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('append_note_content', () => {
-      it('should append content to existing note', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing content</p>');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        const result = await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          content: '<p>New content</p>',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getNoteContent).toHaveBeenCalledWith('abc123');
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          '<p>Existing content</p><p>New content</p>'
-        );
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
-      });
-
-      it('should append to empty note', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          content: '<p>First content</p>',
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>First content</p>');
-      });
-
-      it('should convert markdown to HTML when format is markdown', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          content: '## New Section',
-          format: 'markdown',
-        });
-
-        const calledContent = vi.mocked(mockClient.updateNoteContent).mock.calls[0][1];
-        expect(calledContent).toContain('<p>Existing</p>');
-        expect(calledContent).toContain('<h2>New Section</h2>');
-      });
-
-      it('should reject missing noteId', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'append_note_content', { content: '<p>Test</p>' })
-        ).rejects.toThrow();
-      });
-
-      it('should reject when no content mode provided', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'append_note_content', { noteId: 'abc123' })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('append_note_content - diff modes', () => {
-      it('should apply search/replace changes to existing content', async () => {
-        vi.mocked(mockClient.getNoteContent)
-          .mockResolvedValueOnce('<p>Existing</p>') // initial read
-          .mockResolvedValueOnce('<p>Modified</p>'); // verification read-back
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          changes: [{ old_string: 'Existing', new_string: 'Modified' }],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith('abc123', '<p>Modified</p>');
-      });
-
-      it('should apply unified diff patch', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('line1\nline2\nline3\n');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          patch:
-            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          'line1\nline2_modified\nline3\n'
-        );
-      });
-
-      it('should still support plain content append (backward compat)', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'abc123',
-          content: '<p>Appended</p>',
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'abc123',
-          '<p>Existing</p><p>Appended</p>'
-        );
-      });
-
-      it('should reject mutual exclusivity violations', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'append_note_content', {
-            noteId: 'abc123',
-            content: '<p>Content</p>',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('image embedding', () => {
-      const mockImage = { data: 'base64data', mime: 'image/png', filename: 'photo.png' };
-
-      it('should create note with images using two-step binary upload', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'With Image' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        const result = await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'With Image',
-          type: 'text',
-          content: '<p>Hello</p><img src="image:0">',
-          images: [mockImage],
-        });
-
-        expect(result).not.toBeNull();
-        // Step 1: create attachment with empty content
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/png',
-          title: 'photo.png',
-          content: '',
-        });
-        // Step 2: upload decoded binary content
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>Hello</p><img src="api/attachments/att001/image/photo.png">'
-        );
-      });
-
-      it('should append unreferenced images at end of content', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Test' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Test',
-          type: 'text',
-          content: '<p>No placeholders</p>',
-          images: [mockImage],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>No placeholders</p>\n<p><img src="api/attachments/att001/image/photo.png"></p>'
-        );
-      });
-
-      it('should not call updateNoteContent when no images provided', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Test' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Test',
-          type: 'text',
-          content: '<p>No images</p>',
-        });
-
-        expect(mockClient.createAttachment).not.toHaveBeenCalled();
-        expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
-      });
-
-      it('should create multiple images with correct placeholders', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Multi' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment)
-          .mockResolvedValueOnce({ attachmentId: 'att001', title: 'a.png' } as any)
-          .mockResolvedValueOnce({ attachmentId: 'att002', title: 'b.jpg' } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Multi',
-          type: 'text',
-          content: '<img src="image:0"><p>Text</p><img src="image:1">',
-          images: [
-            { data: 'img1data', mime: 'image/png', filename: 'a.png' },
-            { data: 'img2data', mime: 'image/jpeg', filename: 'b.jpg' },
-          ],
-        });
-
-        expect(mockClient.createAttachment).toHaveBeenCalledTimes(2);
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledTimes(2);
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<img src="api/attachments/att001/image/a.png"><p>Text</p><img src="api/attachments/att002/image/b.jpg">'
-        );
-      });
-
-      it('should process images in update_note_content', async () => {
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'note123',
-          content: '<p>New content</p><img src="image:0">',
-          images: [mockImage],
-        });
-
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/png',
-          title: 'photo.png',
-          content: '',
-        });
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>New content</p><img src="api/attachments/att001/image/photo.png">'
-        );
-      });
-
-      it('should process images in append_note_content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'note123',
-          content: '<p>More content</p><img src="image:0">',
-          images: [mockImage],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>Existing</p><p>More content</p><img src="api/attachments/att001/image/photo.png">'
-        );
-      });
-
-      it('should reject images with changes mode', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'note123',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-            images: [mockImage],
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject images with patch mode', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'note123',
-            patch: '--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new',
-            images: [mockImage],
-          })
-        ).rejects.toThrow();
-      });
-
-      describe('unresolved placeholder guard', () => {
-        it('should reject update_note_content with image placeholder but no images array', async () => {
-          await expect(
-            handleNoteTool(mockClient, 'update_note_content', {
-              noteId: 'note123',
-              content: '<p>Hi</p><img src="image:0">',
-            })
-          ).rejects.toThrow(/Unresolved placeholder/);
-          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
-        });
-
-        it('should reject update_note_content with out-of-range image index', async () => {
-          vi.mocked(mockClient.createAttachment).mockResolvedValue({
-            attachmentId: 'att001',
-            title: 'photo.png',
-          } as any);
-          vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-
-          await expect(
-            handleNoteTool(mockClient, 'update_note_content', {
-              noteId: 'note123',
-              content: '<img src="image:0"><img src="image:1">',
-              images: [mockImage],
-            })
-          ).rejects.toThrow(/Unresolved placeholder.*image:1/);
-          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
-        });
-
-        it('should reject update_note_content with file placeholder but no files array', async () => {
-          await expect(
-            handleNoteTool(mockClient, 'update_note_content', {
-              noteId: 'note123',
-              content: '<p>See <a href="file:0">report</a></p>',
-            })
-          ).rejects.toThrow(/Unresolved placeholder.*file:0/);
-          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
-        });
-
-        it('should reject create_note with image placeholder but no images array', async () => {
-          await expect(
-            handleNoteTool(mockClient, 'create_note', {
-              parentNoteId: 'root',
-              title: 'Bad',
-              type: 'text',
-              content: '<img src="image:0">',
-            })
-          ).rejects.toThrow(/Unresolved placeholder/);
-          expect(mockClient.createNote).not.toHaveBeenCalled();
-        });
-
-        it('should reject append_note_content with image placeholder but no images array', async () => {
-          vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
-          await expect(
-            handleNoteTool(mockClient, 'append_note_content', {
-              noteId: 'note123',
-              content: '<img src="image:0">',
-            })
-          ).rejects.toThrow(/Unresolved placeholder/);
-          expect(mockClient.updateNoteContent).not.toHaveBeenCalled();
-        });
-
-        it('should reject single-quoted image placeholder to surface attribute-format mistakes', async () => {
-          await expect(
-            handleNoteTool(mockClient, 'update_note_content', {
-              noteId: 'note123',
-              content: "<img src='image:0'>",
-            })
-          ).rejects.toThrow(/Unresolved placeholder/);
-        });
-      });
-    });
-
-    describe('data URL support', () => {
-      it('should parse data URL and extract mime for images', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Data URL Test' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Data URL Test',
-          type: 'text',
-          content: '<img src="image:0">',
-          images: [{
-            data: 'data:image/webp;base64,UklGRh4AAABXRUJQVlA4IBIAAAAwAQCdASoBAAEAAkA4JYgCdAEO/hepAA==',
-            mime: 'image/png',  // should be overridden by data URL mime
-            filename: 'photo.png',
-          }],
-        });
-
-        // The mime should come from the data URL (image/webp), not the explicit field (image/png)
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/webp',
-          title: 'photo.png',
-          content: '',
-        });
-        // Binary content should have been uploaded separately
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-      });
-
-      it('should parse data URL and extract mime for files', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'File Data URL' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'doc.pdf',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'File Data URL',
-          type: 'text',
-          content: '<a href="file:0">Doc</a>',
-          files: [{
-            data: 'data:application/pdf;base64,JVBERi0xLjQ=',
-            mime: 'text/plain',  // should be overridden
-            filename: 'doc.pdf',
-          }],
-        });
-
-        // Mime overridden by data URL to application/pdf (binary), so two-step
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'application/pdf',
-          title: 'doc.pdf',
-          content: '',
-        });
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-      });
-
-      it('should use raw base64 and explicit mime when not a data URL', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Raw Base64' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'photo.png',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Raw Base64',
-          type: 'text',
-          content: '<img src="image:0">',
-          images: [{
-            data: 'iVBORw0KGgo=',
-            mime: 'image/png',
-            filename: 'photo.png',
-          }],
-        });
-
-        // image/png is binary, so two-step with empty content
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/png',
-          title: 'photo.png',
-          content: '',
-        });
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-      });
-    });
-
-    describe('file embedding', () => {
-      const mockFile = { data: 'cGRmLWNvbnRlbnQ=', mime: 'application/pdf', filename: 'report.pdf' };
-
-      it('should create note with binary files using two-step upload', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'With File' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'report.pdf',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'With File',
-          type: 'text',
-          content: '<p>Download: <a href="file:0">Report</a></p>',
-          files: [mockFile],
-        });
-
-        // application/pdf is binary, so two-step
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'application/pdf',
-          title: 'report.pdf',
-          content: '',
-        });
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'att001',
-          expect.any(Buffer)
-        );
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>Download: <a href="api/attachments/att001/download">Report</a></p>'
-        );
-      });
-
-      it('should append unreferenced files at end of content', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Test' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'report.pdf',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Test',
-          type: 'text',
-          content: '<p>No file placeholder</p>',
-          files: [mockFile],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>No file placeholder</p>\n<p><a href="api/attachments/att001/download">report.pdf</a></p>'
-        );
-      });
-
-      it('should process both images and files in same note', async () => {
-        const mockResult = {
-          note: { noteId: 'note123', title: 'Mixed' },
-          branch: { branchId: 'branch123' },
-        };
-        vi.mocked(mockClient.createNote).mockResolvedValue(mockResult as any);
-        vi.mocked(mockClient.createAttachment)
-          .mockResolvedValueOnce({ attachmentId: 'img001', title: 'photo.png' } as any)
-          .mockResolvedValueOnce({ attachmentId: 'file001', title: 'report.pdf' } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'create_note', {
-          parentNoteId: 'root',
-          title: 'Mixed',
-          type: 'text',
-          content: '<img src="image:0"><a href="file:0">Report</a>',
-          images: [{ data: 'imgdata', mime: 'image/png', filename: 'photo.png' }],
-          files: [mockFile],
-        });
-
-        expect(mockClient.createAttachment).toHaveBeenCalledTimes(2);
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledTimes(2);
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<img src="api/attachments/img001/image/photo.png"><a href="api/attachments/file001/download">Report</a>'
-        );
-      });
-
-      it('should process files in update_note_content', async () => {
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'data.csv',
-        } as any);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'update_note_content', {
-          noteId: 'note123',
-          content: '<p>Updated: <a href="file:0">Data</a></p>',
-          files: [{ data: 'Y3N2ZGF0YQ==', mime: 'text/csv', filename: 'data.csv' }],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>Updated: <a href="api/attachments/att001/download">Data</a></p>'
-        );
-      });
-
-      it('should process files in append_note_content', async () => {
-        vi.mocked(mockClient.getNoteContent).mockResolvedValue('<p>Existing</p>');
-        vi.mocked(mockClient.createAttachment).mockResolvedValue({
-          attachmentId: 'att001',
-          title: 'report.pdf',
-        } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-        vi.mocked(mockClient.updateNoteContent).mockResolvedValue(undefined);
-
-        await handleNoteTool(mockClient, 'append_note_content', {
-          noteId: 'note123',
-          content: '<p>See: <a href="file:0">Report</a></p>',
-          files: [mockFile],
-        });
-
-        expect(mockClient.updateNoteContent).toHaveBeenCalledWith(
-          'note123',
-          '<p>Existing</p><p>See: <a href="api/attachments/att001/download">Report</a></p>'
-        );
-      });
-
-      it('should reject files with changes mode', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'update_note_content', {
-            noteId: 'note123',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-            files: [mockFile],
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject files with patch mode', async () => {
-        await expect(
-          handleNoteTool(mockClient, 'append_note_content', {
-            noteId: 'note123',
-            patch: '--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new',
-            files: [mockFile],
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('delete_note', () => {
-      it('should delete note by ID', async () => {
-        vi.mocked(mockClient.deleteNote).mockResolvedValue(undefined);
-
-        const result = await handleNoteTool(mockClient, 'delete_note', { noteId: 'abc123' });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.deleteNote).toHaveBeenCalledWith('abc123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, noteId: 'abc123' });
-      });
-
-      it('should reject missing noteId', async () => {
-        await expect(handleNoteTool(mockClient, 'delete_note', {})).rejects.toThrow();
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleNoteTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('Search Tools', () => {
-  describe('registerSearchTools', () => {
-    it('should register 2 search tools', () => {
-      const tools = registerSearchTools();
-      expect(tools).toHaveLength(2);
-      expect(tools.map((t) => t.name)).toEqual(['search_notes', 'get_note_tree']);
-    });
-
-    it('should have correct input schema for search_notes', () => {
-      const tools = registerSearchTools();
-      const searchTool = tools.find((t) => t.name === 'search_notes')!;
-
-      expect(searchTool.inputSchema.required).toEqual(['query']);
-      expect(searchTool.inputSchema.properties).toHaveProperty('fastSearch');
-      expect(searchTool.inputSchema.properties).toHaveProperty('includeArchivedNotes');
-      expect(searchTool.inputSchema.properties).toHaveProperty('ancestorNoteId');
-      expect(searchTool.inputSchema.properties).toHaveProperty('orderBy');
-      expect(searchTool.inputSchema.properties).toHaveProperty('orderDirection');
-      expect(searchTool.inputSchema.properties).toHaveProperty('limit');
-    });
-  });
-
-  describe('handleSearchTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('search_notes', () => {
-      it('should search with query only', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', { query: 'test' });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith({
-          search: 'test',
-          fastSearch: undefined,
-          includeArchivedNotes: undefined,
-          ancestorNoteId: undefined,
-          orderBy: undefined,
-          orderDirection: undefined,
-          limit: undefined,
-        });
-      });
-
-      it('should search with fastSearch enabled', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          fastSearch: true,
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ fastSearch: true })
-        );
-      });
-
-      it('should search including archived notes', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          includeArchivedNotes: true,
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ includeArchivedNotes: true })
-        );
-      });
-
-      it('should search within ancestor subtree', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          ancestorNoteId: 'parent123',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ ancestorNoteId: 'parent123' })
-        );
-      });
-
-      it('should search with ordering by title ascending', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          orderBy: 'title',
-          orderDirection: 'asc',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ orderBy: 'title', orderDirection: 'asc' })
-        );
-      });
-
-      it('should search with ordering by dateModified descending', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          orderBy: 'dateModified',
-          orderDirection: 'desc',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ orderBy: 'dateModified', orderDirection: 'desc' })
-        );
-      });
-
-      it('should search with limit', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'test',
-          limit: 5,
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ limit: 5 })
-        );
-      });
-
-      it('should search with all parameters combined', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: '#project',
-          fastSearch: true,
-          includeArchivedNotes: true,
-          ancestorNoteId: 'workspace123',
-          orderBy: 'dateCreated',
-          orderDirection: 'desc',
-          limit: 20,
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith({
-          search: '#project',
-          fastSearch: true,
-          includeArchivedNotes: true,
-          ancestorNoteId: 'workspace123',
-          orderBy: 'dateCreated',
-          orderDirection: 'desc',
-          limit: 20,
-        });
-      });
-
-      it('should return formatted results', async () => {
-        const mockResults = {
-          results: [
-            { noteId: 'note1', title: 'First' },
-            { noteId: 'note2', title: 'Second' },
-          ],
-        };
-        vi.mocked(mockClient.searchNotes).mockResolvedValue(mockResults as any);
-
-        const result = await handleSearchTool(mockClient, 'search_notes', { query: 'test' });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.results).toHaveLength(2);
-      });
-
-      it('should handle empty results', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        const result = await handleSearchTool(mockClient, 'search_notes', { query: 'nonexistent' });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.results).toHaveLength(0);
-      });
-
-      it('should handle Trilium search syntax with labels', async () => {
-        vi.mocked(mockClient.searchNotes).mockResolvedValue({ results: [] });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: '#priority=high #status=active',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({ search: '#priority=high #status=active' })
-        );
-      });
-
-      it('should reject invalid orderDirection', async () => {
-        await expect(
-          handleSearchTool(mockClient, 'search_notes', {
-            query: 'test',
-            orderDirection: 'invalid',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('get_note_tree', () => {
-      it('should get note tree for root', async () => {
-        const mockNote = {
-          noteId: 'root',
-          title: 'Root',
-          type: 'text',
-          childNoteIds: ['child1', 'child2'],
-          childBranchIds: ['branch1', 'branch2'],
-        };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleSearchTool(mockClient, 'get_note_tree', { noteId: 'root' });
-
-        expect(result).not.toBeNull();
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.noteId).toBe('root');
-        expect(parsed.childNoteIds).toEqual(['child1', 'child2']);
-        expect(parsed.isExpanded).toBe(true);
-      });
-
-      it('should handle note with no children', async () => {
-        const mockNote = {
-          noteId: 'leaf',
-          title: 'Leaf Note',
-          type: 'text',
-          childNoteIds: [],
-          childBranchIds: [],
-        };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleSearchTool(mockClient, 'get_note_tree', { noteId: 'leaf' });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.childNoteIds).toEqual([]);
-        expect(parsed.isExpanded).toBe(false);
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleSearchTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-
-    describe('search query preprocessing', () => {
-      it('should preprocess OR in fulltext queries before calling client', async () => {
-        const mockClient = createMockClient({
-          searchNotes: vi.fn().mockResolvedValue({ results: [] }),
-        });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: 'authentication OR authorization',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({
-            search: 'note.content *=* authentication OR note.content *=* authorization',
-          })
-        );
-      });
-
-      it('should pass attribute OR queries through unchanged', async () => {
-        const mockClient = createMockClient({
-          searchNotes: vi.fn().mockResolvedValue({ results: [] }),
-        });
-
-        await handleSearchTool(mockClient, 'search_notes', {
-          query: '#book or #article',
-        });
-
-        expect(mockClient.searchNotes).toHaveBeenCalledWith(
-          expect.objectContaining({
-            search: '#book or #article',
-          })
-        );
-      });
-    });
-  });
-});
-
-describe('Organization Tools', () => {
-  describe('registerOrganizationTools', () => {
-    it('should register 4 organization tools', () => {
-      const tools = registerOrganizationTools();
-      expect(tools).toHaveLength(4);
-      expect(tools.map((t) => t.name)).toEqual(['move_note', 'clone_note', 'reorder_notes', 'delete_branch']);
-    });
-
-    it('should have correct input schemas', () => {
-      const tools = registerOrganizationTools();
-      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
-
-      expect(toolMap['move_note'].inputSchema.required).toEqual(['noteId', 'newParentNoteId']);
-      expect(toolMap['move_note'].inputSchema.properties).toHaveProperty('prefix');
-
-      expect(toolMap['clone_note'].inputSchema.required).toEqual(['noteId', 'parentNoteId']);
-      expect(toolMap['clone_note'].inputSchema.properties).toHaveProperty('prefix');
-
-      expect(toolMap['reorder_notes'].inputSchema.required).toEqual([
-        'parentNoteId',
-        'notePositions',
-      ]);
-
-      expect(toolMap['delete_branch'].inputSchema.required).toEqual(['branchId']);
-    });
-  });
-
-  describe('handleOrganizationTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('move_note', () => {
-      it('should move note to new parent', async () => {
-        const mockNote = { noteId: 'note123', parentBranchIds: ['oldbranch'] };
-        const mockNewBranch = { branchId: 'newbranch', noteId: 'note123', parentNoteId: 'newparent' };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-        vi.mocked(mockClient.createBranch).mockResolvedValue(mockNewBranch as any);
-        vi.mocked(mockClient.deleteBranch).mockResolvedValue(undefined);
-
-        const result = await handleOrganizationTool(mockClient, 'move_note', {
-          noteId: 'note123',
-          newParentNoteId: 'newparent',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getNote).toHaveBeenCalledWith('note123');
-        expect(mockClient.createBranch).toHaveBeenCalledWith({
-          noteId: 'note123',
-          parentNoteId: 'newparent',
-          prefix: undefined,
-        });
-        expect(mockClient.deleteBranch).toHaveBeenCalledWith('oldbranch');
-      });
-
-      it('should move note with prefix', async () => {
-        const mockNote = { noteId: 'note123', parentBranchIds: ['oldbranch'] };
-        const mockNewBranch = { branchId: 'newbranch', prefix: 'Archive' };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-        vi.mocked(mockClient.createBranch).mockResolvedValue(mockNewBranch as any);
-        vi.mocked(mockClient.deleteBranch).mockResolvedValue(undefined);
-
-        await handleOrganizationTool(mockClient, 'move_note', {
-          noteId: 'note123',
-          newParentNoteId: 'archive',
-          prefix: 'Archive',
-        });
-
-        expect(mockClient.createBranch).toHaveBeenCalledWith({
-          noteId: 'note123',
-          parentNoteId: 'archive',
-          prefix: 'Archive',
-        });
-      });
-
-      it('should handle note with no existing branches', async () => {
-        const mockNote = { noteId: 'note123', parentBranchIds: [] };
-        const mockNewBranch = { branchId: 'newbranch' };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-        vi.mocked(mockClient.createBranch).mockResolvedValue(mockNewBranch as any);
-
-        await handleOrganizationTool(mockClient, 'move_note', {
-          noteId: 'note123',
-          newParentNoteId: 'newparent',
-        });
-
-        expect(mockClient.deleteBranch).not.toHaveBeenCalled();
-      });
-    });
-
-    describe('clone_note', () => {
-      it('should clone note to new parent', async () => {
-        const mockBranch = { branchId: 'newbranch', noteId: 'note123', parentNoteId: 'parent123' };
-        vi.mocked(mockClient.createBranch).mockResolvedValue(mockBranch as any);
-
-        const result = await handleOrganizationTool(mockClient, 'clone_note', {
-          noteId: 'note123',
-          parentNoteId: 'parent123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createBranch).toHaveBeenCalledWith({
-          noteId: 'note123',
-          parentNoteId: 'parent123',
-          prefix: undefined,
-        });
-      });
-
-      it('should clone note with prefix', async () => {
-        const mockBranch = { branchId: 'newbranch', prefix: 'Reference' };
-        vi.mocked(mockClient.createBranch).mockResolvedValue(mockBranch as any);
-
-        await handleOrganizationTool(mockClient, 'clone_note', {
-          noteId: 'note123',
-          parentNoteId: 'refs',
-          prefix: 'Reference',
-        });
-
-        expect(mockClient.createBranch).toHaveBeenCalledWith({
-          noteId: 'note123',
-          parentNoteId: 'refs',
-          prefix: 'Reference',
-        });
-      });
-    });
-
-    describe('reorder_notes', () => {
-      it('should reorder notes', async () => {
-        const mockBranch1 = { branchId: 'b1', notePosition: 100 };
-        const mockBranch2 = { branchId: 'b2', notePosition: 200 };
-        vi.mocked(mockClient.updateBranch)
-          .mockResolvedValueOnce(mockBranch1 as any)
-          .mockResolvedValueOnce(mockBranch2 as any);
-        vi.mocked(mockClient.refreshNoteOrdering).mockResolvedValue(undefined);
-
-        const result = await handleOrganizationTool(mockClient, 'reorder_notes', {
-          parentNoteId: 'parent123',
-          notePositions: [
-            { branchId: 'b1', notePosition: 100 },
-            { branchId: 'b2', notePosition: 200 },
-          ],
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateBranch).toHaveBeenCalledWith('b1', { notePosition: 100 });
-        expect(mockClient.updateBranch).toHaveBeenCalledWith('b2', { notePosition: 200 });
-        expect(mockClient.refreshNoteOrdering).toHaveBeenCalledWith('parent123');
-      });
-
-      it('should handle empty notePositions array', async () => {
-        vi.mocked(mockClient.refreshNoteOrdering).mockResolvedValue(undefined);
-
-        const result = await handleOrganizationTool(mockClient, 'reorder_notes', {
-          parentNoteId: 'parent123',
-          notePositions: [],
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateBranch).not.toHaveBeenCalled();
-        expect(mockClient.refreshNoteOrdering).toHaveBeenCalledWith('parent123');
-      });
-
-      it('should handle single note reposition', async () => {
-        const mockBranch = { branchId: 'b1', notePosition: 50 };
-        vi.mocked(mockClient.updateBranch).mockResolvedValue(mockBranch as any);
-        vi.mocked(mockClient.refreshNoteOrdering).mockResolvedValue(undefined);
-
-        await handleOrganizationTool(mockClient, 'reorder_notes', {
-          parentNoteId: 'parent123',
-          notePositions: [{ branchId: 'b1', notePosition: 50 }],
-        });
-
-        expect(mockClient.updateBranch).toHaveBeenCalledTimes(1);
-      });
-    });
-
-    describe('delete_branch', () => {
-      it('should delete branch by ID', async () => {
-        vi.mocked(mockClient.deleteBranch).mockResolvedValue(undefined);
-
-        const result = await handleOrganizationTool(mockClient, 'delete_branch', {
-          branchId: 'branch123',
-        });
-
-        expect(mockClient.deleteBranch).toHaveBeenCalledWith('branch123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, branchId: 'branch123' });
-      });
-
-      it('should reject missing branchId', async () => {
-        await expect(
-          handleOrganizationTool(mockClient, 'delete_branch', {})
-        ).rejects.toThrow();
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleOrganizationTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('Attribute Tools', () => {
-  describe('registerAttributeTools', () => {
-    it('should register 4 attribute tools', () => {
-      const tools = registerAttributeTools();
-      expect(tools).toHaveLength(4);
-      expect(tools.map((t) => t.name)).toEqual(['get_attributes', 'get_attribute', 'set_attribute', 'delete_attribute']);
-    });
-
-    it('should have correct input schema for set_attribute', () => {
-      const tools = registerAttributeTools();
-      const setAttrTool = tools.find((t) => t.name === 'set_attribute')!;
-
-      expect(setAttrTool.inputSchema.required).toEqual(['noteId', 'type', 'name', 'value']);
-      expect(setAttrTool.inputSchema.properties).toHaveProperty('isInheritable');
-      expect(setAttrTool.inputSchema.properties).toHaveProperty('position');
-      expect(setAttrTool.inputSchema.properties).toHaveProperty('attributeId');
-    });
-
-    it('should have correct input schema for get_attribute', () => {
-      const tools = registerAttributeTools();
-      const getAttrTool = tools.find((t) => t.name === 'get_attribute')!;
-
-      expect(getAttrTool.inputSchema.required).toEqual(['attributeId']);
-    });
-  });
-
-  describe('handleAttributeTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('get_attributes', () => {
-      it('should get and categorize attributes', async () => {
-        const mockNote = {
-          noteId: 'abc123',
-          attributes: [
-            { attributeId: 'attr1', type: 'label', name: 'tag', value: 'test' },
-            { attributeId: 'attr2', type: 'relation', name: 'parent', value: 'root' },
-            { attributeId: 'attr3', type: 'label', name: 'priority', value: 'high' },
-          ],
-        };
-        vi.mocked(mockClient.getNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleAttributeTool(mockClient, 'get_attributes', {
-          noteId: 'abc123',
-        });
-
-        expect(result).not.toBeNull();
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.labels).toHaveLength(2);
-        expect(parsed.relations).toHaveLength(1);
-      });
-
-      it('should handle note with no attributes', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ noteId: 'abc', attributes: [] } as any);
-
-        const result = await handleAttributeTool(mockClient, 'get_attributes', {
-          noteId: 'abc',
-        });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.labels).toHaveLength(0);
-        expect(parsed.relations).toHaveLength(0);
-      });
-    });
-
-    describe('get_attribute', () => {
-      it('should get attribute by ID', async () => {
-        const mockAttr = {
-          attributeId: 'attr123',
-          noteId: 'note456',
-          type: 'label',
-          name: 'testLabel',
-          value: 'testValue',
-          position: 10,
-          isInheritable: false,
-        };
-        vi.mocked(mockClient.getAttribute).mockResolvedValue(mockAttr as any);
-
-        const result = await handleAttributeTool(mockClient, 'get_attribute', {
-          attributeId: 'attr123',
-        });
-
-        expect(mockClient.getAttribute).toHaveBeenCalledWith('attr123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.attributeId).toBe('attr123');
-        expect(parsed.name).toBe('testLabel');
-      });
-
-      it('should reject missing attributeId', async () => {
-        await expect(
-          handleAttributeTool(mockClient, 'get_attribute', {})
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('set_attribute', () => {
-      it('should create new label attribute', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({
-          attributeId: 'new',
-          type: 'label',
-          name: 'priority',
-          value: 'high',
-        } as any);
-
-        const result = await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'priority',
-          value: 'high',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createAttribute).toHaveBeenCalledWith({
-          noteId: 'abc123',
-          type: 'label',
-          name: 'priority',
-          value: 'high',
-          isInheritable: undefined,
-        });
-        expect(mockClient.updateAttribute).not.toHaveBeenCalled();
-      });
-
-      it('should create new relation attribute', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({
-          attributeId: 'new',
-          type: 'relation',
-        } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'relation',
-          name: 'template',
-          value: 'template123',
-        });
-
-        expect(mockClient.createAttribute).toHaveBeenCalledWith({
-          noteId: 'abc123',
-          type: 'relation',
-          name: 'template',
-          value: 'template123',
-          isInheritable: undefined,
-        });
-      });
-
-      it('should create inheritable attribute', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'new' } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'cssClass',
-          value: 'highlight',
-          isInheritable: true,
-        });
-
-        expect(mockClient.createAttribute).toHaveBeenCalledWith({
-          noteId: 'abc123',
-          type: 'label',
-          name: 'cssClass',
-          value: 'highlight',
-          isInheritable: true,
-          position: undefined,
-          attributeId: undefined,
-        });
-      });
-
-      it('should create attribute with position', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'new' } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'priority',
-          value: 'high',
-          position: 10,
-        });
-
-        expect(mockClient.createAttribute).toHaveBeenCalledWith(
-          expect.objectContaining({ position: 10 })
-        );
-      });
-
-      it('should create attribute with forced attributeId', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({ attributes: [] } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'forcedId' } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'custom',
-          value: 'test',
-          attributeId: 'forcedId',
-        });
-
-        expect(mockClient.createAttribute).toHaveBeenCalledWith(
-          expect.objectContaining({ attributeId: 'forcedId' })
-        );
-      });
-
-      it('should skip existing check when attributeId is provided', async () => {
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'forcedId' } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'custom',
-          value: 'test',
-          attributeId: 'forcedId',
-        });
-
-        // Should not call getNote to check for existing
-        expect(mockClient.getNote).not.toHaveBeenCalled();
-      });
-
-      it('should update existing attribute by name and type match', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({
-          attributes: [
-            { attributeId: 'existing', type: 'label', name: 'priority', value: 'low' },
-          ],
-        } as any);
-        vi.mocked(mockClient.updateAttribute).mockResolvedValue({
-          attributeId: 'existing',
-          value: 'high',
-        } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'label',
-          name: 'priority',
-          value: 'high',
-        });
-
-        expect(mockClient.updateAttribute).toHaveBeenCalledWith('existing', { value: 'high' });
-        expect(mockClient.createAttribute).not.toHaveBeenCalled();
-      });
-
-      it('should create new when same name but different type', async () => {
-        vi.mocked(mockClient.getNote).mockResolvedValue({
-          attributes: [
-            { attributeId: 'existing', type: 'label', name: 'parent', value: 'somevalue' },
-          ],
-        } as any);
-        vi.mocked(mockClient.createAttribute).mockResolvedValue({ attributeId: 'new' } as any);
-
-        await handleAttributeTool(mockClient, 'set_attribute', {
-          noteId: 'abc123',
-          type: 'relation',
-          name: 'parent',
-          value: 'parentnote123',
-        });
-
-        expect(mockClient.createAttribute).toHaveBeenCalled();
-        expect(mockClient.updateAttribute).not.toHaveBeenCalled();
-      });
-
-      it('should reject invalid attribute type', async () => {
-        await expect(
-          handleAttributeTool(mockClient, 'set_attribute', {
-            noteId: 'abc123',
-            type: 'invalid',
-            name: 'test',
-            value: 'value',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('delete_attribute', () => {
-      it('should delete attribute by ID', async () => {
-        vi.mocked(mockClient.deleteAttribute).mockResolvedValue(undefined);
-
-        const result = await handleAttributeTool(mockClient, 'delete_attribute', {
-          attributeId: 'attr123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.deleteAttribute).toHaveBeenCalledWith('attr123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, attributeId: 'attr123' });
-      });
-
-      it('should reject missing attributeId', async () => {
-        await expect(
-          handleAttributeTool(mockClient, 'delete_attribute', {})
-        ).rejects.toThrow();
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleAttributeTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('Calendar Tools', () => {
-  describe('registerCalendarTools', () => {
-    it('should register 2 calendar tools', () => {
-      const tools = registerCalendarTools();
-      expect(tools).toHaveLength(2);
-      expect(tools.map((t) => t.name)).toEqual(['get_day_note', 'get_inbox_note']);
-    });
-
-    it('should not require date parameter', () => {
-      const tools = registerCalendarTools();
-      tools.forEach((tool) => {
-        expect(tool.inputSchema.required).toEqual([]);
-      });
-    });
-  });
-
-  describe('handleCalendarTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('get_day_note', () => {
-      it('should get day note for specific date', async () => {
-        vi.mocked(mockClient.getDayNote).mockResolvedValue({
-          noteId: 'day123',
-          title: '2024-01-15',
-        } as any);
-
-        const result = await handleCalendarTool(mockClient, 'get_day_note', {
-          date: '2024-01-15',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getDayNote).toHaveBeenCalledWith('2024-01-15');
-      });
-
-      it('should use today when date not provided', async () => {
-        vi.mocked(mockClient.getDayNote).mockResolvedValue({ noteId: 'day123' } as any);
-
-        await handleCalendarTool(mockClient, 'get_day_note', {});
-
-        expect(mockClient.getDayNote).toHaveBeenCalled();
-        const callArg = vi.mocked(mockClient.getDayNote).mock.calls[0][0];
-        expect(callArg).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      });
-
-      it('should return note details in response', async () => {
-        const mockNote = {
-          noteId: 'day123',
-          title: '2024-01-15',
-          type: 'text',
-          dateCreated: '2024-01-15 00:00:00',
-        };
-        vi.mocked(mockClient.getDayNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleCalendarTool(mockClient, 'get_day_note', {
-          date: '2024-01-15',
-        });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.noteId).toBe('day123');
-        expect(parsed.title).toBe('2024-01-15');
-      });
-    });
-
-    describe('get_inbox_note', () => {
-      it('should get inbox note for specific date', async () => {
-        vi.mocked(mockClient.getInboxNote).mockResolvedValue({
-          noteId: 'inbox123',
-          title: 'Inbox',
-        } as any);
-
-        const result = await handleCalendarTool(mockClient, 'get_inbox_note', {
-          date: '2024-01-15',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getInboxNote).toHaveBeenCalledWith('2024-01-15');
-      });
-
-      it('should use today when date not provided', async () => {
-        vi.mocked(mockClient.getInboxNote).mockResolvedValue({ noteId: 'inbox123' } as any);
-
-        await handleCalendarTool(mockClient, 'get_inbox_note', {});
-
-        expect(mockClient.getInboxNote).toHaveBeenCalled();
-        const callArg = vi.mocked(mockClient.getInboxNote).mock.calls[0][0];
-        expect(callArg).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      });
-
-      it('should return inbox note details', async () => {
-        const mockNote = { noteId: 'inbox123', title: 'Inbox', type: 'text' };
-        vi.mocked(mockClient.getInboxNote).mockResolvedValue(mockNote as any);
-
-        const result = await handleCalendarTool(mockClient, 'get_inbox_note', {
-          date: '2024-01-15',
-        });
-
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.noteId).toBe('inbox123');
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleCalendarTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('System Tools', () => {
-  describe('registerSystemTools', () => {
-    it('should register 4 system tools', () => {
-      const tools = registerSystemTools();
-      expect(tools).toHaveLength(4);
-      expect(tools.map((t) => t.name)).toEqual([
-        'create_revision',
-        'create_backup',
-        'export_note',
-        'search_tools',
-      ]);
-    });
-
-    it('should have correct input schemas', () => {
-      const tools = registerSystemTools();
-      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
-
-      expect(toolMap['create_revision'].inputSchema.required).toEqual(['noteId']);
-      expect(toolMap['create_backup'].inputSchema.required).toEqual(['backupName']);
-      expect(toolMap['export_note'].inputSchema.required).toEqual(['noteId']);
-      expect(toolMap['search_tools'].inputSchema.required).toEqual(['query']);
-    });
-  });
-
-  describe('handleSystemTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('create_revision', () => {
-      it('should create revision with default format', async () => {
-        vi.mocked(mockClient.createRevision).mockResolvedValue(undefined);
-
-        const result = await handleSystemTool(mockClient, 'create_revision', {
-          noteId: 'abc123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createRevision).toHaveBeenCalledWith('abc123', 'html');
-        expect(result!.content[0].text).toContain('Revision created');
-      });
-
-      it('should create revision with markdown format', async () => {
-        vi.mocked(mockClient.createRevision).mockResolvedValue(undefined);
-
-        await handleSystemTool(mockClient, 'create_revision', {
-          noteId: 'abc123',
-          format: 'markdown',
-        });
-
-        expect(mockClient.createRevision).toHaveBeenCalledWith('abc123', 'markdown');
-      });
-
-      it('should reject invalid format', async () => {
-        await expect(
-          handleSystemTool(mockClient, 'create_revision', {
-            noteId: 'abc123',
-            format: 'invalid',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('create_backup', () => {
-      it('should create backup with given name', async () => {
-        vi.mocked(mockClient.createBackup).mockResolvedValue(undefined);
-
-        const result = await handleSystemTool(mockClient, 'create_backup', {
-          backupName: 'before-migration',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createBackup).toHaveBeenCalledWith('before-migration');
-        expect(result!.content[0].text).toContain('Backup created');
-        expect(result!.content[0].text).toContain('backup-before-migration.db');
-      });
-
-      it('should reject missing backupName', async () => {
-        await expect(handleSystemTool(mockClient, 'create_backup', {})).rejects.toThrow();
-      });
-    });
-
-    describe('export_note', () => {
-      it('should export note with default format', async () => {
-        const mockData = new Uint8Array([80, 75, 3, 4]).buffer; // ZIP magic bytes
-        vi.mocked(mockClient.exportNote).mockResolvedValue(mockData);
-
-        const result = await handleSystemTool(mockClient, 'export_note', {
-          noteId: 'abc123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.exportNote).toHaveBeenCalledWith('abc123', 'html');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.noteId).toBe('abc123');
-        expect(parsed.format).toBe('html');
-        expect(parsed.sizeBytes).toBe(4);
-        expect(parsed.base64Data).toBeDefined();
-      });
-
-      it('should export note with markdown format', async () => {
-        const mockData = new Uint8Array([80, 75, 3, 4]).buffer;
-        vi.mocked(mockClient.exportNote).mockResolvedValue(mockData);
-
-        const result = await handleSystemTool(mockClient, 'export_note', {
-          noteId: 'root',
-          format: 'markdown',
-        });
-
-        expect(mockClient.exportNote).toHaveBeenCalledWith('root', 'markdown');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.format).toBe('markdown');
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleSystemTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('Attachment Tools', () => {
-  describe('registerAttachmentTools', () => {
-    it('should register 6 attachment tools', () => {
-      const tools = registerAttachmentTools();
-      expect(tools).toHaveLength(6);
-      expect(tools.map((t) => t.name)).toEqual([
-        'create_attachment',
-        'get_attachment',
-        'update_attachment',
-        'delete_attachment',
-        'get_attachment_content',
-        'update_attachment_content',
-      ]);
-    });
-
-    it('should have correct input schemas', () => {
-      const tools = registerAttachmentTools();
-      const toolMap = Object.fromEntries(tools.map((t) => [t.name, t]));
-
-      expect(toolMap['create_attachment'].inputSchema.required).toEqual([
-        'ownerId',
-        'role',
-        'mime',
-        'title',
-        'content',
-      ]);
-      expect(toolMap['create_attachment'].inputSchema.properties).toHaveProperty('position');
-
-      expect(toolMap['get_attachment'].inputSchema.required).toEqual(['attachmentId']);
-
-      expect(toolMap['update_attachment'].inputSchema.required).toEqual(['attachmentId']);
-      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('role');
-      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('mime');
-      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('title');
-      expect(toolMap['update_attachment'].inputSchema.properties).toHaveProperty('position');
-
-      expect(toolMap['delete_attachment'].inputSchema.required).toEqual(['attachmentId']);
-
-      expect(toolMap['get_attachment_content'].inputSchema.required).toEqual(['attachmentId']);
-
-      expect(toolMap['update_attachment_content'].inputSchema.required).toEqual([
-        'attachmentId',
-      ]);
-      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('content');
-      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('changes');
-      expect(toolMap['update_attachment_content'].inputSchema.properties).toHaveProperty('patch');
-    });
-  });
-
-  describe('handleAttachmentTool', () => {
-    let mockClient: TriliumClient;
-
-    beforeEach(() => {
-      mockClient = createMockClient();
-    });
-
-    describe('create_attachment', () => {
-      it('should create attachment with required parameters', async () => {
-        const mockAttachment = {
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-        };
-        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
-
-        const result = await handleAttachmentTool(mockClient, 'create_attachment', {
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-          content: 'Hello World',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.createAttachment).toHaveBeenCalledWith({
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-          content: 'Hello World',
-          position: undefined,
-        });
-      });
-
-      it('should create binary attachment with two-step upload', async () => {
-        const mockAttachment = { attachmentId: 'attach123', position: 100 };
-        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-
-        await handleAttachmentTool(mockClient, 'create_attachment', {
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/png',
-          title: 'image.png',
-          content: 'iVBORw0KGgo=',
-          position: 100,
-        });
-
-        // Step 1: create with empty content
-        expect(mockClient.createAttachment).toHaveBeenCalledWith(
-          expect.objectContaining({ content: '', position: 100 })
-        );
-        // Step 2: PUT binary
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'attach123',
-          expect.any(Buffer)
-        );
-      });
-
-      it('should create text attachment with single-step', async () => {
-        const mockAttachment = { attachmentId: 'attach456' };
-        vi.mocked(mockClient.createAttachment).mockResolvedValue(mockAttachment as any);
-
-        await handleAttachmentTool(mockClient, 'create_attachment', {
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/csv',
-          title: 'data.csv',
-          content: 'name,value',
-        });
-
-        expect(mockClient.createAttachment).toHaveBeenCalledWith(
-          expect.objectContaining({ content: 'name,value' })
-        );
-        expect(mockClient.updateAttachmentContentBinary).not.toHaveBeenCalled();
-      });
-
-      it('should reject missing required fields', async () => {
-        await expect(
-          handleAttachmentTool(mockClient, 'create_attachment', {
-            ownerId: 'note123',
-            role: 'file',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('get_attachment', () => {
-      it('should get attachment by ID', async () => {
-        const mockAttachment = {
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-        };
-        vi.mocked(mockClient.getAttachment).mockResolvedValue(mockAttachment as any);
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getAttachment).toHaveBeenCalledWith('attach123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed.attachmentId).toBe('attach123');
-      });
-
-      it('should reject missing attachmentId', async () => {
-        await expect(handleAttachmentTool(mockClient, 'get_attachment', {})).rejects.toThrow();
-      });
-    });
-
-    describe('update_attachment', () => {
-      it('should update attachment title', async () => {
-        const mockAttachment = { attachmentId: 'attach123', title: 'renamed.txt' };
-        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
-
-        const result = await handleAttachmentTool(mockClient, 'update_attachment', {
-          attachmentId: 'attach123',
-          title: 'renamed.txt',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
-          title: 'renamed.txt',
-        });
-      });
-
-      it('should update attachment role', async () => {
-        const mockAttachment = { attachmentId: 'attach123', role: 'document' };
-        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
-
-        await handleAttachmentTool(mockClient, 'update_attachment', {
-          attachmentId: 'attach123',
-          role: 'document',
-        });
-
-        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', { role: 'document' });
-      });
-
-      it('should update attachment mime type', async () => {
-        const mockAttachment = { attachmentId: 'attach123', mime: 'text/markdown' };
-        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
-
-        await handleAttachmentTool(mockClient, 'update_attachment', {
-          attachmentId: 'attach123',
-          mime: 'text/markdown',
-        });
-
-        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
-          mime: 'text/markdown',
-        });
-      });
-
-      it('should update attachment position', async () => {
-        const mockAttachment = { attachmentId: 'attach123', position: 50 };
-        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
-
-        await handleAttachmentTool(mockClient, 'update_attachment', {
-          attachmentId: 'attach123',
-          position: 50,
-        });
-
-        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', { position: 50 });
-      });
-
-      it('should update multiple properties at once', async () => {
-        const mockAttachment = {
-          attachmentId: 'attach123',
-          title: 'new.txt',
-          mime: 'application/json',
-        };
-        vi.mocked(mockClient.updateAttachment).mockResolvedValue(mockAttachment as any);
-
-        await handleAttachmentTool(mockClient, 'update_attachment', {
-          attachmentId: 'attach123',
-          title: 'new.txt',
-          mime: 'application/json',
-          position: 100,
-        });
-
-        expect(mockClient.updateAttachment).toHaveBeenCalledWith('attach123', {
-          title: 'new.txt',
-          mime: 'application/json',
-          position: 100,
-        });
-      });
-    });
-
-    describe('delete_attachment', () => {
-      it('should delete attachment by ID', async () => {
-        vi.mocked(mockClient.deleteAttachment).mockResolvedValue(undefined);
-
-        const result = await handleAttachmentTool(mockClient, 'delete_attachment', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.deleteAttachment).toHaveBeenCalledWith('attach123');
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, attachmentId: 'attach123' });
-      });
-
-      it('should reject missing attachmentId', async () => {
-        await expect(handleAttachmentTool(mockClient, 'delete_attachment', {})).rejects.toThrow();
-      });
-    });
-
-    describe('get_attachment_content', () => {
-      it('should get text attachment content', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 11,
-        });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('Hello World');
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getAttachment).toHaveBeenCalledWith('attach123');
-        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0]).toEqual({ type: 'text', text: 'Hello World' });
-      });
-
-      it('should handle empty content', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'text/plain',
-          title: 'test.txt',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 0,
-        });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('');
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result!.content[0]).toEqual({ type: 'text', text: '' });
-      });
-
-      it('should return image content block for PNG', async () => {
-        const base64Data = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/png',
-          title: 'test.png',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 100,
-        });
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0]).toEqual({
-          type: 'image',
-          data: base64Data,
-          mimeType: 'image/png',
-        });
-      });
-
-      it('should return image content block for JPEG', async () => {
-        const base64Data = '/9j/4AAQSkZJRgABAQEASABIAAD/2wBDAA...';
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'image/jpeg',
-          title: 'test.jpg',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 100,
-        });
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0]).toEqual({
-          type: 'image',
-          data: base64Data,
-          mimeType: 'image/jpeg',
-        });
-      });
-
-      it('should return text content block for non-image MIME types', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'file',
-          mime: 'application/pdf',
-          title: 'document.pdf',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 1000,
-        });
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('base64pdfcontent');
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(result!.content[0]).toEqual({ type: 'text', text: 'base64pdfcontent' });
-      });
-
-      it('should handle case-insensitive MIME type matching', async () => {
-        const base64Data = 'imagedata';
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({
-          attachmentId: 'attach123',
-          ownerId: 'note123',
-          role: 'image',
-          mime: 'IMAGE/PNG',
-          title: 'test.png',
-          position: 10,
-          blobId: 'blob123',
-          dateModified: '2024-01-01',
-          utcDateModified: '2024-01-01',
-          utcDateScheduledForErasureSince: null,
-          contentLength: 100,
-        });
-        vi.mocked(mockClient.getAttachmentContentAsBase64).mockResolvedValue(base64Data);
-
-        const result = await handleAttachmentTool(mockClient, 'get_attachment_content', {
-          attachmentId: 'attach123',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.getAttachmentContentAsBase64).toHaveBeenCalledWith('attach123');
-        expect(result!.content[0]).toEqual({
-          type: 'image',
-          data: base64Data,
-          mimeType: 'IMAGE/PNG',
-        });
-      });
-
-      it('should reject missing attachmentId', async () => {
-        await expect(
-          handleAttachmentTool(mockClient, 'get_attachment_content', {})
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('update_attachment_content', () => {
-      it('should update text attachment content', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
-        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
-
-        const result = await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          content: 'Updated content',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
-          'attach123',
-          'Updated content'
-        );
-        const parsed = JSON.parse(result!.content[0].text);
-        expect(parsed).toEqual({ success: true, attachmentId: 'attach123' });
-      });
-
-      it('should update binary attachment content with two-step', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'image/png' } as any);
-        vi.mocked(mockClient.updateAttachmentContentBinary).mockResolvedValue(undefined);
-
-        const result = await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          content: 'iVBORw0KGgo=',
-        });
-
-        expect(result).not.toBeNull();
-        expect(mockClient.updateAttachmentContentBinary).toHaveBeenCalledWith(
-          'attach123',
-          expect.any(Buffer)
-        );
-        expect(mockClient.updateAttachmentContent).not.toHaveBeenCalled();
-      });
-
-      it('should handle large content', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
-        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
-        const largeContent = 'x'.repeat(100000);
-
-        await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          content: largeContent,
-        });
-
-        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith('attach123', largeContent);
-      });
-
-      it('should reject when no content mode provided', async () => {
-        await expect(
-          handleAttachmentTool(mockClient, 'update_attachment_content', {
-            attachmentId: 'attach123',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    describe('update_attachment_content - diff modes', () => {
-      it('should apply search/replace changes to existing attachment content', async () => {
-        vi.mocked(mockClient.getAttachmentContent)
-          .mockResolvedValueOnce('old text content') // initial read
-          .mockResolvedValueOnce('new text content'); // verification read-back
-        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
-
-        await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          changes: [{ old_string: 'old', new_string: 'new' }],
-        });
-
-        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
-        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
-          'attach123',
-          'new text content'
-        );
-      });
-
-      it('should apply unified diff patch to attachment', async () => {
-        vi.mocked(mockClient.getAttachmentContent).mockResolvedValue('line1\nline2\nline3\n');
-        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
-
-        await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          patch:
-            '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n',
-        });
-
-        expect(mockClient.getAttachmentContent).toHaveBeenCalledWith('attach123');
-        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith(
-          'attach123',
-          'line1\nline2_modified\nline3\n'
-        );
-      });
-
-      it('should still support full replacement (backward compat)', async () => {
-        vi.mocked(mockClient.getAttachment).mockResolvedValue({ mime: 'text/plain' } as any);
-        vi.mocked(mockClient.updateAttachmentContent).mockResolvedValue(undefined);
-
-        await handleAttachmentTool(mockClient, 'update_attachment_content', {
-          attachmentId: 'attach123',
-          content: 'replaced',
-        });
-
-        expect(mockClient.getAttachmentContent).not.toHaveBeenCalled();
-        expect(mockClient.updateAttachmentContent).toHaveBeenCalledWith('attach123', 'replaced');
-      });
-
-      it('should reject mutual exclusivity violations', async () => {
-        await expect(
-          handleAttachmentTool(mockClient, 'update_attachment_content', {
-            attachmentId: 'attach123',
-            content: 'content',
-            changes: [{ old_string: 'a', new_string: 'b' }],
-          })
-        ).rejects.toThrow();
-      });
-
-      it('should reject when no mode provided', async () => {
-        await expect(
-          handleAttachmentTool(mockClient, 'update_attachment_content', {
-            attachmentId: 'attach123',
-          })
-        ).rejects.toThrow();
-      });
-    });
-
-    it('should return null for unknown tool', async () => {
-      const result = await handleAttachmentTool(mockClient, 'unknown_tool', {});
-      expect(result).toBeNull();
-    });
-  });
-});
-
-describe('Tool Registry and Search', () => {
-  // We'll import the registry separately to test it
-  describe('getToolRegistry', () => {
-    it('should return all registered tools', async () => {
-      const { getToolRegistry } = await import('../../src/tools/registry.js');
-      const allTools = getToolRegistry();
-      // Should include all tools including the new search_tools
-      expect(allTools.length).toBeGreaterThanOrEqual(35);
-    });
-
-    it('should cache tools on repeated calls', async () => {
-      const { getToolRegistry } = await import('../../src/tools/registry.js');
-      const tools1 = getToolRegistry();
-      const tools2 = getToolRegistry();
-      expect(tools1).toBe(tools2); // Same reference (cached)
-    });
-  });
-
-  describe('getToolCategory', () => {
-    it('should return correct category for note tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('create_note')).toBe('notes');
-      expect(getToolCategory('get_note')).toBe('notes');
-      expect(getToolCategory('update_note_content')).toBe('notes');
-    });
-
-    it('should return correct category for search tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('search_notes')).toBe('search');
-      expect(getToolCategory('get_note_tree')).toBe('search');
-    });
-
-    it('should return correct category for organization tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('move_note')).toBe('organization');
-      expect(getToolCategory('clone_note')).toBe('organization');
-    });
-
-    it('should return correct category for attribute tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('get_attributes')).toBe('attributes');
-      expect(getToolCategory('set_attribute')).toBe('attributes');
-    });
-
-    it('should return correct category for calendar tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('get_day_note')).toBe('calendar');
-      expect(getToolCategory('get_inbox_note')).toBe('calendar');
-    });
-
-    it('should return correct category for system tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('create_backup')).toBe('system');
-      expect(getToolCategory('export_note')).toBe('system');
-      expect(getToolCategory('search_tools')).toBe('system');
-    });
-
-    it('should return correct category for attachment tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('create_attachment')).toBe('attachments');
-      expect(getToolCategory('get_attachment_content')).toBe('attachments');
-    });
-
-    it('should return correct category for revision tools', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('get_note_revisions')).toBe('revisions');
-      expect(getToolCategory('get_revision_content')).toBe('revisions');
-    });
-
-    it('should return undefined for unknown tool', async () => {
-      const { getToolCategory } = await import('../../src/tools/registry.js');
-      expect(getToolCategory('nonexistent_tool')).toBeUndefined();
-    });
-  });
-
-  describe('searchTools', () => {
-    it('should find tools by name keyword', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('note');
-
-      expect(result.total_matches).toBeGreaterThan(0);
-      expect(result.tools.some(t => t.name.includes('note'))).toBe(true);
-    });
-
-    it('should find tools by description keyword', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('backup');
-
-      expect(result.tools.some(t => t.name === 'create_backup')).toBe(true);
-    });
-
-    it('should match multiple keywords with AND logic', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('note content');
-
-      // All results should contain both keywords somewhere (name, description, or parameters)
-      expect(result.total_matches).toBeGreaterThan(0);
-
-      // These tools should match because they have both "note" and "content" in name/description/params
-      const matchedNames = result.tools.map(t => t.name);
-      expect(matchedNames).toContain('get_note_content');
-      expect(matchedNames).toContain('update_note_content');
-      expect(matchedNames).toContain('append_note_content');
-
-      // A search for keywords that don't ALL match should return fewer/no results
-      const noMatchResult = searchTools('xyz123nonexistent');
-      expect(noMatchResult.total_matches).toBe(0);
-    });
-
-    it('should be case insensitive', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result1 = searchTools('NOTE');
-      const result2 = searchTools('note');
-
-      expect(result1.total_matches).toBe(result2.total_matches);
-    });
-
-    it('should filter by category', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('get', { category: 'attributes' });
-
-      expect(result.tools.every(t => t.category === 'attributes')).toBe(true);
-    });
-
-    it('should respect limit parameter', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('note', { limit: 3 });
-
-      expect(result.returned).toBeLessThanOrEqual(3);
-      expect(result.tools.length).toBeLessThanOrEqual(3);
-    });
-
-    it('should include schemas when requested', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('create_note', { include_schemas: true });
-
-      const createNoteTool = result.tools.find(t => t.name === 'create_note');
-      expect(createNoteTool?.inputSchema).toBeDefined();
-    });
-
-    it('should not include schemas by default', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('create_note');
-
-      const createNoteTool = result.tools.find(t => t.name === 'create_note');
-      expect(createNoteTool?.inputSchema).toBeUndefined();
-    });
-
-    it('should sort by relevance score', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('note');
-
-      // Results should be sorted descending by score
-      for (let i = 1; i < result.tools.length; i++) {
-        expect(result.tools[i - 1].relevance_score).toBeGreaterThanOrEqual(
-          result.tools[i].relevance_score
-        );
+      for (const t of tools) {
+        expect(t.annotations).toBeDefined();
+        expect(t.annotations?.title).toBeTruthy();
       }
-    });
-
-    it('should include matched_in array showing where matches occurred', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('create_note');
-
-      const createNoteTool = result.tools.find(t => t.name === 'create_note');
-      expect(createNoteTool?.matched_in).toContain('name');
-    });
-
-    it('should return empty results for non-matching query', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      const result = searchTools('xyznonexistent123');
-
-      expect(result.total_matches).toBe(0);
-      expect(result.tools).toHaveLength(0);
-    });
-
-    it('should match parameter names', async () => {
-      const { searchTools } = await import('../../src/tools/registry.js');
-      // "noteId" is a common parameter name
-      const result = searchTools('noteId');
-
-      expect(result.total_matches).toBeGreaterThan(0);
-      expect(result.tools.some(t => t.matched_in.some(m => m.includes('parameter')))).toBe(true);
-    });
-  });
-});
-
-describe('System Tools - search_tools', () => {
-  describe('registerSystemTools', () => {
-    it('should register 4 system tools including search_tools', () => {
-      const tools = registerSystemTools();
-      expect(tools).toHaveLength(4);
-      expect(tools.map((t) => t.name)).toContain('search_tools');
-    });
-
-    it('should have correct input schema for search_tools', () => {
-      const tools = registerSystemTools();
-      const searchTool = tools.find((t) => t.name === 'search_tools')!;
-
-      expect(searchTool.inputSchema.required).toEqual(['query']);
-      expect(searchTool.inputSchema.properties).toHaveProperty('query');
-      expect(searchTool.inputSchema.properties).toHaveProperty('category');
-      expect(searchTool.inputSchema.properties).toHaveProperty('include_schemas');
-      expect(searchTool.inputSchema.properties).toHaveProperty('limit');
+      const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+      expect(byName['get_note'].annotations?.readOnlyHint).toBe(true);
+      expect(byName['get_note_history'].annotations?.readOnlyHint).toBe(true);
+      expect(byName['create_note'].annotations?.readOnlyHint).toBe(false);
+      expect(byName['write_note'].annotations?.destructiveHint).toBe(true);
+      expect(byName['delete_note'].annotations?.destructiveHint).toBe(true);
+      expect(byName['delete_note'].annotations?.idempotentHint).toBe(true);
     });
   });
 
-  describe('handleSystemTool - search_tools', () => {
-    let mockClient: TriliumClient;
-
+  describe('create_note', () => {
+    let client: TriliumClient;
     beforeEach(() => {
-      mockClient = createMockClient();
+      client = createMockClient();
     });
 
-    it('should search tools by query', async () => {
-      const result = await handleSystemTool(mockClient, 'search_tools', {
-        query: 'note',
+    it('creates a text note', async () => {
+      const expected = { note: { noteId: 'n1', title: 'T' }, branch: { branchId: 'b1' } };
+      (client.createNote as ReturnType<typeof vi.fn>).mockResolvedValue(expected);
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'T',
+        type: 'text',
+        content: '<p>hi</p>',
       });
 
-      expect(result).not.toBeNull();
-      const parsed = JSON.parse(result!.content[0].text);
-      expect(parsed.query).toBe('note');
-      expect(parsed.total_matches).toBeGreaterThan(0);
-      expect(parsed.tools).toBeDefined();
-      expect(Array.isArray(parsed.tools)).toBe(true);
+      expect(client.createNote).toHaveBeenCalled();
+      expect(result?.content[0]).toMatchObject({ type: 'text' });
     });
 
-    it('should filter by category', async () => {
-      const result = await handleSystemTool(mockClient, 'search_tools', {
-        query: 'get',
-        category: 'notes',
+    it('requires parentNoteId / title / type / content', async () => {
+      await expect(handleNoteTool(client, 'create_note', {})).rejects.toThrow();
+    });
+
+    it('converts markdown to HTML when format="markdown"', async () => {
+      (client.createNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        note: { noteId: 'n1' },
+        branch: { branchId: 'b1' },
       });
 
-      const parsed = JSON.parse(result!.content[0].text);
-      expect(parsed.category).toBe('notes');
-      expect(parsed.tools.every((t: any) => t.category === 'notes')).toBe(true);
-    });
-
-    it('should include schemas when requested', async () => {
-      const result = await handleSystemTool(mockClient, 'search_tools', {
-        query: 'create_note',
-        include_schemas: true,
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'T',
+        type: 'text',
+        content: '# heading',
+        format: 'markdown',
       });
 
-      const parsed = JSON.parse(result!.content[0].text);
-      const createNoteTool = parsed.tools.find((t: any) => t.name === 'create_note');
-      expect(createNoteTool?.inputSchema).toBeDefined();
+      const call = (client.createNote as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(call.content).toContain('<h1');
+    });
+  });
+
+  describe('get_note', () => {
+    let client: TriliumClient;
+    beforeEach(() => {
+      client = createMockClient();
     });
 
-    it('should respect limit parameter', async () => {
-      const result = await handleSystemTool(mockClient, 'search_tools', {
-        query: 'note',
-        limit: 2,
+    it('returns metadata only by default', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1', title: 'T' });
+
+      const result = await handleNoteTool(client, 'get_note', { noteId: 'n1' });
+
+      expect(client.getNote).toHaveBeenCalledWith('n1');
+      expect(client.getNoteContent).not.toHaveBeenCalled();
+      expect(result?.content[0]).toMatchObject({ type: 'text' });
+    });
+
+    it('fetches content when include_content=true', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1' });
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>body</p>');
+      (client.getNoteAttachments as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const result = await handleNoteTool(client, 'get_note', {
+        noteId: 'n1',
+        include_content: true,
       });
 
-      const parsed = JSON.parse(result!.content[0].text);
-      expect(parsed.returned).toBeLessThanOrEqual(2);
-      expect(parsed.tools.length).toBeLessThanOrEqual(2);
+      expect(client.getNoteContent).toHaveBeenCalledWith('n1');
+      expect(result?.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('body') });
     });
 
-    it('should reject empty query', async () => {
+    it('converts HTML to markdown when format="markdown" + include_content=true', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1' });
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue('<h1>Title</h1>');
+      (client.getNoteAttachments as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+
+      const result = await handleNoteTool(client, 'get_note', {
+        noteId: 'n1',
+        include_content: true,
+        format: 'markdown',
+      });
+
+      const text = (result?.content[0] as { text: string }).text;
+      expect(text).toContain('# Title');
+    });
+
+    it('skips image fetching when includeImages=false', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1' });
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>x</p>');
+
+      await handleNoteTool(client, 'get_note', {
+        noteId: 'n1',
+        include_content: true,
+        includeImages: false,
+      });
+
+      expect(client.getNoteAttachments).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('write_note', () => {
+    let client: TriliumClient;
+    beforeEach(() => {
+      client = createMockClient();
+    });
+
+    it('mode="metadata" calls updateNote with patch', async () => {
+      (client.updateNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1', title: 'New' });
+
+      await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'metadata',
+        title: 'New',
+      });
+
+      expect(client.updateNote).toHaveBeenCalledWith('n1', { title: 'New' });
+    });
+
+    it('mode="metadata" requires at least one of title/type/mime', async () => {
       await expect(
-        handleSystemTool(mockClient, 'search_tools', {
-          query: '',
+        handleNoteTool(client, 'write_note', { noteId: 'n1', mode: 'metadata' })
+      ).rejects.toThrow();
+    });
+
+    it('mode="replace" overwrites content', async () => {
+      (client.updateNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+      await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'replace',
+        content: '<p>new body</p>',
+      });
+
+      expect(client.getNoteContent).not.toHaveBeenCalled();
+      expect(client.updateNoteContent).toHaveBeenCalledWith('n1', '<p>new body</p>');
+    });
+
+    it('mode="replace" requires content', async () => {
+      await expect(
+        handleNoteTool(client, 'write_note', { noteId: 'n1', mode: 'replace' })
+      ).rejects.toThrow();
+    });
+
+    it('mode="append" fetches existing and concatenates', async () => {
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>existing</p>');
+      (client.updateNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+
+      await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'append',
+        content: '<p>more</p>',
+      });
+
+      expect(client.getNoteContent).toHaveBeenCalledWith('n1');
+      expect(client.updateNoteContent).toHaveBeenCalledWith('n1', '<p>existing</p><p>more</p>');
+    });
+
+    it('mode="edit" with changes applies search/replace', async () => {
+      // Simulate persistence: first read returns pre-edit, subsequent reads return post-edit
+      let stored = '<p>hello world</p>';
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockImplementation(async () => stored);
+      (client.updateNoteContent as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_id: string, body: string) => {
+          stored = body;
+        }
+      );
+
+      await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'edit',
+        changes: [{ old_string: 'hello', new_string: 'hi' }],
+      });
+
+      expect(client.updateNoteContent).toHaveBeenCalledWith('n1', '<p>hi world</p>');
+    });
+
+    it('mode="edit" requires exactly one of changes/patch', async () => {
+      await expect(
+        handleNoteTool(client, 'write_note', { noteId: 'n1', mode: 'edit' })
+      ).rejects.toThrow();
+
+      await expect(
+        handleNoteTool(client, 'write_note', {
+          noteId: 'n1',
+          mode: 'edit',
+          changes: [{ old_string: 'a', new_string: 'b' }],
+          patch: '@@',
         })
       ).rejects.toThrow();
     });
 
-    it('should reject invalid category', async () => {
+    it('mode="edit" rejects format="markdown"', async () => {
       await expect(
-        handleSystemTool(mockClient, 'search_tools', {
-          query: 'note',
-          category: 'invalid_category',
+        handleNoteTool(client, 'write_note', {
+          noteId: 'n1',
+          mode: 'edit',
+          changes: [{ old_string: 'a', new_string: 'b' }],
+          format: 'markdown',
         })
       ).rejects.toThrow();
     });
 
-    it('should reject limit below 1', async () => {
+    it('mode="edit" rejects content field', async () => {
       await expect(
-        handleSystemTool(mockClient, 'search_tools', {
-          query: 'note',
-          limit: 0,
+        handleNoteTool(client, 'write_note', {
+          noteId: 'n1',
+          mode: 'edit',
+          changes: [{ old_string: 'a', new_string: 'b' }],
+          content: 'x',
         })
       ).rejects.toThrow();
     });
 
-    it('should reject limit above 50', async () => {
+    it('mode="metadata" rejects content', async () => {
       await expect(
-        handleSystemTool(mockClient, 'search_tools', {
-          query: 'note',
-          limit: 51,
+        handleNoteTool(client, 'write_note', {
+          noteId: 'n1',
+          mode: 'metadata',
+          title: 'T',
+          content: 'x',
         })
+      ).rejects.toThrow();
+    });
+
+    it('mode="replace" rejects title (metadata fields)', async () => {
+      await expect(
+        handleNoteTool(client, 'write_note', {
+          noteId: 'n1',
+          mode: 'replace',
+          content: 'x',
+          title: 'T',
+        })
+      ).rejects.toThrow();
+    });
+
+    it('rejects unknown mode', async () => {
+      await expect(
+        handleNoteTool(client, 'write_note', { noteId: 'n1', mode: 'bogus' })
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('delete_note', () => {
+    let client: TriliumClient;
+    beforeEach(() => {
+      client = createMockClient();
+    });
+
+    it('action="delete" deletes the note', async () => {
+      await handleNoteTool(client, 'delete_note', { noteId: 'n1', action: 'delete' });
+      expect(client.deleteNote).toHaveBeenCalledWith('n1');
+      expect(client.undeleteNote).not.toHaveBeenCalled();
+    });
+
+    it('action="undelete" restores the note', async () => {
+      (client.undeleteNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1' });
+      await handleNoteTool(client, 'delete_note', { noteId: 'n1', action: 'undelete' });
+      expect(client.undeleteNote).toHaveBeenCalledWith('n1');
+      expect(client.deleteNote).not.toHaveBeenCalled();
+    });
+
+    it('rejects missing action (required, no default)', async () => {
+      await expect(handleNoteTool(client, 'delete_note', { noteId: 'n1' })).rejects.toThrow();
+    });
+
+    it('rejects unknown action', async () => {
+      await expect(
+        handleNoteTool(client, 'delete_note', { noteId: 'n1', action: 'purge' })
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('get_note_history', () => {
+    it('returns history with no ancestor filter', async () => {
+      const client = createMockClient();
+      (client.getNoteHistory as ReturnType<typeof vi.fn>).mockResolvedValue([{ noteId: 'n1' }]);
+      await handleNoteTool(client, 'get_note_history', {});
+      expect(client.getNoteHistory).toHaveBeenCalledWith(undefined);
+    });
+
+    it('passes ancestorNoteId through', async () => {
+      const client = createMockClient();
+      (client.getNoteHistory as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+      await handleNoteTool(client, 'get_note_history', { ancestorNoteId: 'root' });
+      expect(client.getNoteHistory).toHaveBeenCalledWith('root');
+    });
+  });
+});
+
+// ============================================================================
+// Search
+// ============================================================================
+
+describe('Search tools', () => {
+  it('registers 2 tools with read annotations', () => {
+    const tools = registerSearchTools();
+    expect(tools.map((t) => t.name)).toEqual(['search_notes', 'get_note_tree']);
+    for (const t of tools) {
+      expect(t.annotations?.readOnlyHint).toBe(true);
+    }
+  });
+
+  it('search_notes calls client.searchNotes', async () => {
+    const client = createMockClient();
+    (client.searchNotes as ReturnType<typeof vi.fn>).mockResolvedValue({ results: [] });
+    await handleSearchTool(client, 'search_notes', { query: 'test' });
+    expect(client.searchNotes).toHaveBeenCalled();
+  });
+
+  it('get_note_tree returns simplified view', async () => {
+    const client = createMockClient();
+    (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+      noteId: 'root',
+      title: 'Root',
+      type: 'text',
+      childNoteIds: ['c1'],
+      childBranchIds: ['b1'],
+    });
+    const result = await handleSearchTool(client, 'get_note_tree', { noteId: 'root' });
+    const parsed = JSON.parse((result?.content[0] as { text: string }).text);
+    expect(parsed.childNoteIds).toEqual(['c1']);
+  });
+});
+
+// ============================================================================
+// Organization
+// ============================================================================
+
+describe('Organization tools', () => {
+  it('registers 1 tool (organize_note)', () => {
+    const tools = registerOrganizationTools();
+    expect(tools.map((t) => t.name)).toEqual(['organize_note']);
+    expect(tools[0].annotations?.destructiveHint).toBe(true);
+  });
+
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  describe('organize_note', () => {
+    it('action="move" creates new branch then deletes old', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        parentBranchIds: ['old-b'],
+      });
+      (client.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ branchId: 'new-b' });
+
+      await handleOrganizationTool(client, 'organize_note', {
+        action: 'move',
+        noteId: 'n1',
+        newParentNoteId: 'newParent',
+      });
+
+      expect(client.createBranch).toHaveBeenCalled();
+      expect(client.deleteBranch).toHaveBeenCalledWith('old-b');
+    });
+
+    it('action="move" requires noteId + newParentNoteId', async () => {
+      await expect(
+        handleOrganizationTool(client, 'organize_note', { action: 'move', noteId: 'n1' })
+      ).rejects.toThrow();
+    });
+
+    it('action="clone" creates a branch', async () => {
+      (client.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ branchId: 'b1' });
+      await handleOrganizationTool(client, 'organize_note', {
+        action: 'clone',
+        noteId: 'n1',
+        parentNoteId: 'p1',
+      });
+      expect(client.createBranch).toHaveBeenCalledWith({
+        noteId: 'n1',
+        parentNoteId: 'p1',
+        prefix: undefined,
+      });
+    });
+
+    it('action="clone" requires noteId + parentNoteId', async () => {
+      await expect(
+        handleOrganizationTool(client, 'organize_note', { action: 'clone', noteId: 'n1' })
+      ).rejects.toThrow();
+    });
+
+    it('action="reorder" updates each branch position', async () => {
+      (client.updateBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ branchId: 'b1' });
+
+      await handleOrganizationTool(client, 'organize_note', {
+        action: 'reorder',
+        parentNoteId: 'p1',
+        notePositions: [
+          { branchId: 'b1', notePosition: 10 },
+          { branchId: 'b2', notePosition: 20 },
+        ],
+      });
+
+      expect(client.updateBranch).toHaveBeenCalledTimes(2);
+      expect(client.refreshNoteOrdering).toHaveBeenCalledWith('p1');
+    });
+
+    it('action="reorder" requires parentNoteId and non-empty notePositions', async () => {
+      await expect(
+        handleOrganizationTool(client, 'organize_note', {
+          action: 'reorder',
+          parentNoteId: 'p1',
+          notePositions: [],
+        })
+      ).rejects.toThrow();
+    });
+
+    it('action="unlink" deletes the specified branch', async () => {
+      await handleOrganizationTool(client, 'organize_note', {
+        action: 'unlink',
+        branchId: 'b1',
+      });
+      expect(client.deleteBranch).toHaveBeenCalledWith('b1');
+    });
+
+    it('action="unlink" requires branchId', async () => {
+      await expect(
+        handleOrganizationTool(client, 'organize_note', { action: 'unlink' })
+      ).rejects.toThrow();
+    });
+
+    it('rejects unknown action', async () => {
+      await expect(
+        handleOrganizationTool(client, 'organize_note', { action: 'bogus' })
       ).rejects.toThrow();
     });
   });
 });
 
-describe('Tool count verification', () => {
-  it('should have exactly 35 tools total (34 + search_tools)', () => {
-    const allTools = [
-      ...registerNoteTools(),
-      ...registerSearchTools(),
-      ...registerOrganizationTools(),
-      ...registerAttributeTools(),
-      ...registerCalendarTools(),
-      ...registerSystemTools(),
-      ...registerAttachmentTools(),
-      ...registerRevisionTools(),
-    ];
-    expect(allTools).toHaveLength(35);
+// ============================================================================
+// Attributes
+// ============================================================================
+
+describe('Attribute tools', () => {
+  it('registers 3 tools', () => {
+    const tools = registerAttributeTools();
+    expect(tools.map((t) => t.name)).toEqual([
+      'get_attributes',
+      'set_attribute',
+      'delete_attribute',
+    ]);
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    expect(byName['get_attributes'].annotations?.readOnlyHint).toBe(true);
+    expect(byName['set_attribute'].annotations?.idempotentHint).toBe(true);
+    expect(byName['delete_attribute'].annotations?.destructiveHint).toBe(true);
   });
 
-  it('all tools should have descriptions', () => {
-    const allTools = [
-      ...registerNoteTools(),
-      ...registerSearchTools(),
-      ...registerOrganizationTools(),
-      ...registerAttributeTools(),
-      ...registerCalendarTools(),
-      ...registerSystemTools(),
-      ...registerAttachmentTools(),
-      ...registerRevisionTools(),
-    ];
-    allTools.forEach((tool) => {
-      expect(tool.description).toBeDefined();
-      expect(tool.description.length).toBeGreaterThan(10);
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  describe('get_attributes', () => {
+    it('returns grouped attributes when given noteId', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        attributes: [
+          { attributeId: 'a1', type: 'label', name: 'foo', value: 'bar' },
+          { attributeId: 'a2', type: 'relation', name: 'links', value: 'n2' },
+        ],
+      });
+
+      const result = await handleAttributeTool(client, 'get_attributes', { noteId: 'n1' });
+      const parsed = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(parsed.labels).toHaveLength(1);
+      expect(parsed.relations).toHaveLength(1);
+    });
+
+    it('returns single attribute when given attributeId', async () => {
+      (client.getAttribute as ReturnType<typeof vi.fn>).mockResolvedValue({ attributeId: 'a1' });
+      await handleAttributeTool(client, 'get_attributes', { attributeId: 'a1' });
+      expect(client.getAttribute).toHaveBeenCalledWith('a1');
+      expect(client.getNote).not.toHaveBeenCalled();
+    });
+
+    it('requires exactly one of noteId/attributeId', async () => {
+      await expect(handleAttributeTool(client, 'get_attributes', {})).rejects.toThrow();
+      await expect(
+        handleAttributeTool(client, 'get_attributes', { noteId: 'n1', attributeId: 'a1' })
+      ).rejects.toThrow();
     });
   });
 
-  it('all tools should have valid input schemas', () => {
-    const allTools = [
-      ...registerNoteTools(),
-      ...registerSearchTools(),
-      ...registerOrganizationTools(),
-      ...registerAttributeTools(),
-      ...registerCalendarTools(),
-      ...registerSystemTools(),
-      ...registerAttachmentTools(),
-      ...registerRevisionTools(),
-    ];
-    allTools.forEach((tool) => {
-      expect(tool.inputSchema).toBeDefined();
-      expect(tool.inputSchema.type).toBe('object');
-      expect(tool.inputSchema.properties).toBeDefined();
+  describe('set_attribute', () => {
+    it('upserts (updates existing)', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        attributes: [{ attributeId: 'a1', type: 'label', name: 'foo', value: 'old' }],
+      });
+      (client.updateAttribute as ReturnType<typeof vi.fn>).mockResolvedValue({ attributeId: 'a1' });
+
+      await handleAttributeTool(client, 'set_attribute', {
+        noteId: 'n1',
+        type: 'label',
+        name: 'foo',
+        value: 'new',
+      });
+
+      expect(client.updateAttribute).toHaveBeenCalledWith('a1', { value: 'new', position: undefined });
+      expect(client.createAttribute).not.toHaveBeenCalled();
     });
+
+    it('upserts (creates new)', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        attributes: [],
+      });
+      (client.createAttribute as ReturnType<typeof vi.fn>).mockResolvedValue({ attributeId: 'aNew' });
+
+      await handleAttributeTool(client, 'set_attribute', {
+        noteId: 'n1',
+        type: 'label',
+        name: 'foo',
+        value: 'bar',
+      });
+
+      expect(client.createAttribute).toHaveBeenCalled();
+    });
+  });
+
+  describe('delete_attribute', () => {
+    it('deletes the attribute', async () => {
+      await handleAttributeTool(client, 'delete_attribute', { attributeId: 'a1' });
+      expect(client.deleteAttribute).toHaveBeenCalledWith('a1');
+    });
+  });
+});
+
+// ============================================================================
+// Calendar
+// ============================================================================
+
+describe('Calendar tools', () => {
+  it('registers 1 tool (get_special_note)', () => {
+    const tools = registerCalendarTools();
+    expect(tools.map((t) => t.name)).toEqual(['get_special_note']);
+  });
+
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  it('kind="day" calls getDayNote', async () => {
+    (client.getDayNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'day1' });
+    await handleCalendarTool(client, 'get_special_note', { kind: 'day', date: '2026-04-22' });
+    expect(client.getDayNote).toHaveBeenCalledWith('2026-04-22');
+  });
+
+  it('kind="inbox" calls getInboxNote', async () => {
+    (client.getInboxNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'inbox1' });
+    await handleCalendarTool(client, 'get_special_note', { kind: 'inbox', date: '2026-04-22' });
+    expect(client.getInboxNote).toHaveBeenCalledWith('2026-04-22');
+  });
+
+  it('defaults date to today when omitted', async () => {
+    (client.getDayNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'day1' });
+    await handleCalendarTool(client, 'get_special_note', { kind: 'day' });
+    const call = (client.getDayNote as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('rejects unknown kind', async () => {
+    await expect(
+      handleCalendarTool(client, 'get_special_note', { kind: 'week' })
+    ).rejects.toThrow();
+  });
+
+  it('rejects invalid date format', async () => {
+    await expect(
+      handleCalendarTool(client, 'get_special_note', { kind: 'day', date: '04/22/2026' })
+    ).rejects.toThrow();
+  });
+});
+
+// ============================================================================
+// System
+// ============================================================================
+
+describe('System tools', () => {
+  it('registers 2 tools (create_revision, manage_system); search_tools is dropped', () => {
+    const tools = registerSystemTools();
+    expect(tools.map((t) => t.name)).toEqual(['create_revision', 'manage_system']);
+    expect(tools.map((t) => t.name)).not.toContain('search_tools');
+    expect(tools.map((t) => t.name)).not.toContain('create_backup');
+    expect(tools.map((t) => t.name)).not.toContain('export_note');
+  });
+
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  describe('create_revision', () => {
+    it('creates a revision with default format', async () => {
+      await handleSystemTool(client, 'create_revision', { noteId: 'n1' });
+      expect(client.createRevision).toHaveBeenCalledWith('n1', 'html');
+    });
+
+    it('accepts format="markdown"', async () => {
+      await handleSystemTool(client, 'create_revision', { noteId: 'n1', format: 'markdown' });
+      expect(client.createRevision).toHaveBeenCalledWith('n1', 'markdown');
+    });
+  });
+
+  describe('manage_system', () => {
+    it('action="backup" creates backup', async () => {
+      await handleSystemTool(client, 'manage_system', {
+        action: 'backup',
+        backupName: 'daily-01',
+      });
+      expect(client.createBackup).toHaveBeenCalledWith('daily-01');
+    });
+
+    it('action="backup" requires backupName', async () => {
+      await expect(
+        handleSystemTool(client, 'manage_system', { action: 'backup' })
+      ).rejects.toThrow();
+    });
+
+    it('action="backup" rejects invalid backupName', async () => {
+      await expect(
+        handleSystemTool(client, 'manage_system', { action: 'backup', backupName: 'bad name!' })
+      ).rejects.toThrow();
+    });
+
+    it('action="export" returns base64 ZIP', async () => {
+      const data = new Uint8Array([80, 75]);
+      (client.exportNote as ReturnType<typeof vi.fn>).mockResolvedValue(data.buffer);
+
+      const result = await handleSystemTool(client, 'manage_system', {
+        action: 'export',
+        noteId: 'root',
+        format: 'markdown',
+      });
+      expect(client.exportNote).toHaveBeenCalledWith('root', 'markdown');
+      const parsed = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(parsed.base64Data).toBeTruthy();
+    });
+
+    it('action="export" requires noteId', async () => {
+      await expect(
+        handleSystemTool(client, 'manage_system', { action: 'export' })
+      ).rejects.toThrow();
+    });
+  });
+});
+
+// ============================================================================
+// Attachments
+// ============================================================================
+
+describe('Attachment tools', () => {
+  it('registers 4 tools with reads first', () => {
+    const tools = registerAttachmentTools();
+    expect(tools.map((t) => t.name)).toEqual([
+      'get_attachment',
+      'create_attachment',
+      'write_attachment',
+      'delete_attachment',
+    ]);
+    const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
+    expect(byName['get_attachment'].annotations?.readOnlyHint).toBe(true);
+    expect(byName['write_attachment'].annotations?.destructiveHint).toBe(true);
+    expect(byName['delete_attachment'].annotations?.destructiveHint).toBe(true);
+  });
+
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  describe('create_attachment', () => {
+    it('creates text attachment in one step', async () => {
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'at1' });
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'file',
+        mime: 'text/plain',
+        title: 'readme.txt',
+        content: 'hello',
+      });
+      expect(client.createAttachment).toHaveBeenCalled();
+      expect(client.updateAttachmentContentBinary).not.toHaveBeenCalled();
+    });
+
+    it('creates binary attachment in two steps', async () => {
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'at1' });
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'image',
+        mime: 'image/png',
+        title: 'x.png',
+        content: Buffer.from('PNG').toString('base64'),
+      });
+      expect(client.updateAttachmentContentBinary).toHaveBeenCalled();
+    });
+  });
+
+  describe('get_attachment', () => {
+    it('returns list when given noteId', async () => {
+      (client.getNoteAttachments as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { attachmentId: 'a1' },
+      ]);
+      await handleAttachmentTool(client, 'get_attachment', { noteId: 'n1' });
+      expect(client.getNoteAttachments).toHaveBeenCalledWith('n1');
+    });
+
+    it('returns metadata when given attachmentId (default)', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'text/plain',
+      });
+      await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
+      expect(client.getAttachmentContent).not.toHaveBeenCalled();
+    });
+
+    it('returns image block for image MIME when include_content=true', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'image/png',
+      });
+      (client.getAttachmentContentAsBase64 as ReturnType<typeof vi.fn>).mockResolvedValue('Zm9v');
+      const result = await handleAttachmentTool(client, 'get_attachment', {
+        attachmentId: 'a1',
+        include_content: true,
+      });
+      expect(result?.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' });
+    });
+
+    it('returns text for text MIME when include_content=true', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'text/plain',
+      });
+      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockResolvedValue('hello');
+      const result = await handleAttachmentTool(client, 'get_attachment', {
+        attachmentId: 'a1',
+        include_content: true,
+      });
+      expect(result?.content[0]).toMatchObject({ type: 'text', text: 'hello' });
+    });
+
+    it('requires exactly one of attachmentId/noteId', async () => {
+      await expect(handleAttachmentTool(client, 'get_attachment', {})).rejects.toThrow();
+      await expect(
+        handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1', noteId: 'n1' })
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('write_attachment', () => {
+    it('mode="metadata" updates attributes', async () => {
+      (client.updateAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'a1' });
+      await handleAttachmentTool(client, 'write_attachment', {
+        attachmentId: 'a1',
+        mode: 'metadata',
+        title: 'new.txt',
+      });
+      expect(client.updateAttachment).toHaveBeenCalledWith('a1', { title: 'new.txt' });
+    });
+
+    it('mode="metadata" requires at least one metadata field', async () => {
+      await expect(
+        handleAttachmentTool(client, 'write_attachment', { attachmentId: 'a1', mode: 'metadata' })
+      ).rejects.toThrow();
+    });
+
+    it('mode="replace" writes text content for text MIME', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'text/plain',
+      });
+      await handleAttachmentTool(client, 'write_attachment', {
+        attachmentId: 'a1',
+        mode: 'replace',
+        content: 'new',
+      });
+      expect(client.updateAttachmentContent).toHaveBeenCalledWith('a1', 'new');
+    });
+
+    it('mode="replace" writes binary for binary MIME', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'image/png',
+      });
+      await handleAttachmentTool(client, 'write_attachment', {
+        attachmentId: 'a1',
+        mode: 'replace',
+        content: Buffer.from('PNG').toString('base64'),
+      });
+      expect(client.updateAttachmentContentBinary).toHaveBeenCalled();
+    });
+
+    it('mode="replace" requires content', async () => {
+      await expect(
+        handleAttachmentTool(client, 'write_attachment', { attachmentId: 'a1', mode: 'replace' })
+      ).rejects.toThrow();
+    });
+
+    it('mode="edit" applies search/replace', async () => {
+      let stored = 'foo bar';
+      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(async () => stored);
+      (client.updateAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(
+        async (_id: string, body: string) => {
+          stored = body;
+        }
+      );
+
+      await handleAttachmentTool(client, 'write_attachment', {
+        attachmentId: 'a1',
+        mode: 'edit',
+        changes: [{ old_string: 'foo', new_string: 'baz' }],
+      });
+
+      expect(client.updateAttachmentContent).toHaveBeenCalledWith('a1', 'baz bar');
+    });
+
+    it('mode="edit" requires exactly one of changes/patch', async () => {
+      await expect(
+        handleAttachmentTool(client, 'write_attachment', { attachmentId: 'a1', mode: 'edit' })
+      ).rejects.toThrow();
+    });
+  });
+
+  describe('delete_attachment', () => {
+    it('deletes by id', async () => {
+      await handleAttachmentTool(client, 'delete_attachment', { attachmentId: 'a1' });
+      expect(client.deleteAttachment).toHaveBeenCalledWith('a1');
+    });
+  });
+});
+
+// ============================================================================
+// Revisions
+// ============================================================================
+
+describe('Revision tools', () => {
+  it('registers 1 tool (get_revisions)', () => {
+    const tools = registerRevisionTools();
+    expect(tools.map((t) => t.name)).toEqual(['get_revisions']);
+    expect(tools[0].annotations?.readOnlyHint).toBe(true);
+  });
+
+  let client: TriliumClient;
+  beforeEach(() => {
+    client = createMockClient();
+  });
+
+  it('list mode (noteId) returns array', async () => {
+    (client.getNoteRevisions as ReturnType<typeof vi.fn>).mockResolvedValue([{ revisionId: 'r1' }]);
+    await handleRevisionTool(client, 'get_revisions', { noteId: 'n1' });
+    expect(client.getNoteRevisions).toHaveBeenCalledWith('n1');
+    expect(client.getRevision).not.toHaveBeenCalled();
+    expect(client.getRevisionContent).not.toHaveBeenCalled();
+  });
+
+  it('metadata mode (revisionId, default) returns single revision', async () => {
+    (client.getRevision as ReturnType<typeof vi.fn>).mockResolvedValue({ revisionId: 'r1' });
+    await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
+    expect(client.getRevision).toHaveBeenCalledWith('r1');
+    expect(client.getRevisionContent).not.toHaveBeenCalled();
+  });
+
+  it('content mode (revisionId + include_content=true) returns HTML', async () => {
+    (client.getRevisionContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>old</p>');
+    const result = await handleRevisionTool(client, 'get_revisions', {
+      revisionId: 'r1',
+      include_content: true,
+    });
+    expect(client.getRevisionContent).toHaveBeenCalledWith('r1');
+    expect(result?.content[0]).toMatchObject({ type: 'text', text: '<p>old</p>' });
+  });
+
+  it('requires exactly one of noteId/revisionId', async () => {
+    await expect(handleRevisionTool(client, 'get_revisions', {})).rejects.toThrow();
+    await expect(
+      handleRevisionTool(client, 'get_revisions', { noteId: 'n1', revisionId: 'r1' })
+    ).rejects.toThrow();
+  });
+});
+
+// ============================================================================
+// Total tool surface
+// ============================================================================
+
+describe('Total tool surface', () => {
+  it('exposes exactly 19 tools after consolidation (see issue #6)', () => {
+    const allTools = [
+      ...registerSearchTools(),
+      ...registerNoteTools(),
+      ...registerRevisionTools(),
+      ...registerAttributeTools(),
+      ...registerAttachmentTools(),
+      ...registerCalendarTools(),
+      ...registerOrganizationTools(),
+      ...registerSystemTools(),
+    ];
+    expect(allTools).toHaveLength(19);
+
+    const names = allTools.map((t) => t.name);
+    expect(new Set(names).size).toBe(19); // no duplicates
+
+    // Dropped tools from pre-consolidation surface
+    for (const dropped of [
+      'get_note_content',
+      'update_note',
+      'update_note_content',
+      'append_note_content',
+      'undelete_note',
+      'get_note_attachments',
+      'get_attribute',
+      'get_day_note',
+      'get_inbox_note',
+      'move_note',
+      'clone_note',
+      'reorder_notes',
+      'delete_branch',
+      'get_attachment_content',
+      'update_attachment',
+      'update_attachment_content',
+      'get_note_revisions',
+      'get_revision',
+      'get_revision_content',
+      'create_backup',
+      'export_note',
+      'search_tools',
+    ]) {
+      expect(names).not.toContain(dropped);
+    }
+  });
+
+  it('every tool has title and at least one hint annotation', () => {
+    const allTools = [
+      ...registerSearchTools(),
+      ...registerNoteTools(),
+      ...registerRevisionTools(),
+      ...registerAttributeTools(),
+      ...registerAttachmentTools(),
+      ...registerCalendarTools(),
+      ...registerOrganizationTools(),
+      ...registerSystemTools(),
+    ];
+    for (const t of allTools) {
+      expect(t.annotations).toBeDefined();
+      expect(t.annotations?.title).toBeTruthy();
+      const hasHint =
+        t.annotations?.readOnlyHint !== undefined ||
+        t.annotations?.destructiveHint !== undefined ||
+        t.annotations?.idempotentHint !== undefined;
+      expect(hasHint).toBe(true);
+    }
+  });
+
+  it('every inputSchema has type: "object" (required by MCP spec)', () => {
+    const allTools = [
+      ...registerSearchTools(),
+      ...registerNoteTools(),
+      ...registerRevisionTools(),
+      ...registerAttributeTools(),
+      ...registerAttachmentTools(),
+      ...registerCalendarTools(),
+      ...registerOrganizationTools(),
+      ...registerSystemTools(),
+    ];
+    for (const t of allTools) {
+      expect(t.inputSchema.type).toBe('object');
+    }
   });
 });

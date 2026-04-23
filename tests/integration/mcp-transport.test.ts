@@ -79,7 +79,7 @@ describe('MCP Transport Integration Tests', () => {
       // Delete
       const deleteResponse = await client.callTool({
         name: 'delete_note',
-        arguments: { noteId },
+        arguments: { noteId, action: 'delete' },
       });
       expect(deleteResponse.content).toBeDefined();
     });
@@ -140,7 +140,10 @@ describe('MCP Transport Integration Tests', () => {
       expect(parsed.note.title).toBe('HTTP Test Note');
 
       // Delete
-      await client.callTool({ name: 'delete_note', arguments: { noteId: parsed.note.noteId } });
+      await client.callTool({
+        name: 'delete_note',
+        arguments: { noteId: parsed.note.noteId, action: 'delete' },
+      });
     });
 
     it('should handle search_notes', async () => {
@@ -205,8 +208,8 @@ describe('MCP Transport Integration Tests', () => {
 
       // Get attachment content - should be text type
       const contentResponse = await client.callTool({
-        name: 'get_attachment_content',
-        arguments: { attachmentId: attachment.attachmentId },
+        name: 'get_attachment',
+        arguments: { attachmentId: attachment.attachmentId, include_content: true },
       });
 
       const content = contentResponse.content as Array<{ type: string; text?: string }>;
@@ -214,7 +217,10 @@ describe('MCP Transport Integration Tests', () => {
       expect(content[0].text).toBe('Hello World');
 
       // Cleanup
-      await client.callTool({ name: 'delete_note', arguments: { noteId: testNoteId } });
+      await client.callTool({
+        name: 'delete_note',
+        arguments: { noteId: testNoteId, action: 'delete' },
+      });
     });
 
     it('should return image content block for image attachments', async () => {
@@ -256,8 +262,8 @@ describe('MCP Transport Integration Tests', () => {
 
       // Get attachment content - should be image type
       const contentResponse = await client.callTool({
-        name: 'get_attachment_content',
-        arguments: { attachmentId: attachment.attachmentId },
+        name: 'get_attachment',
+        arguments: { attachmentId: attachment.attachmentId, include_content: true },
       });
 
       const content = contentResponse.content as Array<{ type: string; data?: string; mimeType?: string }>;
@@ -266,7 +272,10 @@ describe('MCP Transport Integration Tests', () => {
       expect(content[0].mimeType).toBe('image/png');
 
       // Cleanup
-      await client.callTool({ name: 'delete_note', arguments: { noteId: testNoteId } });
+      await client.callTool({
+        name: 'delete_note',
+        arguments: { noteId: testNoteId, action: 'delete' },
+      });
     });
 
     it('should return image content block for JPEG attachments', async () => {
@@ -308,8 +317,8 @@ describe('MCP Transport Integration Tests', () => {
 
       // Get attachment content - should be image type
       const contentResponse = await client.callTool({
-        name: 'get_attachment_content',
-        arguments: { attachmentId: attachment.attachmentId },
+        name: 'get_attachment',
+        arguments: { attachmentId: attachment.attachmentId, include_content: true },
       });
 
       const content = contentResponse.content as Array<{ type: string; data?: string; mimeType?: string }>;
@@ -317,7 +326,10 @@ describe('MCP Transport Integration Tests', () => {
       expect(content[0].mimeType).toBe('image/jpeg');
 
       // Cleanup
-      await client.callTool({ name: 'delete_note', arguments: { noteId: testNoteId } });
+      await client.callTool({
+        name: 'delete_note',
+        arguments: { noteId: testNoteId, action: 'delete' },
+      });
     });
   });
 

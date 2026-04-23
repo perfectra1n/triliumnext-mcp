@@ -26,7 +26,7 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   ATTRIBUTE_NOT_FOUND:
     'The specified attribute ID does not exist. Use get_attributes to list valid attribute IDs for a note.',
   ATTACHMENT_NOT_FOUND:
-    'The specified attachment ID does not exist. Use get_note to find attachments associated with a note.',
+    'The specified attachment ID does not exist. Use get_attachment with a noteId to list attachments on that note.',
   ENTITY_NOT_FOUND: 'The specified entity does not exist. Verify the ID is correct.',
   INVALID_ENTITY_ID: 'The entity ID format is invalid. IDs must be 4-32 alphanumeric characters.',
   NOTE_IS_DELETED: 'This note has been deleted. It cannot be accessed or modified.',

@@ -42,15 +42,17 @@ export function buildMcpServer(client: TriliumClient): Server {
     }
   );
 
+  // Tool order matters: some clients pre-load only the first N tools. Put
+  // read-heavy categories first so navigation/search are always available.
   const allTools = [
-    ...registerNoteTools(),
-    ...registerSearchTools(),
-    ...registerOrganizationTools(),
-    ...registerAttributeTools(),
-    ...registerCalendarTools(),
-    ...registerSystemTools(),
-    ...registerAttachmentTools(),
-    ...registerRevisionTools(),
+    ...registerSearchTools(),       // search_notes, get_note_tree
+    ...registerNoteTools(),          // get_note, get_note_history, create_note, write_note, delete_note
+    ...registerRevisionTools(),      // get_revisions
+    ...registerAttributeTools(),     // get_attributes, set_attribute, delete_attribute
+    ...registerAttachmentTools(),    // get_attachment, create_attachment, write_attachment, delete_attachment
+    ...registerCalendarTools(),      // get_special_note
+    ...registerOrganizationTools(),  // organize_note
+    ...registerSystemTools(),        // create_revision, manage_system
   ];
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {

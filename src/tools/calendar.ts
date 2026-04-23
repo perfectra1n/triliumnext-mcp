@@ -4,12 +4,16 @@ import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { dateSchema } from './validators.js';
 
-const getDayNoteSchema = z.object({
-  date: dateSchema.optional().describe('Date in YYYY-MM-DD format (defaults to today)'),
-});
-
-const getInboxNoteSchema = z.object({
-  date: dateSchema.optional().describe('Date in YYYY-MM-DD format (defaults to today)'),
+const getSpecialNoteSchema = z.object({
+  kind: z
+    .enum(['day', 'inbox'])
+    .describe(
+      '"day" — the daily journal note for the given date (created if missing). ' +
+        '"inbox" — the quick-capture inbox note (may be a fixed note or the daily note depending on Trilium configuration).'
+    ),
+  date: dateSchema
+    .optional()
+    .describe('Date in YYYY-MM-DD format (defaults to today).'),
 });
 
 function getTodayDate(): string {
@@ -23,14 +27,11 @@ function getTodayDate(): string {
 export function registerCalendarTools(): Tool[] {
   return [
     defineTool(
-      'get_day_note',
-      "Get or create the daily note for a specific date. Creates the note if it doesn't exist.",
-      getDayNoteSchema
-    ),
-    defineTool(
-      'get_inbox_note',
-      'Get the inbox note for quick capture. The inbox can be a fixed note or a daily journal note depending on Trilium configuration.',
-      getInboxNoteSchema
+      'get_special_note',
+      'Get the daily journal or inbox note. Pass kind="day" for the daily note (auto-created if missing) ' +
+        'or kind="inbox" for the quick-capture inbox (configuration-dependent: either a fixed note or the daily note).',
+      getSpecialNoteSchema,
+      { title: 'Get day or inbox note', readOnlyHint: false, idempotentHint: true }
     ),
   ];
 }
@@ -40,26 +41,14 @@ export async function handleCalendarTool(
   name: string,
   args: unknown
 ): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
-  switch (name) {
-    case 'get_day_note': {
-      const parsed = getDayNoteSchema.parse(args);
-      const date = parsed.date ?? getTodayDate();
-      const note = await client.getDayNote(date);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(note, null, 2) }],
-      };
-    }
+  if (name !== 'get_special_note') return null;
 
-    case 'get_inbox_note': {
-      const parsed = getInboxNoteSchema.parse(args);
-      const date = parsed.date ?? getTodayDate();
-      const note = await client.getInboxNote(date);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(note, null, 2) }],
-      };
-    }
+  const parsed = getSpecialNoteSchema.parse(args);
+  const date = parsed.date ?? getTodayDate();
+  const note =
+    parsed.kind === 'day' ? await client.getDayNote(date) : await client.getInboxNote(date);
 
-    default:
-      return null;
-  }
+  return {
+    content: [{ type: 'text', text: JSON.stringify(note, null, 2) }],
+  };
 }

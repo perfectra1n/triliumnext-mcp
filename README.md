@@ -22,12 +22,13 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 
 ## Features
 
-- **35 tools** across 8 categories for full note management, search, organization, attachments, revisions, and system operations
+- **19 tools** across 8 categories for full note management, search, organization, attachments, revisions, and system operations (consolidated from 35 in v1 — see [Migrating from v1](#migrating-from-v1))
+- **MCP tool annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `title`) on every tool for better approval-dialog UX in clients that surface them
 - **Inline image and file embedding** — attach images and files when creating or updating notes in a single tool call
 - **Data URL support** — pass image/file data as raw base64 or `data:` URLs
-- **Three content update modes** — full replacement, search/replace, and unified diff
+- **Four content modes on `write_note`** — metadata, replace, append, and edit (search/replace or unified diff)
 - **Markdown support** — write in markdown, stored as HTML automatically
-- **Image-aware content retrieval** — `get_note_content` returns embedded images as visual content blocks
+- **Image-aware content retrieval** — `get_note` with `include_content=true` returns embedded images as visual content blocks
 - Support for both STDIO and HTTP (SSE) transports, including **multi-tenant SSE mode** where each client brings its own Trilium URL + ETAPI token
 - Flexible configuration via CLI, environment variables, or config file
 - TypeScript with full type safety
@@ -126,80 +127,108 @@ For multi-tenant HTTP deployments, the same precedence applies (CLI > env > file
 
 ## Available Tools
 
-### Notes (10 tools)
+The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](https://github.com/perfectra1n/triliumnext-mcp/issues/6)) improves reliability on clients that pre-load only a subset of a server's tools (claude.ai web, Cursor's 40-tool cap), and consolidates near-duplicate operations behind a `mode` or `action` discriminator. Destructive verbs (`delete_*`) stay as their own tools by design. See [Migrating from v1](#migrating-from-v1) below for the old→new mapping.
+
+### Notes (5 tools)
 
 | Tool | Description |
 |------|-------------|
+| `get_note` | Read a note. Returns metadata by default; pass `include_content=true` to also fetch the body and embedded images. |
+| `get_note_history` | Get recent changes (creations, modifications, deletions) across the tree, with optional subtree filtering. |
 | `create_note` | Create a note with title, content, type, and parent. Supports inline image/file embedding. |
-| `get_note` | Get note metadata by ID (title, type, attributes, parent/child relationships) |
-| `get_note_content` | Get note content as HTML or markdown. Automatically includes embedded images as visual content blocks. |
-| `update_note` | Update note metadata (title, type, MIME type) |
-| `update_note_content` | Update note content via full replacement, search/replace, or unified diff. Supports inline image/file embedding in replacement mode. |
-| `append_note_content` | Append content or edit via search/replace or diff. Supports inline image/file embedding in append mode. |
-| `delete_note` | Delete a note and all its branches |
-| `undelete_note` | Restore a previously deleted note |
-| `get_note_attachments` | List all attachments for a note |
-| `get_note_history` | Get recent changes (creations, modifications, deletions) with optional subtree filtering |
+| `write_note` | Write to a note via `mode`: `"metadata"` (title/type/mime), `"replace"` (overwrite content), `"append"` (concatenate), `"edit"` (search/replace or unified diff). Supports inline image/file embedding in `replace`/`append` modes. |
+| `delete_note` | Delete or restore a note via required `action`: `"delete"` or `"undelete"`. |
 
 ### Search & Discovery (2 tools)
 
 | Tool | Description |
 |------|-------------|
-| `search_notes` | Full-text and attribute search with filters, ordering, and limits |
-| `get_note_tree` | Get children of a note for tree navigation |
+| `search_notes` | Full-text and attribute search with filters, ordering, and limits. |
+| `get_note_tree` | Get children of a note for tree navigation. |
 
-### Organization (4 tools)
-
-| Tool | Description |
-|------|-------------|
-| `move_note` | Move a note to a different parent |
-| `clone_note` | Clone a note to appear under multiple parents |
-| `reorder_notes` | Change note positions within a parent |
-| `delete_branch` | Remove a branch without deleting the note |
-
-### Attributes & Labels (4 tools)
+### Organization (1 tool)
 
 | Tool | Description |
 |------|-------------|
-| `get_attributes` | Get all attributes (labels/relations) of a note |
-| `get_attribute` | Get a single attribute by ID |
-| `set_attribute` | Add or update an attribute on a note |
-| `delete_attribute` | Remove an attribute from a note |
+| `organize_note` | Reorganize the note tree via `action`: `"move"` (new parent), `"clone"` (appear under multiple parents), `"reorder"` (change positions), `"unlink"` (remove a branch — cascades to note deletion if it's the last branch). |
 
-### Calendar & Journal (2 tools)
+### Attributes & Labels (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `get_day_note` | Get or create the daily note for a date |
-| `get_inbox_note` | Get the inbox note for quick capture |
+| `get_attributes` | Get all attributes of a note (pass `noteId`) or a single attribute by ID (pass `attributeId`). |
+| `set_attribute` | Upsert an attribute on a note. |
+| `delete_attribute` | Remove an attribute by ID. |
 
-### Attachments (6 tools)
-
-| Tool | Description |
-|------|-------------|
-| `create_attachment` | Create a new attachment (image or file) for a note |
-| `get_attachment` | Get attachment metadata by ID |
-| `update_attachment` | Update attachment metadata (role, MIME, title, position) |
-| `delete_attachment` | Delete an attachment |
-| `get_attachment_content` | Get attachment content — images returned as visual content blocks |
-| `update_attachment_content` | Update attachment content via replacement, search/replace, or diff |
-
-### Revisions (3 tools)
+### Calendar & Journal (1 tool)
 
 | Tool | Description |
 |------|-------------|
-| `get_note_revisions` | List all revision snapshots for a note |
-| `get_revision` | Get revision metadata by ID |
-| `get_revision_content` | Get the content of a historical revision |
+| `get_special_note` | Get the daily or inbox note via `kind`: `"day"` or `"inbox"` (optional `date`, defaults to today). |
 
-### System (4 tools)
+### Attachments (4 tools)
 
 | Tool | Description |
 |------|-------------|
-| `create_revision` | Create a revision snapshot of a note |
-| `create_backup` | Create a full database backup |
-| `export_note` | Export a note subtree as a ZIP file |
-| `search_tools` | Search available tools by keyword or category |
+| `get_attachment` | Read an attachment (pass `attachmentId`) or list a note's attachments (pass `noteId`). With `attachmentId`, set `include_content=true` to fetch the body — images come back as MCP image blocks. |
+| `create_attachment` | Create a new attachment (image or file) for a note. |
+| `write_attachment` | Write to an attachment via `mode`: `"metadata"`, `"replace"`, or `"edit"`. |
+| `delete_attachment` | Delete an attachment. |
+
+### Revisions (1 tool)
+
+| Tool | Description |
+|------|-------------|
+| `get_revisions` | Get note revisions. Pass `noteId` to list all revisions of a note; pass `revisionId` for a single revision (set `include_content=true` to fetch its HTML content). |
+
+### System (2 tools)
+
+| Tool | Description |
+|------|-------------|
+| `create_revision` | Create a revision snapshot of a note. |
+| `manage_system` | System ops via `action`: `"backup"` (create a DB backup by `backupName`) or `"export"` (export a note subtree as ZIP, returned base64-encoded). |
+
+### Migrating from v1
+
+The tool surface was consolidated in a breaking release. The mapping from the old 35-tool surface to the current 19-tool surface:
+
+| v1 tool | v2 equivalent |
+|---|---|
+| `create_note` | `create_note` (unchanged) |
+| `get_note` | `get_note` (default `include_content=false` preserves fast metadata reads) |
+| `get_note_content` | `get_note` with `include_content=true` |
+| `update_note` | `write_note` with `mode="metadata"` |
+| `update_note_content` | `write_note` with `mode="replace"` (or `mode="edit"` for search/replace and diff) |
+| `append_note_content` | `write_note` with `mode="append"` (or `mode="edit"` for search/replace and diff) |
+| `delete_note` | `delete_note` with `action="delete"` (**required**, no default) |
+| `undelete_note` | `delete_note` with `action="undelete"` |
+| `get_note_attachments` | `get_attachment` with `noteId` (list form) |
+| `get_note_history` | `get_note_history` (unchanged) |
+| `search_notes` | `search_notes` (unchanged) |
+| `get_note_tree` | `get_note_tree` (unchanged) |
+| `move_note` | `organize_note` with `action="move"` |
+| `clone_note` | `organize_note` with `action="clone"` |
+| `reorder_notes` | `organize_note` with `action="reorder"` |
+| `delete_branch` | `organize_note` with `action="unlink"` |
+| `get_attributes` | `get_attributes` with `noteId` |
+| `get_attribute` | `get_attributes` with `attributeId` |
+| `set_attribute` | `set_attribute` (unchanged) |
+| `delete_attribute` | `delete_attribute` (unchanged) |
+| `get_day_note` | `get_special_note` with `kind="day"` |
+| `get_inbox_note` | `get_special_note` with `kind="inbox"` |
+| `create_attachment` | `create_attachment` (unchanged) |
+| `get_attachment` | `get_attachment` with `include_content=false` |
+| `get_attachment_content` | `get_attachment` with `include_content=true` |
+| `update_attachment` | `write_attachment` with `mode="metadata"` |
+| `update_attachment_content` | `write_attachment` with `mode="replace"` or `mode="edit"` |
+| `delete_attachment` | `delete_attachment` (unchanged) |
+| `get_note_revisions` | `get_revisions` with `noteId` |
+| `get_revision` | `get_revisions` with `revisionId` (default `include_content=false`) |
+| `get_revision_content` | `get_revisions` with `revisionId` and `include_content=true` |
+| `create_revision` | `create_revision` (unchanged) |
+| `create_backup` | `manage_system` with `action="backup"` |
+| `export_note` | `manage_system` with `action="export"` |
+| `search_tools` | *dropped* (with 19 tools, client-side discovery is no longer needed) |
 
 ## Embedding Images and Files
 
@@ -277,11 +306,14 @@ The `data` field accepts both raw base64 and data URLs. When a data URL is provi
 
 ### Content Update Modes
 
-The `update_note_content` and `append_note_content` tools support three modes (images/files only work with mode 1):
+The `write_note` tool selects behavior via `mode`:
 
-1. **Full replacement** (`content`) — replace or append entire content, with optional markdown conversion
-2. **Search/replace** (`changes`) — array of `{old_string, new_string}` blocks applied sequentially
-3. **Unified diff** (`patch`) — a unified diff string applied to existing content
+1. **`"metadata"`** — update title/type/mime only (no content change)
+2. **`"replace"`** — overwrite content entirely with `content`. Supports `images`/`files` embedding and markdown conversion.
+3. **`"append"`** — fetch existing content and concatenate `content` at the end. Supports `images`/`files` embedding and markdown conversion.
+4. **`"edit"`** — apply `changes` (array of `{old_string, new_string}`) OR `patch` (unified diff) to existing content. Operates on stored HTML; cannot be combined with `format="markdown"` or `images`/`files`.
+
+`write_attachment` follows the same shape with `"metadata"`, `"replace"`, and `"edit"` modes.
 
 ## Multi-tenant HTTP deployment
 

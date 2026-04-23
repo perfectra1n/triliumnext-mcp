@@ -170,3 +170,17 @@ export const backupNameSchema = z
     /^[a-zA-Z0-9_-]+$/,
     'Backup name must contain only alphanumeric characters, hyphens, and underscores'
   );
+
+/**
+ * Runtime invariant: narrow an optional field to required after schema-level
+ * `.check()` has already validated its presence. Throws a clear error if the
+ * invariant is violated (which indicates a schema/handler mismatch bug).
+ */
+export function required<T>(value: T | null | undefined, name: string): T {
+  if (value === null || value === undefined) {
+    throw new Error(
+      `Invariant violation: "${name}" must be present at this point (schema .check() should have enforced it)`
+    );
+  }
+  return value;
+}

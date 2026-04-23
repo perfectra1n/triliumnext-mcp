@@ -2,70 +2,100 @@ import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
-import { positionSchema } from './validators.js';
+import { positionSchema, required } from './validators.js';
 
-const moveNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to move'),
-  newParentNoteId: z
-    .string()
-    .min(1, 'New parent note ID is required')
-    .describe('ID of the new parent note. Use search_notes and get_note_tree first to find the right destination.'),
-  prefix: z.string().optional().describe('Optional prefix for the note in its new location'),
-});
-
-const cloneNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to clone'),
-  parentNoteId: z
-    .string()
-    .min(1, 'Parent note ID is required')
-    .describe('ID of the parent note for the clone'),
-  prefix: z.string().optional().describe('Optional prefix for the cloned note'),
-});
-
-const reorderNotesSchema = z.object({
-  parentNoteId: z.string().min(1, 'Parent note ID is required').describe('ID of the parent note'),
-  notePositions: z
-    .array(
-      z.object({
-        branchId: z
-          .string()
-          .min(1, 'Branch ID is required')
-          .describe('ID of the branch to reorder'),
-        notePosition: positionSchema.describe('New position (10, 20, 30...)'),
-      })
-    )
-    .describe('Array of branch positions to update'),
-});
-
-const deleteBranchSchema = z.object({
-  branchId: z
-    .string()
-    .min(1, 'Branch ID is required')
-    .describe('ID of the branch to delete (not the note ID)'),
-});
+const organizeNoteSchema = z
+  .object({
+    action: z
+      .enum(['move', 'clone', 'reorder', 'unlink'])
+      .describe(
+        'Operation to perform. ' +
+          '"move" — move a note to a new parent (fields: noteId, newParentNoteId, prefix?). ' +
+          '"clone" — make a note appear under an additional parent (fields: noteId, parentNoteId, prefix?). ' +
+          '"reorder" — change display order of children under a parent (fields: parentNoteId, notePositions[]). ' +
+          '"unlink" — remove a specific parent-child branch (field: branchId). WARNING: removing a note\'s last branch deletes the note.'
+      ),
+    noteId: z.string().optional().describe('ID of the note. Required for "move" and "clone".'),
+    newParentNoteId: z
+      .string()
+      .optional()
+      .describe('Destination parent for "move". Use search_notes/get_note_tree to pick the right parent.'),
+    parentNoteId: z
+      .string()
+      .optional()
+      .describe('Parent note ID. Required for "clone" (destination) and "reorder" (owner of the ordering).'),
+    prefix: z
+      .string()
+      .optional()
+      .describe('Optional branch prefix for "move" and "clone" (e.g., "Archive:", "Draft:").'),
+    notePositions: z
+      .array(
+        z.object({
+          branchId: z.string().min(1).describe('ID of the branch to reorder'),
+          notePosition: positionSchema.describe('New position (10, 20, 30...)'),
+        })
+      )
+      .optional()
+      .describe('Required for "reorder": array of branch position updates.'),
+    branchId: z
+      .string()
+      .optional()
+      .describe('Required for "unlink": the branch (parent-child link) to remove.'),
+  })
+  .check((ctx) => {
+    const { action, noteId, newParentNoteId, parentNoteId, notePositions, branchId } = ctx.value;
+    if (action === 'move') {
+      if (!noteId || !newParentNoteId) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="move" requires "noteId" and "newParentNoteId"',
+          path: [],
+        });
+      }
+    } else if (action === 'clone') {
+      if (!noteId || !parentNoteId) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="clone" requires "noteId" and "parentNoteId"',
+          path: [],
+        });
+      }
+    } else if (action === 'reorder') {
+      if (!parentNoteId || !notePositions || notePositions.length === 0) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="reorder" requires "parentNoteId" and a non-empty "notePositions" array',
+          path: [],
+        });
+      }
+    } else if (action === 'unlink') {
+      if (!branchId) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="unlink" requires "branchId"',
+          path: ['branchId'],
+        });
+      }
+    }
+  });
 
 export function registerOrganizationTools(): Tool[] {
   return [
     defineTool(
-      'move_note',
-      'Move a note to a different parent. This deletes the old branch and creates a new one under the target parent. ' +
-        'IMPORTANT: Before moving, use search_notes and get_note_tree to explore the note hierarchy, understand the current structure, and identify the best destination. Suggest the target location to the user and confirm before moving.',
-      moveNoteSchema
-    ),
-    defineTool(
-      'clone_note',
-      'Clone a note to appear in multiple locations. Creates a new branch pointing to the same note.',
-      cloneNoteSchema
-    ),
-    defineTool(
-      'reorder_notes',
-      'Change the order of notes within a parent. Update notePosition on branches to control display order.',
-      reorderNotesSchema
-    ),
-    defineTool(
-      'delete_branch',
-      'Delete a specific branch (parent-child link) without deleting the note itself. Use this to remove a note from one location while keeping it in others. WARNING: If you delete the last branch of a note, the note itself will be deleted.',
-      deleteBranchSchema
+      'organize_note',
+      'Reorganize the note tree. Four actions selected via "action":\n' +
+        '- "move": relocate a note to a new parent (deletes primary branch, creates new one under destination)\n' +
+        '- "clone": make a note appear in multiple locations (new branch pointing to same note)\n' +
+        '- "reorder": change display order of notes under a parent by updating branch positions\n' +
+        '- "unlink": remove a specific parent-child branch without deleting the note (unless it\'s the last branch)\n\n' +
+        'IMPORTANT: Before "move" or "clone", use search_notes and get_note_tree to explore the hierarchy and suggest the right destination. ' +
+        'WARNING: "unlink" on the last branch of a note deletes the note itself.',
+      organizeNoteSchema,
+      { title: 'Organize notes', readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     ),
   ];
 }
@@ -75,82 +105,91 @@ export async function handleOrganizationTool(
   name: string,
   args: unknown
 ): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
-  switch (name) {
-    case 'move_note': {
-      const parsed = moveNoteSchema.parse(args);
+  if (name !== 'organize_note') return null;
 
-      // Get the note to find its current branch
-      const note = await client.getNote(parsed.noteId);
+  const parsed = organizeNoteSchema.parse(args);
 
-      // Create a new branch under the new parent FIRST
-      // (If we delete the old branch first, the note would be deleted when last branch is removed)
+  switch (parsed.action) {
+    case 'move': {
+      const noteId = required(parsed.noteId, 'noteId');
+      const newParentNoteId = required(parsed.newParentNoteId, 'newParentNoteId');
+
+      // Create new branch first so the note isn't briefly orphaned
+      const note = await client.getNote(noteId);
       const newBranch = await client.createBranch({
-        noteId: parsed.noteId,
-        parentNoteId: parsed.newParentNoteId,
+        noteId,
+        parentNoteId: newParentNoteId,
         prefix: parsed.prefix,
       });
 
-      // Delete the first branch (primary location)
       if (note.parentBranchIds.length > 0) {
         await client.deleteBranch(note.parentBranchIds[0]);
       }
 
       return {
         content: [
-          { type: 'text', text: JSON.stringify({ success: true, branch: newBranch }, null, 2) },
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, action: 'move', branch: newBranch }, null, 2),
+          },
         ],
       };
     }
 
-    case 'clone_note': {
-      const parsed = cloneNoteSchema.parse(args);
-
-      // Create a new branch pointing to the same note
+    case 'clone': {
+      const noteId = required(parsed.noteId, 'noteId');
+      const parentNoteId = required(parsed.parentNoteId, 'parentNoteId');
       const branch = await client.createBranch({
-        noteId: parsed.noteId,
-        parentNoteId: parsed.parentNoteId,
+        noteId,
+        parentNoteId,
         prefix: parsed.prefix,
       });
-
       return {
-        content: [{ type: 'text', text: JSON.stringify(branch, null, 2) }],
+        content: [
+          { type: 'text', text: JSON.stringify({ action: 'clone', branch }, null, 2) },
+        ],
       };
     }
 
-    case 'reorder_notes': {
-      const parsed = reorderNotesSchema.parse(args);
+    case 'reorder': {
+      const parentNoteId = required(parsed.parentNoteId, 'parentNoteId');
+      const notePositions = required(parsed.notePositions, 'notePositions');
 
-      // Update each branch position
       const results = [];
-      for (const pos of parsed.notePositions) {
+      for (const pos of notePositions) {
         const updated = await client.updateBranch(pos.branchId, {
           notePosition: pos.notePosition,
         });
         results.push(updated);
       }
 
-      // Refresh the note ordering
-      await client.refreshNoteOrdering(parsed.parentNoteId);
+      await client.refreshNoteOrdering(parentNoteId);
 
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, updatedBranches: results }, null, 2),
+            text: JSON.stringify(
+              { success: true, action: 'reorder', updatedBranches: results },
+              null,
+              2
+            ),
           },
         ],
       };
     }
 
-    case 'delete_branch': {
-      const parsed = deleteBranchSchema.parse(args);
-      await client.deleteBranch(parsed.branchId);
+    case 'unlink': {
+      const branchId = required(parsed.branchId, 'branchId');
+      await client.deleteBranch(branchId);
       return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, branchId: parsed.branchId }, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, action: 'unlink', branchId }, null, 2),
+          },
+        ],
       };
     }
-
-    default:
-      return null;
   }
 }

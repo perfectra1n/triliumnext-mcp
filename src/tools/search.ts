@@ -82,14 +82,16 @@ export function registerSearchTools(): Tool[] {
 - \`meeting or project\` - Notes containing "meeting" OR "project"
 - \`id:abc123def\` - Direct lookup of note by ID
 - \`title:weekly meeting\` - Notes with "weekly meeting" in title`,
-      searchNotesSchema
+      searchNotesSchema,
+      { title: 'Search notes', readOnlyHint: true, openWorldHint: false }
     ),
     defineTool(
       'get_note_tree',
       'Get children of a note for tree navigation. Returns the note with its childNoteIds populated. ' +
         'Use this tool to explore the note hierarchy before creating or moving notes — start from "root" to see top-level structure, then drill into child notes to find the best placement. ' +
         'When the user asks to create or organize notes, proactively explore the tree and suggest where the note should go.',
-      getNoteTreeSchema
+      getNoteTreeSchema,
+      { title: 'Get note tree', readOnlyHint: true }
     ),
   ];
 }

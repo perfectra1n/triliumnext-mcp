@@ -2,37 +2,46 @@ import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 /**
+ * MCP tool annotations as hints for clients. None of these affect tool
+ * load priority in any current client, but they do improve approval-dialog
+ * UX (`destructiveHint`/`readOnlyHint`) and retry behavior (`idempotentHint`).
+ */
+export interface ToolAnnotations {
+  title?: string;
+  readOnlyHint?: boolean;
+  destructiveHint?: boolean;
+  idempotentHint?: boolean;
+  openWorldHint?: boolean;
+}
+
+/**
  * Creates a tool definition from a Zod schema.
- * This provides a single source of truth for both validation and JSON Schema generation.
  *
- * Uses Zod 4's built-in toJSONSchema() method for conversion.
- *
- * @param name - The tool name (e.g., "create_note")
- * @param description - Tool description shown to LLMs
- * @param schema - Zod object schema for input validation
- * @returns Tool definition compatible with MCP SDK
+ * MCP's Tool `inputSchema` must be `type: "object"`, so only top-level
+ * `ZodObject` schemas are accepted. For tools that branch on a mode/action
+ * field, use a flat object with an enum discriminator and `.check()` for
+ * cross-field validation — the JSON Schema stays a single object and the
+ * LLM sees one flat parameter list.
  */
 export function defineTool(
   name: string,
   description: string,
-  schema: z.ZodObject<z.ZodRawShape>
+  schema: z.ZodObject<z.ZodRawShape>,
+  annotations?: ToolAnnotations
 ): Tool {
-  // Use Zod 4's built-in JSON Schema conversion
   const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any', reused: 'inline' }) as Record<
     string,
     unknown
   >;
 
-  // Remove $schema and additionalProperties to match MCP SDK expectations
   delete jsonSchema.$schema;
   delete jsonSchema.additionalProperties;
 
-  // Ensure required is always an array (empty if no required fields)
   if (!jsonSchema.required) {
     jsonSchema.required = [];
   }
 
-  return {
+  const tool: Tool = {
     name,
     description,
     inputSchema: jsonSchema as {
@@ -41,17 +50,26 @@ export function defineTool(
       required?: string[];
     },
   };
+
+  if (annotations) {
+    tool.annotations = annotations;
+  }
+
+  return tool;
 }
 
 /**
- * Creates multiple tool definitions from an array of tool configs
+ * Creates multiple tool definitions from an array of tool configs.
  */
 export function defineTools(
   tools: Array<{
     name: string;
     description: string;
     schema: z.ZodObject<z.ZodRawShape>;
+    annotations?: ToolAnnotations;
   }>
 ): Tool[] {
-  return tools.map(({ name, description, schema }) => defineTool(name, description, schema));
+  return tools.map(({ name, description, schema, annotations }) =>
+    defineTool(name, description, schema, annotations)
+  );
 }

@@ -838,8 +838,8 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         content: pngBase64,
       });
 
-      // Call handleNoteTool with includeImages (default true)
-      const result = await handleNoteTool(client, 'get_note_content', { noteId });
+      // Call handleNoteTool with include_content (default true for attachments)
+      const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });
 
       expect(result).not.toBeNull();
       // Should have text block + image block
@@ -876,7 +876,7 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         content: 'fake-pdf-content',
       });
 
-      const result = await handleNoteTool(client, 'get_note_content', { noteId });
+      const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });
 
       expect(result).not.toBeNull();
       // Only text block, no image block
@@ -884,7 +884,7 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       const text = (result!.content[0] as { type: 'text'; text: string }).text;
       expect(text).toContain('report.pdf');
       expect(text).toContain('application/pdf');
-      expect(text).toContain('get_attachment_content');
+      expect(text).toContain('get_attachment');
     });
 
     it('should skip attachment discovery when includeImages is false', async () => {
@@ -904,8 +904,9 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
       });
 
-      const result = await handleNoteTool(client, 'get_note_content', {
+      const result = await handleNoteTool(client, 'get_note', {
         noteId,
+        include_content: true,
         includeImages: false,
       });
 
@@ -1071,8 +1072,9 @@ Here is a [link](https://example.com) and some \`inline code\`.
 2. Second item
 `;
 
-      await handleNoteTool(client, 'update_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId: createResult.note.noteId,
+        mode: 'replace',
         content: markdownUpdate,
         format: 'markdown',
       });
@@ -1095,8 +1097,9 @@ Here is a [link](https://example.com) and some \`inline code\`.
 
       const htmlUpdate = '<article><h1>HTML Update</h1><p>Unchanged</p></article>';
 
-      await handleNoteTool(client, 'update_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId: createResult.note.noteId,
+        mode: 'replace',
         content: htmlUpdate,
       });
 
@@ -1304,8 +1307,9 @@ This has <angle brackets> and "quotes" & ampersands.
       });
       const noteId = createResult.note.noteId;
 
-      await handleNoteTool(client, 'update_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId,
+        mode: 'replace',
         content: '<p>Updated with image</p><img src="image:0">',
         images: [{ data: pngBase64, mime: 'image/png', filename: 'updated.png' }],
       });
@@ -1326,8 +1330,9 @@ This has <angle brackets> and "quotes" & ampersands.
       });
       const noteId = createResult.note.noteId;
 
-      await handleNoteTool(client, 'append_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId,
+        mode: 'append',
         content: '<p>Appended section</p><img src="image:0">',
         images: [{ data: pngBase64, mime: 'image/png', filename: 'appended.png' }],
       });
@@ -1354,8 +1359,9 @@ This has <angle brackets> and "quotes" & ampersands.
       const noteId = createResult.note.noteId;
 
       await expect(
-        handleNoteTool(client, 'update_note_content', {
+        handleNoteTool(client, 'write_note', {
           noteId,
+          mode: 'replace',
           content: '<p>Should not land</p><img src="image:0">',
           // deliberately omitting images
         })
@@ -1452,8 +1458,9 @@ This has <angle brackets> and "quotes" & ampersands.
         content: '<p>Initial content</p>',
       });
 
-      await handleNoteTool(client, 'update_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId: createResult.note.noteId,
+        mode: 'replace',
         content: '<p>Updated with file: <a href="file:0">Data</a></p>',
         files: [{ data: fakeFileBase64, mime: 'text/csv', filename: 'data.csv' }],
       });
@@ -1472,8 +1479,9 @@ This has <angle brackets> and "quotes" & ampersands.
         content: '<p>Original content</p>',
       });
 
-      await handleNoteTool(client, 'append_note_content', {
+      await handleNoteTool(client, 'write_note', {
         noteId: createResult.note.noteId,
+        mode: 'append',
         content: '<p>Appended: <a href="file:0">Attachment</a></p>',
         files: [{ data: fakeFileBase64, mime: 'application/pdf', filename: 'attachment.pdf' }],
       });

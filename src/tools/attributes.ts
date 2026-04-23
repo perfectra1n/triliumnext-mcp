@@ -3,21 +3,43 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import type { AttributeType } from '../types/etapi.js';
 import { defineTool } from './schemas.js';
-import { attributeTypeSchema, optionalEntityIdSchema, positionSchema } from './validators.js';
+import {
+  attributeTypeSchema,
+  optionalEntityIdSchema,
+  positionSchema,
+  required,
+} from './validators.js';
 
-const getAttributesSchema = z.object({
-  noteId: z
-    .string()
-    .min(1, 'Note ID is required')
-    .describe('ID of the note to get attributes from'),
-});
-
-const getAttributeSchema = z.object({
-  attributeId: z
-    .string()
-    .min(1, 'Attribute ID is required')
-    .describe('ID of the attribute to retrieve'),
-});
+const getAttributesSchema = z
+  .object({
+    noteId: z
+      .string()
+      .optional()
+      .describe('If provided, returns all attributes of this note grouped by type (labels, relations).'),
+    attributeId: z
+      .string()
+      .optional()
+      .describe('If provided, returns the single attribute with this ID (noteId, type, name, value, position).'),
+  })
+  .check((ctx) => {
+    const { noteId, attributeId } = ctx.value;
+    const provided = [noteId !== undefined, attributeId !== undefined].filter(Boolean).length;
+    if (provided === 0) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Exactly one of "noteId" or "attributeId" is required',
+        path: [],
+      });
+    } else if (provided > 1) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message: 'Provide either "noteId" or "attributeId", not both',
+        path: [],
+      });
+    }
+  });
 
 const setAttributeSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to set attribute on'),
@@ -49,23 +71,35 @@ export function registerAttributeTools(): Tool[] {
   return [
     defineTool(
       'get_attributes',
-      'Get all attributes (labels and relations) of a note. Labels are key-value pairs, relations link to other notes.',
-      getAttributesSchema
-    ),
-    defineTool(
-      'get_attribute',
-      'Get a single attribute by its ID. Returns the full attribute details including noteId, type, name, value, and position.',
-      getAttributeSchema
+      'Get attributes of a note (all, grouped by type) or a single attribute by ID. ' +
+        'Pass "noteId" to list all attributes on that note (labels + relations). ' +
+        'Pass "attributeId" to fetch one specific attribute. Exactly one is required.',
+      getAttributesSchema,
+      { title: 'Get attributes', readOnlyHint: true }
     ),
     defineTool(
       'set_attribute',
-      'Add or update an attribute on a note. For labels, value is the label value. For relations, value is the target noteId.',
-      setAttributeSchema
+      'Add or update an attribute on a note (upsert). For labels, value is the label value. ' +
+        'For relations, value is the target noteId. If the attribute (noteId+type+name) already exists, ' +
+        'its value/position are updated; otherwise a new attribute is created.',
+      setAttributeSchema,
+      {
+        title: 'Set attribute (upsert)',
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+      }
     ),
     defineTool(
       'delete_attribute',
       'Remove an attribute from a note by its attribute ID.',
-      deleteAttributeSchema
+      deleteAttributeSchema,
+      {
+        title: 'Delete attribute',
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+      }
     ),
   ];
 }
@@ -78,9 +112,16 @@ export async function handleAttributeTool(
   switch (name) {
     case 'get_attributes': {
       const parsed = getAttributesSchema.parse(args);
-      const note = await client.getNote(parsed.noteId);
 
-      // Group attributes by type for easier reading
+      if (parsed.attributeId) {
+        const attr = await client.getAttribute(parsed.attributeId);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(attr, null, 2) }],
+        };
+      }
+
+      const noteId = required(parsed.noteId, 'noteId');
+      const note = await client.getNote(noteId);
       const labels = note.attributes.filter((a) => a.type === 'label');
       const relations = note.attributes.filter((a) => a.type === 'relation');
 
@@ -88,24 +129,15 @@ export async function handleAttributeTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ noteId: parsed.noteId, labels, relations }, null, 2),
+            text: JSON.stringify({ noteId, labels, relations }, null, 2),
           },
         ],
-      };
-    }
-
-    case 'get_attribute': {
-      const parsed = getAttributeSchema.parse(args);
-      const result = await client.getAttribute(parsed.attributeId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     }
 
     case 'set_attribute': {
       const parsed = setAttributeSchema.parse(args);
 
-      // Check if attribute already exists (unless forcing a specific attributeId)
       let existingAttr = null;
       if (!parsed.attributeId) {
         const note = await client.getNote(parsed.noteId);
@@ -116,13 +148,11 @@ export async function handleAttributeTool(
 
       let result;
       if (existingAttr) {
-        // Update existing attribute
         result = await client.updateAttribute(existingAttr.attributeId, {
           value: parsed.value,
           position: parsed.position,
         });
       } else {
-        // Create new attribute
         result = await client.createAttribute({
           noteId: parsed.noteId,
           type: parsed.type as AttributeType,
@@ -143,7 +173,12 @@ export async function handleAttributeTool(
       const parsed = deleteAttributeSchema.parse(args);
       await client.deleteAttribute(parsed.attributeId);
       return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, attributeId: parsed.attributeId }, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ success: true, attributeId: parsed.attributeId }, null, 2),
+          },
+        ],
       };
     }
 

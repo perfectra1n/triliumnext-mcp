@@ -105,7 +105,7 @@ export function verifySearchReplaceResults(
         missing.map((s) => `- "${s}"`).join('\n') +
         '\n\n' +
         `Trilium may have normalized or sanitized the HTML. ` +
-        `Use get_note_content to see what was actually saved, then retry with corrected HTML if needed.`
+        `Use get_note with include_content=true to see what was actually saved, then retry with corrected HTML if needed.`
     );
   }
 }

@@ -37,9 +37,6 @@ function resolveAttachmentData(entry: { data: string; mime: string }): { data: s
   return { data: entry.data, mime: entry.mime };
 }
 
-/**
- * Schema for an image to embed in a note.
- */
 const imageEntrySchema = z.object({
   data: z.string().describe(
     'Image data as base64 string or data URL (data:image/png;base64,...). ' +
@@ -69,8 +66,6 @@ async function processImages(
   htmlContent: string,
   images: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
-  // Create all attachments in parallel (resolve data URLs first)
-  // Uses two-step process: create metadata with empty content, then PUT binary
   const attachments = await Promise.all(
     images.map(async (img) => {
       const resolved = resolveAttachmentData(img);
@@ -87,7 +82,6 @@ async function processImages(
     })
   );
 
-  // Replace placeholder references: src="image:N" -> real Trilium URL
   let result = htmlContent;
   const referencedIndices = new Set<number>();
 
@@ -101,7 +95,6 @@ async function processImages(
     }
   }
 
-  // Append any images that were NOT referenced by a placeholder
   for (let i = 0; i < attachments.length; i++) {
     if (!referencedIndices.has(i)) {
       const att = attachments[i];
@@ -113,9 +106,6 @@ async function processImages(
   return result;
 }
 
-/**
- * Schema for a file to embed in a note.
- */
 const fileEntrySchema = z.object({
   data: z.string().describe(
     'File data as base64 string or data URL (data:application/pdf;base64,...). ' +
@@ -136,8 +126,6 @@ const filesFieldSchema = z.array(fileEntrySchema).optional().describe(
 
 /**
  * Create attachments for each file and replace placeholder references in HTML content.
- * Placeholders use the format href="file:N" where N is the zero-based index.
- * Files not referenced by a placeholder are appended at the end of the content as download links.
  */
 async function processFiles(
   client: TriliumClient,
@@ -145,8 +133,6 @@ async function processFiles(
   htmlContent: string,
   files: Array<{ data: string; mime: string; filename: string }>
 ): Promise<string> {
-  // Create all attachments in parallel (resolve data URLs first)
-  // Uses two-step process for binary MIME types to avoid content corruption
   const attachments = await Promise.all(
     files.map(async (file) => {
       const resolved = resolveAttachmentData(file);
@@ -172,7 +158,6 @@ async function processFiles(
     })
   );
 
-  // Replace placeholder references: href="file:N" -> real Trilium URL
   let result = htmlContent;
   const referencedIndices = new Set<number>();
 
@@ -186,7 +171,6 @@ async function processFiles(
     }
   }
 
-  // Append any files that were NOT referenced by a placeholder
   for (let i = 0; i < attachments.length; i++) {
     if (!referencedIndices.has(i)) {
       const att = attachments[i];
@@ -200,8 +184,7 @@ async function processFiles(
 
 /**
  * Scan final HTML for any remaining image:N / file:N placeholders that didn't get
- * resolved by processImages / processFiles. Trilium silently strips unknown src/href
- * values, so we fail loudly here with guidance instead of writing broken content.
+ * resolved. Trilium silently strips unknown src/href values, so we fail loudly.
  */
 function assertPlaceholdersResolved(html: string): void {
   const unresolved = new Set<string>();
@@ -222,10 +205,6 @@ function assertPlaceholdersResolved(html: string): void {
   );
 }
 
-/**
- * Convert markdown content to HTML if format is 'markdown'.
- * Returns content unchanged if format is 'html' or undefined.
- */
 async function convertContent(content: string, format?: 'html' | 'markdown'): Promise<string> {
   if (format === 'markdown') {
     return await marked.parse(content);
@@ -233,9 +212,6 @@ async function convertContent(content: string, format?: 'html' | 'markdown'): Pr
   return content;
 }
 
-/**
- * Convert HTML content to markdown.
- */
 function convertHtmlToMarkdown(html: string): string {
   const turndownService = new TurndownService({
     headingStyle: 'atx',
@@ -244,7 +220,10 @@ function convertHtmlToMarkdown(html: string): string {
   return turndownService.turndown(html);
 }
 
-// Zod schemas for validation
+// ============================================================================
+// Schemas
+// ============================================================================
+
 const createNoteSchema = z.object({
   parentNoteId: z
     .string()
@@ -306,220 +285,175 @@ const createNoteSchema = z.object({
 
 const getNoteSchema = z.object({
   noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to retrieve'),
-});
-
-const getNoteContentSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to get content from'),
+  include_content: z
+    .boolean()
+    .optional()
+    .default(false)
+    .describe(
+      'If true, also fetches the note body. Default false returns metadata only (fast read). ' +
+        'When true, the response includes the content as text and embedded image attachments as MCP image blocks.'
+    ),
   format: z
     .enum(['html', 'markdown'])
     .optional()
     .describe(
-      'Output format for text notes. Use "markdown" to convert HTML to markdown. ' +
-        'Defaults to "html" (returns content as stored). Only applies to text notes.'
+      'Content format when include_content=true. Use "markdown" to convert stored HTML to markdown. ' +
+        'Defaults to "html". Only meaningful when include_content=true.'
     ),
   includeImages: z
     .boolean()
-    .default(true)
+    .optional()
     .describe(
-      'When true (default), fetches note attachments and includes images as image content blocks. ' +
-        'Set false for text-only.'
+      'When include_content=true, whether to fetch embedded images as image content blocks. ' +
+        'Defaults to true. Ignored when include_content=false.'
     ),
 });
 
-const updateNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to update'),
-  title: z.string().optional().describe('New title for the note'),
-  type: noteTypeSchema.optional().describe('New type for the note'),
-  mime: z.string().optional().describe('New MIME type for the note'),
-});
-
-const updateNoteContentSchema = z
+const writeNoteSchema = z
   .object({
-    noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to update'),
+    noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to write to'),
+    mode: z
+      .enum(['metadata', 'replace', 'append', 'edit'])
+      .describe(
+        'Write mode. ' +
+          '"metadata" — update title/type/mime only (no content change). ' +
+          '"replace" — overwrite the entire content with the provided content. ' +
+          '"append" — fetch existing content and concatenate the provided content at the end. ' +
+          '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to the existing content.'
+      ),
+    title: z.string().optional().describe('New title (metadata mode only)'),
+    type: noteTypeSchema.optional().describe('New type (metadata mode only)'),
+    mime: z.string().optional().describe('New MIME type (metadata mode only)'),
     content: z
       .string()
       .optional()
       .describe(
-        'Full replacement content for the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
-          'For text notes with code blocks, use ' +
-          '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
-          'The class must be on the <code> element, not <pre>. ' +
-          'For internal links to other notes, use: ' +
-          '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
-          "The path should be the full note path from root. Use get_note to find paths."
+        'New content. Required for "replace" and "append" modes. ' +
+          'For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
+          'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure. ' +
+          'For internal links: <a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>.'
       ),
     changes: z
       .array(searchReplaceBlockSchema)
       .optional()
       .describe(
-        'Array of search/replace blocks to apply sequentially. Each block has old_string (exact match to find) ' +
-          'and new_string (replacement). Operates on stored content (HTML for text notes). ' +
-          'Cannot be used with format="markdown".'
+        '"edit" mode: array of search/replace blocks applied sequentially. ' +
+          'Each block has old_string (exact match) and new_string (replacement). ' +
+          'Operates on stored content (HTML for text notes).'
       ),
     patch: z
       .string()
       .optional()
-      .describe(
-        'Unified diff patch to apply to the existing content. ' +
-          'Cannot be used with format="markdown".'
-      ),
+      .describe('"edit" mode: unified diff to apply to existing content.'),
     format: z
       .enum(['html', 'markdown'])
       .optional()
       .describe(
-        'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
-          'Defaults to "html". Only applies to full content replacement mode.'
+        'Content format for text notes. Use "markdown" to auto-convert markdown to HTML. ' +
+          'Defaults to "html". Only applies in "replace"/"append" modes.'
       ),
     images: imagesFieldSchema,
     files: filesFieldSchema,
   })
   .check((ctx) => {
-    const { content, changes, patch, format, images, files } = ctx.value;
-    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
-      Boolean
-    ).length;
-    if (modes === 0) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Exactly one of "content", "changes", or "patch" must be provided',
-        path: [],
-      });
-    } else if (modes > 1) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
-        path: [],
-      });
-    }
-    if (format === 'markdown' && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'format="markdown" cannot be used with "changes" or "patch" modes — diffs operate on stored content (HTML)',
-        path: ['format'],
-      });
-    }
-    if (images?.length && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'images cannot be used with "changes" or "patch" modes — use "content" mode to embed images',
-        path: ['images'],
-      });
-    }
-    if (files?.length && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'files cannot be used with "changes" or "patch" modes — use "content" mode to embed files',
-        path: ['files'],
-      });
+    const { mode, title, type, mime, content, changes, patch, format, images, files } = ctx.value;
+
+    if (mode === 'metadata') {
+      if (title === undefined && type === undefined && mime === undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="metadata" requires at least one of "title", "type", or "mime"',
+          path: [],
+        });
+      }
+      const disallowed = [content, changes, patch, images, files].some((v) => v !== undefined);
+      if (disallowed) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="metadata" cannot include content/changes/patch/images/files',
+          path: [],
+        });
+      }
+    } else if (mode === 'replace' || mode === 'append') {
+      if (content === undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: `mode="${mode}" requires "content"`,
+          path: ['content'],
+        });
+      }
+      if (changes !== undefined || patch !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: `mode="${mode}" cannot include "changes" or "patch" (use mode="edit" instead)`,
+          path: [],
+        });
+      }
+      if (title !== undefined || type !== undefined || mime !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: `mode="${mode}" cannot include "title"/"type"/"mime" (use mode="metadata" in a separate call)`,
+          path: [],
+        });
+      }
+    } else if (mode === 'edit') {
+      const diffModes = [changes !== undefined, patch !== undefined].filter(Boolean).length;
+      if (diffModes === 0) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" requires exactly one of "changes" or "patch"',
+          path: [],
+        });
+      } else if (diffModes > 1) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" cannot include both "changes" and "patch"',
+          path: [],
+        });
+      }
+      if (content !== undefined) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" cannot include "content" (use mode="replace"/"append" instead)',
+          path: ['content'],
+        });
+      }
+      if (format === 'markdown') {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'format="markdown" cannot be used with mode="edit" — diffs operate on stored HTML',
+          path: ['format'],
+        });
+      }
+      if ((images?.length ?? 0) > 0 || (files?.length ?? 0) > 0) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'mode="edit" cannot include images/files — use mode="replace"/"append" to embed attachments',
+          path: [],
+        });
+      }
     }
   });
 
 const deleteNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to delete'),
-});
-
-const appendNoteContentSchema = z
-  .object({
-    noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to append content to'),
-    content: z
-      .string()
-      .optional()
-      .describe(
-        'Content to append to the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
-          'For text notes with code blocks, use ' +
-          '<pre><code class="language-X">...</code></pre> structure (e.g., language-mermaid). ' +
-          'The class must be on the <code> element, not <pre>. ' +
-          'For internal links to other notes, use: ' +
-          '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
-          "The path should be the full note path from root. Use get_note to find paths."
-      ),
-    changes: z
-      .array(searchReplaceBlockSchema)
-      .optional()
-      .describe(
-        'Array of search/replace blocks to apply sequentially to the existing content. ' +
-          'Cannot be used with format="markdown".'
-      ),
-    patch: z
-      .string()
-      .optional()
-      .describe(
-        'Unified diff patch to apply to the existing content. ' +
-          'Cannot be used with format="markdown".'
-      ),
-    format: z
-      .enum(['html', 'markdown'])
-      .optional()
-      .describe(
-        'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
-          'Defaults to "html". Only applies to full content append mode.'
-      ),
-    images: imagesFieldSchema,
-    files: filesFieldSchema,
-  })
-  .check((ctx) => {
-    const { content, changes, patch, format, images, files } = ctx.value;
-    const modes = [content !== undefined, changes !== undefined, patch !== undefined].filter(
-      Boolean
-    ).length;
-    if (modes === 0) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Exactly one of "content", "changes", or "patch" must be provided',
-        path: [],
-      });
-    } else if (modes > 1) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message: 'Only one of "content", "changes", or "patch" can be provided at a time',
-        path: [],
-      });
-    }
-    if (format === 'markdown' && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'format="markdown" cannot be used with "changes" or "patch" modes — diffs operate on stored content (HTML)',
-        path: ['format'],
-      });
-    }
-    if (images?.length && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'images cannot be used with "changes" or "patch" modes — use "content" mode to embed images',
-        path: ['images'],
-      });
-    }
-    if (files?.length && (changes !== undefined || patch !== undefined)) {
-      ctx.issues.push({
-        code: 'custom',
-        input: ctx.value,
-        message:
-          'files cannot be used with "changes" or "patch" modes — use "content" mode to embed files',
-        path: ['files'],
-      });
-    }
-  });
-
-const undeleteNoteSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the deleted note to restore'),
-});
-
-const getNoteAttachmentsSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to get attachments for'),
+  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note'),
+  action: z
+    .enum(['delete', 'undelete'])
+    .describe(
+      '"delete" removes the note (and all branches pointing to it). ' +
+        '"undelete" restores a previously-deleted note (requires at least one undeleted parent). ' +
+        'Use get_note_history to find deleted notes.'
+    ),
 });
 
 const getNoteHistorySchema = z.object({
@@ -529,8 +463,29 @@ const getNoteHistorySchema = z.object({
     .describe('Limit changes to a subtree identified by this note ID. Defaults to all notes.'),
 });
 
+// ============================================================================
+// Registration
+// ============================================================================
+
 export function registerNoteTools(): Tool[] {
   return [
+    // Read-first ordering improves default tool-choice heuristics in most LLMs
+    // and lets clients with first-N pre-load policies load reads before writes.
+    defineTool(
+      'get_note',
+      'Read a note. Returns metadata (title, type, attributes, parent/child IDs) by default — set include_content=true to also fetch the body. ' +
+        'When include_content=true, the response contains: one text block with the note body (HTML by default or markdown if format="markdown"), followed by one image block per embedded image attachment (unless includeImages=false). ' +
+        'Leave include_content=false for fast navigation/inspection; set true when you need to read the content itself.',
+      getNoteSchema,
+      { title: 'Read note', readOnlyHint: true }
+    ),
+    defineTool(
+      'get_note_history',
+      'Get recent changes across the note tree — creations, modifications, and deletions. Optionally filter by subtree via ancestorNoteId. ' +
+        'Distinct from revisions: this is a change log across notes; revisions are content snapshots of a single note.',
+      getNoteHistorySchema,
+      { title: 'Note change history', readOnlyHint: true }
+    ),
     defineTool(
       'create_note',
       'Create a new note with title, content, type, and parent. Returns the created note and its branch. ' +
@@ -539,70 +494,36 @@ export function registerNoteTools(): Tool[] {
         'Supports embedding images and files: pass "images" and/or "files" arrays with base64 data IN THE SAME CALL, and reference them in content using image:0/file:0 placeholders (e.g., <img src="image:0"> or <a href="file:0">). ' +
         'The N in image:N / file:N indexes into the array provided in this call — it does NOT reference attachments uploaded previously. ' +
         'Unresolved placeholders will cause the call to fail with a clear error.',
-      createNoteSchema
+      createNoteSchema,
+      { title: 'Create note', readOnlyHint: false, destructiveHint: false, idempotentHint: false }
     ),
     defineTool(
-      'get_note',
-      'Get note metadata by ID. Returns note properties including title, type, attributes, and child/parent relationships.',
-      getNoteSchema
-    ),
-    defineTool(
-      'get_note_content',
-      'Get the content/body of a note. For text notes, returns HTML by default or markdown. ' +
-        'By default, embedded images are automatically fetched and included as image content blocks. ' +
-        'Set includeImages to false for text-only output.',
-      getNoteContentSchema
-    ),
-    defineTool(
-      'update_note',
-      'Update note metadata (title, type, or MIME type). Does not update content - use update_note_content for that.',
-      updateNoteSchema
-    ),
-    defineTool(
-      'update_note_content',
-      'Update the content/body of a note. Three modes: (1) Full replacement via "content" — provide HTML (default) or markdown (set format to "markdown"). ' +
-        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
-        '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
-        'Exactly one mode must be used per call. ' +
-        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders. ' +
-        'Placeholders index into the arrays provided in THIS call — they do NOT reference attachments uploaded in earlier calls. ' +
-        'To reference an existing attachment, use its real URL instead: <img src="api/attachments/{attachmentId}/image/{filename}">. ' +
-        'Unresolved placeholders will cause the call to fail with a clear error.',
-      updateNoteContentSchema
-    ),
-    defineTool(
-      'append_note_content',
-      'Append or edit content of an existing note. Three modes: (1) Append via "content" — fetches current content and appends new content at the end. ' +
-        '(2) Search/replace via "changes" — array of {old_string, new_string} blocks applied sequentially to existing content. ' +
-        '(3) Unified diff via "patch" — a unified diff string applied to existing content. ' +
-        'Exactly one mode must be used per call. ' +
-        'In "content" mode, supports embedding images and files via the "images" and "files" arrays with image:0/file:0 placeholders. ' +
-        'Placeholders index into the arrays provided in THIS call — they do NOT reference attachments uploaded in earlier calls. ' +
-        'Unresolved placeholders will cause the call to fail with a clear error.',
-      appendNoteContentSchema
+      'write_note',
+      'Write to an existing note. Four modes selected via "mode":\n' +
+        '- "metadata": update title/type/mime only (no content change)\n' +
+        '- "replace": overwrite content entirely with "content"\n' +
+        '- "append": fetch current content and concatenate "content" at the end\n' +
+        '- "edit": apply "changes" (array of {old_string, new_string}) OR "patch" (unified diff) to existing content\n\n' +
+        'For "replace"/"append" on text notes, "content" can be HTML (default) or markdown (set format="markdown"). ' +
+        'To embed images/files, pass "images"/"files" arrays with base64 data and reference them via image:0/file:0 placeholders in "content". ' +
+        'Unresolved placeholders will cause the call to fail with a clear error. ' +
+        '"edit" mode operates on stored HTML and cannot be combined with format="markdown" or images/files.',
+      writeNoteSchema,
+      { title: 'Write note', readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     ),
     defineTool(
       'delete_note',
-      'Delete a note by ID. This will also delete all branches pointing to this note.',
-      deleteNoteSchema
-    ),
-    defineTool(
-      'undelete_note',
-      'Restore a deleted note. The note must have been deleted and must have at least one undeleted parent. Use get_note_history to find deleted notes that can be undeleted.',
-      undeleteNoteSchema
-    ),
-    defineTool(
-      'get_note_attachments',
-      'Get all attachments for a note by its ID. Returns array of attachment metadata including role, MIME type, title, and size. Use get_attachment_content to retrieve attachment contents.',
-      getNoteAttachmentsSchema
-    ),
-    defineTool(
-      'get_note_history',
-      'Get recent changes including note creations, modifications, and deletions. Optionally filter by subtree using ancestorNoteId. Returns change events with note info and deletion/undelete status.',
-      getNoteHistorySchema
+      'Delete or restore a note. Required "action": "delete" soft-deletes the note (and all its branches); "undelete" restores a previously-deleted note. ' +
+        'Restoring requires at least one undeleted parent. Use get_note_history to find deleted notes.',
+      deleteNoteSchema,
+      { title: 'Delete or restore note', readOnlyHint: false, destructiveHint: true, idempotentHint: true }
     ),
   ];
 }
+
+// ============================================================================
+// Dispatch
+// ============================================================================
 
 export async function handleNoteTool(
   client: TriliumClient,
@@ -617,11 +538,7 @@ export async function handleNoteTool(
       let content = await convertContent(parsed.content, parsed.format);
       const isBinary = parsed.mime ? isBinaryMimeType(parsed.mime) : false;
       const hasAttachments =
-        (parsed.images && parsed.images.length > 0) ||
-        (parsed.files && parsed.files.length > 0);
-      // When no attachments are provided, the initial createNote call is the final write,
-      // so guard here. When attachments are provided, we defer the guard until after
-      // processImages/processFiles, since they're what resolve placeholders.
+        (parsed.images && parsed.images.length > 0) || (parsed.files && parsed.files.length > 0);
       if (!isBinary && !hasAttachments) {
         assertPlaceholdersResolved(content);
       }
@@ -640,13 +557,11 @@ export async function handleNoteTool(
         utcDateCreated: parsed.utcDateCreated,
       });
 
-      // For binary note types (image, file), decode base64 and upload binary content
       if (isBinary && content) {
         const binaryContent = base64ToBuffer(content);
         await client.updateNoteContentBinary(result.note.noteId, binaryContent);
       }
 
-      // If images or files provided, create attachments and update content with resolved references
       if (hasAttachments) {
         if (parsed.images && parsed.images.length > 0) {
           content = await processImages(client, result.note.noteId, content, parsed.images);
@@ -659,33 +574,38 @@ export async function handleNoteTool(
       }
 
       return {
-        content: [{ type: 'text', text: JSON.stringify({ note: result.note, branch: result.branch }, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify({ note: result.note, branch: result.branch }, null, 2),
+          },
+        ],
       };
     }
 
     case 'get_note': {
       const parsed = getNoteSchema.parse(args);
-      const result = await client.getNote(parsed.noteId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
-    }
+      const meta = await client.getNote(parsed.noteId);
 
-    case 'get_note_content': {
-      const parsed = getNoteContentSchema.parse(args);
+      if (!parsed.include_content) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify(meta, null, 2) }],
+        };
+      }
+
       const rawHtml = await client.getNoteContent(parsed.noteId);
       const textContent = parsed.format === 'markdown' ? convertHtmlToMarkdown(rawHtml) : rawHtml;
 
-      const content: Array<
+      const out: Array<
         { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
       > = [];
 
-      if (parsed.includeImages !== false) {
+      const wantImages = parsed.includeImages !== false;
+      if (wantImages) {
         const attachments = await client.getNoteAttachments(parsed.noteId);
         const imageAttachments = attachments.filter((a) => isImageMimeType(a.mime));
         const otherAttachments = attachments.filter((a) => !isImageMimeType(a.mime));
 
-        // Fetch image content in parallel
         const imageResults = await Promise.all(
           imageAttachments.map(async (a) => {
             try {
@@ -712,7 +632,7 @@ export async function handleNoteTool(
             .join('\n');
           finalText +=
             `\n\n---\n**Attachments:** This note has ${otherAttachments.length} non-image attachment(s) ` +
-            `that can be fetched using \`get_attachment_content\`:\n${attachmentList}`;
+            `that can be fetched using get_attachment with include_content=true:\n${attachmentList}`;
         }
 
         if (failed.length > 0) {
@@ -720,85 +640,52 @@ export async function handleNoteTool(
           finalText += `\n\n---\n**Note:** Some attachments could not be loaded:\n${warnings}`;
         }
 
-        content.push({ type: 'text', text: finalText });
+        out.push({ type: 'text', text: finalText });
         for (const img of fetched) {
-          content.push({ type: 'image', data: img.data, mimeType: img.mimeType });
+          out.push({ type: 'image', data: img.data, mimeType: img.mimeType });
         }
       } else {
-        content.push({ type: 'text', text: textContent });
+        out.push({ type: 'text', text: textContent });
       }
 
-      return { content };
+      return { content: out };
     }
 
-    case 'update_note': {
-      const parsed = updateNoteSchema.parse(args);
-      const patch: { title?: string; type?: NoteType; mime?: string } = {};
-      if (parsed.title) patch.title = parsed.title;
-      if (parsed.type) patch.type = parsed.type as NoteType;
-      if (parsed.mime) patch.mime = parsed.mime;
-      const result = await client.updateNote(parsed.noteId, patch);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
-    }
+    case 'write_note': {
+      const parsed = writeNoteSchema.parse(args);
 
-    case 'update_note_content': {
-      const parsed = updateNoteContentSchema.parse(args);
+      if (parsed.mode === 'metadata') {
+        const patch: { title?: string; type?: NoteType; mime?: string } = {};
+        if (parsed.title !== undefined) patch.title = parsed.title;
+        if (parsed.type !== undefined) patch.type = parsed.type as NoteType;
+        if (parsed.mime !== undefined) patch.mime = parsed.mime;
+        const result = await client.updateNote(parsed.noteId, patch);
+        return {
+          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+        };
+      }
+
       let finalContent: string;
-      if (parsed.changes !== undefined || parsed.patch !== undefined) {
-        // Diff modes: fetch existing content first
-        const existingContent = await client.getNoteContent(parsed.noteId);
-        finalContent = await resolveContent(existingContent, {
-          changes: parsed.changes,
-          patch: parsed.patch,
-        });
-      } else {
-        // Full replacement mode
-        finalContent = await resolveContent('', {
-          content: parsed.content,
-        }, parsed.format === 'markdown' ? (c) => convertContent(c, 'markdown') : undefined);
-      }
 
-      // Process images/files if provided (only valid in content mode, enforced by schema validation)
-      if (parsed.images && parsed.images.length > 0) {
-        finalContent = await processImages(client, parsed.noteId, finalContent, parsed.images);
-      }
-      if (parsed.files && parsed.files.length > 0) {
-        finalContent = await processFiles(client, parsed.noteId, finalContent, parsed.files);
-      }
-
-      assertPlaceholdersResolved(finalContent);
-      await client.updateNoteContent(parsed.noteId, finalContent);
-
-      // Verify search/replace changes were actually persisted
-      if (parsed.changes !== undefined) {
-        const readBack = await client.getNoteContent(parsed.noteId);
-        verifySearchReplaceResults(readBack, parsed.changes);
-      }
-
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
-      };
-    }
-
-    case 'append_note_content': {
-      const parsed = appendNoteContentSchema.parse(args);
-      const existingContent = await client.getNoteContent(parsed.noteId);
-      let finalContent: string;
-      if (parsed.changes !== undefined || parsed.patch !== undefined) {
-        // Diff modes: apply diffs to existing content
-        finalContent = await resolveContent(existingContent, {
-          changes: parsed.changes,
-          patch: parsed.patch,
-        });
-      } else {
-        // Append mode: concatenate new content to existing
+      if (parsed.mode === 'replace') {
+        finalContent = await resolveContent(
+          '',
+          { content: parsed.content },
+          parsed.format === 'markdown' ? (c) => convertContent(c, 'markdown') : undefined
+        );
+      } else if (parsed.mode === 'append') {
+        const existing = await client.getNoteContent(parsed.noteId);
         const newContent = await convertContent(parsed.content ?? '', parsed.format);
-        finalContent = existingContent + newContent;
+        finalContent = existing + newContent;
+      } else {
+        // edit
+        const existing = await client.getNoteContent(parsed.noteId);
+        finalContent = await resolveContent(existing, {
+          changes: parsed.changes,
+          patch: parsed.patch,
+        });
       }
 
-      // Process images/files if provided (only valid in content mode, enforced by schema validation)
       if (parsed.images && parsed.images.length > 0) {
         finalContent = await processImages(client, parsed.noteId, finalContent, parsed.images);
       }
@@ -809,43 +696,37 @@ export async function handleNoteTool(
       assertPlaceholdersResolved(finalContent);
       await client.updateNoteContent(parsed.noteId, finalContent);
 
-      // Verify search/replace changes were actually persisted
-      if (parsed.changes !== undefined) {
+      if (parsed.mode === 'edit' && parsed.changes !== undefined) {
         const readBack = await client.getNoteContent(parsed.noteId);
         verifySearchReplaceResults(readBack, parsed.changes);
       }
 
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
-      };
-    }
-
-    case 'delete_note': {
-      const parsed = deleteNoteSchema.parse(args);
-      await client.deleteNote(parsed.noteId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify({ success: true, noteId: parsed.noteId }, null, 2) }],
-      };
-    }
-
-    case 'undelete_note': {
-      const parsed = undeleteNoteSchema.parse(args);
-      const result = await client.undeleteNote(parsed.noteId);
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify(result, null, 2),
+            text: JSON.stringify({ success: true, noteId: parsed.noteId, mode: parsed.mode }, null, 2),
           },
         ],
       };
     }
 
-    case 'get_note_attachments': {
-      const parsed = getNoteAttachmentsSchema.parse(args);
-      const attachments = await client.getNoteAttachments(parsed.noteId);
+    case 'delete_note': {
+      const parsed = deleteNoteSchema.parse(args);
+      if (parsed.action === 'delete') {
+        await client.deleteNote(parsed.noteId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ success: true, noteId: parsed.noteId, action: 'delete' }, null, 2),
+            },
+          ],
+        };
+      }
+      const result = await client.undeleteNote(parsed.noteId);
       return {
-        content: [{ type: 'text', text: JSON.stringify(attachments, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
     }
 
