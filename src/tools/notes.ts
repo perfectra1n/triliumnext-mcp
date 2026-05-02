@@ -224,6 +224,15 @@ function convertHtmlToMarkdown(html: string): string {
 // Schemas
 // ============================================================================
 
+const INTERNAL_LINK_GUIDANCE =
+  'Internal links to other Trilium notes must be raw HTML with this exact structure: ' +
+  '<a class="reference-link" href="#root/<path>/<targetNoteId>" data-note-path="root/<path>/<targetNoteId>">Title</a>. ' +
+  'All three attributes are required — Trilium only renders a true note-to-note link when class="reference-link" AND data-note-path are both present; drop either and it stores an inert hash anchor. ' +
+  'The two path strings point to the same target but differ by one character: href starts with "#root/...", data-note-path is the same string without the leading "#". ' +
+  'To build the path: call get_note on the target noteId and prepend each parent from parentNoteIds until you reach "root", giving "root/.../targetNoteId". For a note with one parent (the common case) this is one walk; for cloned notes any valid path works. ' +
+  'When format="markdown", do NOT use markdown link syntax for internal links — [text](#root/...) gets converted to a bare <a href> without class/data-note-path and Trilium will not render it as a reference link. Write the full <a class="reference-link" ...> tag as raw HTML inside the markdown content. ' +
+  'Example: <a class="reference-link" href="#root/abc123def/xyz789ghi" data-note-path="root/abc123def/xyz789ghi">Project Plan</a>.';
+
 const createNoteSchema = z.object({
   parentNoteId: z
     .string()
@@ -238,10 +247,7 @@ const createNoteSchema = z.object({
         'For code notes: provide raw code. ' +
         'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure ' +
         '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>. ' +
-        'For internal links to other notes, use: ' +
-        '<a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>. ' +
-        'The path should be the full note path from root (e.g., root/parentId/childId). ' +
-        "Use get_note to find a note's path via its parentNoteIds."
+        INTERNAL_LINK_GUIDANCE
     ),
   format: z
     .enum(['html', 'markdown'])
@@ -331,7 +337,7 @@ const writeNoteSchema = z
         'New content. Required for "replace" and "append" modes. ' +
           'For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
           'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure. ' +
-          'For internal links: <a class="reference-link" href="#root/path/to/noteId" data-note-path="root/path/to/noteId">Link Text</a>.'
+          INTERNAL_LINK_GUIDANCE
       ),
     changes: z
       .array(searchReplaceBlockSchema)
