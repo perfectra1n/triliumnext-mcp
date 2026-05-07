@@ -31,7 +31,11 @@ export async function createStdioClient(triliumUrl: string) {
   return { client, transport };
 }
 
-export async function createHttpClient(triliumUrl: string, port?: number) {
+export async function createHttpClient(
+  triliumUrl: string,
+  port?: number,
+  extraEnv: Record<string, string> = {}
+) {
   const serverPort = port ?? (await getAvailablePort());
 
   const serverProcess = spawn('node', [SERVER_ENTRY], {
@@ -41,6 +45,7 @@ export async function createHttpClient(triliumUrl: string, port?: number) {
       TRILIUM_TOKEN: 'test',
       TRILIUM_TRANSPORT: 'http',
       TRILIUM_HTTP_PORT: String(serverPort),
+      ...extraEnv,
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });

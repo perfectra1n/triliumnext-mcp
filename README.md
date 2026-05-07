@@ -12,7 +12,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) — run one server for many users
   - [Architecture](#architecture)
   - [Quick start (Docker)](#quick-start-docker) / [(local)](#quick-start-local)
-  - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses)
+  - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses) · [Request body size limits](#request-body-size-limits)
   - [Connecting clients](#connecting-clients) — Claude Desktop, Claude Code, SDK
   - [SSRF configuration](#ssrf-configuration) · [Reverse-proxy](#reverse-proxy-tls-termination)
   - [Security model](#security-model) · [Production checklist](#production-checklist) · [Troubleshooting](#troubleshooting)
@@ -73,6 +73,7 @@ Options:
 - `-t, --token <token>` — Trilium ETAPI token (required in single-tenant mode)
 - `--transport <type>` — Transport type: `stdio` or `http` (default: `stdio`)
 - `-p, --port <port>` — HTTP server port when using http transport (default: `3000`)
+- `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `500mb`). See [Request body size limits](#request-body-size-limits).
 - `-h, --help` — Show help message
 
 Multi-tenant HTTP options (see [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) below):
@@ -89,6 +90,7 @@ export TRILIUM_URL=http://localhost:37740/etapi
 export TRILIUM_TOKEN=your-etapi-token
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
+export TRILIUM_MAX_POST_BYTES=500mb  # SSE POST body cap; see "Request body size limits"
 
 # Multi-tenant (see section below):
 export TRILIUM_MULTI_TENANT=true
@@ -476,8 +478,21 @@ On `POST /message`:
 | Status | `error` value           | Meaning |
 |--------|-------------------------|---------|
 | `400`  | `missing_session_id`    | No `?sessionId=` query parameter. |
+| `400`  | `invalid_json`          | Body wasn't valid JSON. |
 | `404`  | `unknown_session`       | `sessionId` doesn't match any live SSE connection (typical after a disconnect / restart). |
-| `413`  | `payload_too_large`     | `Content-Length` exceeded 1 MB. |
+| `413`  | `payload_too_large`     | Body exceeded `--max-post-bytes` (default 500 MB). See [Request body size limits](#request-body-size-limits). |
+
+### Request body size limits
+
+The HTTP/SSE transport caps each MCP JSON-RPC POST body at **500 MB by default**. Tune it with `--max-post-bytes <size>` or `TRILIUM_MAX_POST_BYTES` (e.g. `100mb`, `2gb`, or a raw byte count). On stdio there is no equivalent cap — your shell / OS pipe buffers are the limit.
+
+Why this exists, and a few caveats worth knowing:
+
+- **The MCP SDK has its own internal 4 MB cap** inside `handlePostMessage`. To honor anything larger, this server reads and JSON-parses the request body itself before handing it off, bypassing the SDK's read. If you fork or upgrade and bodies start failing at ~4 MB with `400` from the SDK, this read-and-pass-through is what's missing.
+- **Bodies are buffered in memory** before dispatch. A 500 MB cap means a single connection can ask for 500 MB of heap. On a multi-tenant deployment, set the cap to the smallest value your largest legitimate attachment needs.
+- **Attachments are base64-encoded over JSON-RPC**, which inflates payload size by ~33%. A 100 MB binary becomes ~134 MB on the wire.
+- **413 is returned as soon as we can detect the overrun** — either from `Content-Length` upfront (no body drain) or mid-stream once accumulated bytes exceed the cap. Chunked uploads without `Content-Length` still get capped via the streaming check.
+- **Reverse proxies have their own limits.** Nginx defaults to `client_max_body_size 1m`; bump it (`client_max_body_size 600m;` or similar) or large requests die at the proxy with `413` before they reach this server. Caddy has no default cap.
 
 ### Reverse-proxy (TLS termination)
 

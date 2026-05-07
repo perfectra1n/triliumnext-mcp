@@ -64,6 +64,12 @@ export interface Config {
    * homelab setups where Trilium lives on a private network.
    */
   allowPrivateUrls: boolean;
+  /**
+   * Maximum size (bytes) of a single MCP JSON-RPC POST body on the SSE
+   * transport. Above this, the server returns 413. Bodies are read into memory
+   * before dispatch, so this also bounds per-request memory.
+   */
+  maxPostBytes: number;
 }
 
 interface ConfigFile {
@@ -76,6 +82,7 @@ interface ConfigFile {
   gatewayTokens?: string[];
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
+  maxPostBytes?: number;
 }
 
 interface CliArgs {
@@ -89,6 +96,7 @@ interface CliArgs {
   gatewayTokens?: string[];
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
+  maxPostBytes?: number;
 }
 
 function parseCliArgs(args: string[]): CliArgs {
@@ -136,6 +144,13 @@ function parseCliArgs(args: string[]): CliArgs {
         break;
       case '--allow-private-urls':
         result.allowPrivateUrls = true;
+        break;
+      case '--max-post-bytes':
+        if (nextArg) {
+          const parsed = parseSize(nextArg);
+          if (parsed !== undefined) result.maxPostBytes = parsed;
+        }
+        i++;
         break;
       case '--help':
       case '-h':
@@ -201,6 +216,9 @@ Multi-tenant HTTP options (require --transport http):
                                      Supports suffix match (example.com matches a.example.com).
   --allow-private-urls               Allow client URLs that resolve to private/loopback IPs
                                      (default: blocked in multi-tenant mode to prevent SSRF)
+  --max-post-bytes <size>            Max size of a single MCP JSON-RPC POST body on the SSE
+                                     transport. Accepts raw bytes or suffixed values
+                                     (e.g. 500mb, 1gb). Default: 500mb.
 
   -h, --help                         Show this help message
 
@@ -214,6 +232,7 @@ Environment Variables:
   TRILIUM_GATEWAY_TOKENS             Comma-separated accepted bearer tokens
   TRILIUM_URL_ALLOWLIST              Comma-separated allowed hostnames for client URLs
   TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
+  TRILIUM_MAX_POST_BYTES             Max SSE POST body size (raw bytes or e.g. 500mb, 1gb)
 
 Configuration File:
   Reads from ./trilium-mcp.json or ~/.trilium-mcp.json
@@ -237,6 +256,29 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   if (lower === 'true' || lower === '1' || lower === 'yes') return true;
   if (lower === 'false' || lower === '0' || lower === 'no') return false;
   return undefined;
+}
+
+const DEFAULT_MAX_POST_BYTES = 500 * 1024 * 1024;
+
+/** Accepts a raw byte count or a suffixed value like "500mb", "10MiB", "2g". */
+function parseSize(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*([kmgKMG]i?[bB]?|[bB])?$/);
+  if (!match) return undefined;
+  const n = parseFloat(match[1]);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  const unit = (match[2] ?? '').toLowerCase();
+  const multiplier =
+    unit === '' || unit === 'b'
+      ? 1
+      : unit.startsWith('k')
+        ? 1024
+        : unit.startsWith('m')
+          ? 1024 * 1024
+          : unit.startsWith('g')
+            ? 1024 * 1024 * 1024
+            : 1;
+  return Math.floor(n * multiplier);
 }
 
 export function loadConfig(args: string[] = process.argv.slice(2)): Config | null {
@@ -301,6 +343,12 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.allowPrivateUrls ??
     false;
 
+  const maxPostBytes =
+    cli.maxPostBytes ??
+    parseSize(process.env.TRILIUM_MAX_POST_BYTES) ??
+    file.maxPostBytes ??
+    DEFAULT_MAX_POST_BYTES;
+
   // Single-tenant mode: require token (URL has a sensible default). Historical behavior.
   if (!multiTenant && !rawToken) {
     console.error('Error: Trilium ETAPI token is required.');
@@ -354,5 +402,6 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     gatewayTokens,
     urlAllowlist,
     allowPrivateUrls,
+    maxPostBytes,
   };
 }

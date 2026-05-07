@@ -10,7 +10,13 @@ import {
   initializeTriliumDatabase,
   getTriliumHost,
 } from './setup.js';
-import { createStdioClient, createHttpClient, cleanup, EXPECTED_TOOL_COUNT } from './helpers/mcp-server.js';
+import {
+  createStdioClient,
+  createHttpClient,
+  cleanup,
+  getAvailablePort,
+  EXPECTED_TOOL_COUNT,
+} from './helpers/mcp-server.js';
 
 describe('MCP Transport Integration Tests', () => {
   beforeAll(async () => {
@@ -330,6 +336,146 @@ describe('MCP Transport Integration Tests', () => {
         name: 'delete_note',
         arguments: { noteId: testNoteId, action: 'delete' },
       });
+    });
+  });
+
+  describe('Request body size limits', () => {
+    let client: Client;
+    let transport: SSEClientTransport;
+    let serverProcess: ChildProcess;
+
+    afterEach(async () => {
+      if (client) await cleanup(client, transport, serverProcess);
+    });
+
+    /**
+     * Opens an SSE connection via raw fetch and returns the sessionId published
+     * in the `endpoint` event. Lets us POST oversized bodies directly without
+     * the MCP client SDK refusing or rewriting them.
+     */
+    async function openSseSessionRaw(serverPort: number): Promise<{
+      sessionId: string;
+      close: () => void;
+    }> {
+      const controller = new AbortController();
+      const response = await fetch(`http://localhost:${serverPort}/sse`, {
+        headers: { Accept: 'text/event-stream' },
+        signal: controller.signal,
+      });
+      if (!response.body) throw new Error('SSE response had no body');
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      const deadline = Date.now() + 10_000;
+
+      while (Date.now() < deadline) {
+        const { value, done } = await reader.read();
+        if (done) throw new Error('SSE closed before endpoint event');
+        buffer += decoder.decode(value, { stream: true });
+        const match = buffer.match(/event:\s*endpoint\s*\ndata:\s*(.+?)\r?\n\r?\n/);
+        if (match) {
+          const endpointPath = match[1].trim();
+          const url = new URL(endpointPath, `http://localhost:${serverPort}`);
+          const sessionId = url.searchParams.get('sessionId');
+          if (!sessionId) throw new Error('endpoint event missing sessionId');
+          return { sessionId, close: () => controller.abort() };
+        }
+      }
+      throw new Error('Timed out waiting for endpoint event');
+    }
+
+    it('should reject POST bodies that exceed the configured cap with 413', async () => {
+      const port = await getAvailablePort();
+      const result = await createHttpClient(getTriliumHost(), port, {
+        TRILIUM_MAX_POST_BYTES: '4096', // 4 KiB
+      });
+      client = result.client;
+      transport = result.transport;
+      serverProcess = result.serverProcess;
+
+      const session = await openSseSessionRaw(port);
+      try {
+        // Build a JSON-RPC payload well above the 4 KiB cap.
+        const fatArg = 'A'.repeat(20_000);
+        const body = JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'tools/call',
+          params: { name: 'get_note', arguments: { noteId: 'root', _pad: fatArg } },
+        });
+
+        const resp = await fetch(
+          `http://localhost:${port}/message?sessionId=${encodeURIComponent(session.sessionId)}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+          }
+        );
+
+        expect(resp.status).toBe(413);
+        const json = (await resp.json()) as { error: string };
+        expect(json.error).toBe('payload_too_large');
+      } finally {
+        session.close();
+      }
+    });
+
+    it('should accept POST bodies larger than the SDK\'s internal 4MB limit', async () => {
+      // Default cap is 500 MB; we just need to exceed the SDK's hardcoded 4 MB.
+      const result = await createHttpClient(getTriliumHost());
+      client = result.client;
+      transport = result.transport;
+      serverProcess = result.serverProcess;
+
+      // ~5 MiB of base64 payload — comfortably above the SDK's 4 MB internal
+      // cap, well below our default 500 MB cap. If the bypass-via-parsedBody
+      // wiring is broken, the SDK rejects this with HTTP 400 from getRawBody.
+      const FIVE_MIB = 5 * 1024 * 1024;
+      const bigBase64 = 'A'.repeat(FIVE_MIB);
+
+      // First create an owner note to attach to.
+      const noteResponse = await client.callTool({
+        name: 'create_note',
+        arguments: {
+          parentNoteId: 'root',
+          title: 'Big-attachment owner',
+          type: 'text',
+          content: '<p>owner</p>',
+        },
+      });
+      const noteJson = JSON.parse(
+        (noteResponse.content as Array<{ type: string; text: string }>)[0].text
+      );
+      const ownerId = noteJson.note.noteId as string;
+
+      try {
+        const attachResponse = await client.callTool({
+          name: 'create_attachment',
+          arguments: {
+            ownerId,
+            role: 'file',
+            mime: 'application/octet-stream',
+            title: 'big.bin',
+            content: bigBase64,
+          },
+        });
+
+        // Reaching this point at all proves the body cleared the HTTP+SDK gauntlet.
+        // Also assert structurally so a regression to e.g. an empty error response
+        // surfaces as a meaningful failure.
+        expect(attachResponse.content).toBeDefined();
+        const attachContent = attachResponse.content as Array<{ type: string; text: string }>;
+        expect(attachContent[0]?.type).toBe('text');
+        // Tool returns either the new attachment metadata or an error string;
+        // either way the round-trip succeeded at the transport layer.
+        expect(typeof attachContent[0]?.text).toBe('string');
+      } finally {
+        await client
+          .callTool({ name: 'delete_note', arguments: { noteId: ownerId, action: 'delete' } })
+          .catch(() => {});
+      }
     });
   });
 

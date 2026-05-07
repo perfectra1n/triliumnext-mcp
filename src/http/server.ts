@@ -9,10 +9,10 @@ import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
 import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
 
-/** Upper bound on a single MCP JSON-RPC message POST body. SDK also enforces
- *  4MB inside handlePostMessage; we cap tighter here to fail fast on
- *  obviously-oversized payloads before the SDK even reads the body. */
-const MAX_POST_BYTES = 1 * 1024 * 1024;
+/** Upper bound on a single MCP JSON-RPC message POST body. The SDK enforces
+ *  its own 4MB limit inside `handlePostMessage` when it reads the body itself,
+ *  so to honor anything larger we must read+parse the body here and pass it
+ *  to the SDK as `parsedBody` (which short-circuits its size-limited read). */
 
 /** Keep-alive ping cadence for SSE streams; prevents idle proxies from
  *  closing the connection while the client is just waiting for server events. */
@@ -87,7 +87,7 @@ async function handleRequest(
   }
 
   if (method === 'POST' && url.startsWith('/message')) {
-    await handleSsePost(req, res, sessions);
+    await handleSsePost(req, res, sessions, config.maxPostBytes);
     return;
   }
 
@@ -226,13 +226,15 @@ async function handleSseConnect(
 async function handleSsePost(
   req: IncomingMessage,
   res: ServerResponse,
-  sessions: Map<string, Session>
+  sessions: Map<string, Session>,
+  maxPostBytes: number
 ): Promise<void> {
-  // Enforce our tight body cap upstream of the SDK's 4MB limit.
+  // Fail fast on a Content-Length that already exceeds the cap, so we don't
+  // pay to drain a giant request body just to reject it.
   const contentLengthRaw = req.headers['content-length'];
   if (contentLengthRaw) {
     const contentLength = parseInt(Array.isArray(contentLengthRaw) ? contentLengthRaw[0] : contentLengthRaw, 10);
-    if (!Number.isNaN(contentLength) && contentLength > MAX_POST_BYTES) {
+    if (!Number.isNaN(contentLength) && contentLength > maxPostBytes) {
       respondJson(res, 413, { error: 'payload_too_large' });
       return;
     }
@@ -252,7 +254,49 @@ async function handleSsePost(
     return;
   }
 
-  await session.transport.handlePostMessage(req, res);
+  // Read the body ourselves so we can (a) honor `maxPostBytes` regardless of
+  // header presence (chunked requests omit Content-Length) and (b) bypass the
+  // SDK's hardcoded 4MB internal limit by passing `parsedBody`.
+  let parsedBody: unknown;
+  try {
+    parsedBody = await readJsonBody(req, maxPostBytes);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      respondJson(res, 413, { error: 'payload_too_large' });
+      return;
+    }
+    if (err instanceof BadJsonError) {
+      respondJson(res, 400, { error: 'invalid_json' });
+      return;
+    }
+    throw err;
+  }
+
+  await session.transport.handlePostMessage(req, res, parsedBody);
+}
+
+class PayloadTooLargeError extends Error {}
+class BadJsonError extends Error {}
+
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buf.length;
+    if (total > maxBytes) {
+      // Stop reading; the request will be aborted by the 413 response.
+      throw new PayloadTooLargeError();
+    }
+    chunks.push(buf);
+  }
+  const raw = Buffer.concat(chunks).toString('utf-8');
+  if (raw.length === 0) return undefined;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new BadJsonError();
+  }
 }
 
 function parsePath(urlPath: string | undefined): { pathname: string; query: URLSearchParams } {
