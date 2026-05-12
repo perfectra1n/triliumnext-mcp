@@ -2,6 +2,7 @@
 
 import { loadConfig } from './config.js';
 import { createServer } from './server.js';
+import { createLoggerForTransport } from './utils/logger.js';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -11,10 +12,12 @@ async function main(): Promise<void> {
     process.exit(0);
   }
 
+  const logger = createLoggerForTransport(config.transport);
+
   try {
-    await createServer(config);
+    await createServer(config, logger);
   } catch (error) {
-    console.error('Failed to start server:', error);
+    logger.error('startup_failed', { err: error instanceof Error ? error.message : String(error) });
     process.exit(1);
   }
 }

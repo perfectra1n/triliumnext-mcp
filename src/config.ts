@@ -234,6 +234,15 @@ Environment Variables:
   TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
   TRILIUM_MAX_POST_BYTES             Max SSE POST body size (raw bytes or e.g. 500mb, 1gb)
 
+Logging:
+  LOG_LEVEL                          silent | error | warn | info | debug (default: info)
+                                     'info' emits one line per tools/call with timing and outcome.
+                                     'debug' adds tool args (with secrets and content blobs redacted).
+  LOG_FORMAT                         text | json (default: text)
+                                     text  -> human-readable "<ts> LEVEL event k=v" lines
+                                     json  -> one JSON object per line, for log shippers
+  Output stream is chosen by transport: stdio -> stderr (stdout is JSON-RPC); http -> stdout.
+
 Configuration File:
   Reads from ./trilium-mcp.json or ~/.trilium-mcp.json
 

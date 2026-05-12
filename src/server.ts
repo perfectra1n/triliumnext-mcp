@@ -22,6 +22,12 @@ import { registerSystemTools, handleSystemTool } from './tools/system.js';
 import { registerAttachmentTools, handleAttachmentTool } from './tools/attachments.js';
 import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js';
 import { startHttp } from './http/server.js';
+import { redactArgs, type Logger } from './utils/logger.js';
+
+export interface McpServerContext {
+  logger: Logger;
+  sessionId: string;
+}
 
 /**
  * Builds a fully-configured MCP Server bound to the given Trilium client.
@@ -29,7 +35,8 @@ import { startHttp } from './http/server.js';
  * session owns its own Server + client pair so tool handlers cannot see
  * state from other tenants.
  */
-export function buildMcpServer(client: TriliumClient): Server {
+export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Server {
+  const { logger, sessionId } = ctx;
   const server = new Server(
     {
       name: 'triliumnext-mcp',
@@ -56,11 +63,14 @@ export function buildMcpServer(client: TriliumClient): Server {
   ];
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
+    logger.info('list_tools', { session: sessionId, count: allTools.length });
     return { tools: allTools };
   });
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    const t0 = performance.now();
+    logger.debug('tool_call_args', { session: sessionId, tool: name, args: redactArgs(args) });
 
     try {
       let result: {
@@ -69,29 +79,54 @@ export function buildMcpServer(client: TriliumClient): Server {
           | { type: 'image'; data: string; mimeType: string }
         >;
       } | null = await handleNoteTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleSearchTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleOrganizationTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleAttributeTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleCalendarTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleSystemTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleAttachmentTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
       result = await handleRevisionTool(client, name, args);
-      if (result !== null) return result;
+      if (result !== null) {
+        logToolCall(logger, sessionId, name, t0, { ok: true });
+        return result;
+      }
 
+      logToolCall(logger, sessionId, name, t0, { ok: false, error: 'unknown_tool' });
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
         isError: true,
@@ -100,12 +135,25 @@ export function buildMcpServer(client: TriliumClient): Server {
       let structured;
       if (error instanceof TriliumClientError) {
         structured = formatTriliumError(error);
+        logToolCall(logger, sessionId, name, t0, {
+          ok: false,
+          error: 'trilium',
+          status: error.status,
+          code: error.code,
+        });
       } else if (error instanceof ZodError) {
         structured = formatZodError(error, name);
+        logToolCall(logger, sessionId, name, t0, { ok: false, error: 'zod' });
       } else if (error instanceof DiffApplicationError) {
         structured = formatDiffError(error);
+        logToolCall(logger, sessionId, name, t0, { ok: false, error: 'diff' });
       } else {
         structured = formatUnknownError(error);
+        logToolCall(logger, sessionId, name, t0, {
+          ok: false,
+          error: 'unknown',
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
       return formatErrorForMCP(structured);
     }
@@ -114,21 +162,37 @@ export function buildMcpServer(client: TriliumClient): Server {
   return server;
 }
 
-async function startStdio(config: Config): Promise<void> {
+function logToolCall(
+  logger: Logger,
+  session: string,
+  tool: string,
+  t0: number,
+  outcome: Record<string, unknown>
+): void {
+  logger.info('tool_call', {
+    session,
+    tool,
+    duration_ms: Math.round(performance.now() - t0),
+    ...outcome,
+  });
+}
+
+async function startStdio(config: Config, logger: Logger): Promise<void> {
   if (!config.triliumUrl || !config.triliumToken) {
     // Unreachable: loadConfig enforces this invariant for stdio. Defensive.
     throw new Error('stdio transport requires TRILIUM_URL and TRILIUM_TOKEN');
   }
   const client = new TriliumClient(config.triliumUrl, config.triliumToken);
-  const server = buildMcpServer(client);
+  const server = buildMcpServer(client, { logger, sessionId: 'stdio' });
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  logger.info('server_started', { transport: 'stdio' });
 }
 
-export async function createServer(config: Config): Promise<void> {
+export async function createServer(config: Config, logger: Logger): Promise<void> {
   if (config.transport === 'stdio') {
-    await startStdio(config);
+    await startStdio(config, logger);
   } else {
-    await startHttp(config);
+    await startHttp(config, logger);
   }
 }

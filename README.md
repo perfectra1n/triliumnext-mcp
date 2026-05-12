@@ -7,6 +7,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - [Features](#features)
 - [Installation](#installation)
 - [Configuration](#configuration) — CLI, env vars, config file
+- [Logging](#logging) — what gets logged, where it goes, how to tune it
 - [Available Tools](#available-tools)
 - [Embedding Images and Files](#embedding-images-and-files)
 - [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) — run one server for many users
@@ -125,6 +126,111 @@ For multi-tenant HTTP deployments, the same precedence applies (CLI > env > file
   "urlAllowlist": ["notes.example.com", "trilium.internal"],
   "allowPrivateUrls": false
 }
+```
+
+## Logging
+
+The server emits one line per significant event — server startup, MCP `tools/list`, every `tools/call` (with timing and outcome), and every HTTP request when running over SSE. By default logs are human-readable text; flip to JSON for log shippers.
+
+### Where logs go
+
+The output stream is chosen by transport, so logs never collide with the MCP wire protocol:
+
+| Transport | Log stream | Why |
+|-----------|------------|-----|
+| `stdio`   | **stderr** | stdout is reserved by MCP for JSON-RPC frames — writing anything else there breaks clients. |
+| `http`    | **stdout** | The MCP protocol travels over HTTP, so stdout is free for logs. Easy to pipe into `jq` / a log shipper / `docker logs`. |
+
+Claude Desktop and Claude Code surface stdio servers' stderr in their MCP logs panel, so you'll see these events there with no extra setup.
+
+### Tuning
+
+Two env vars (defaults shown):
+
+| Var | Values | Default | Effect |
+|-----|--------|---------|--------|
+| `LOG_LEVEL`  | `silent` \| `error` \| `warn` \| `info` \| `debug` | `info`  | `info` emits one line per tool call with timing and outcome. `debug` adds per-call argument summaries (with secrets and content blobs scrubbed). `silent` disables logging entirely. |
+| `LOG_FORMAT` | `text` \| `json` | `text` | `text` is `<ISO-ts> LEVEL event k=v k=v` lines. `json` is one JSON object per line. |
+
+### Example output
+
+`info` level, text format (the default):
+
+```
+2026-05-12T18:16:21.098Z INFO  server_started transport=stdio
+2026-05-12T18:16:33.937Z INFO  http_request method=GET path=/health status=200 duration_ms=2 remote=::1
+2026-05-12T18:16:40.512Z INFO  sse_connected session=2f1c... host=notes.example.com
+2026-05-12T18:16:40.871Z INFO  list_tools session=2f1c... count=19
+2026-05-12T18:16:41.044Z INFO  tool_call session=2f1c... tool=search_notes duration_ms=42 ok=true
+2026-05-12T18:16:42.110Z INFO  tool_call session=2f1c... tool=get_note duration_ms=11 ok=false error=trilium status=404 code=NOT_FOUND
+2026-05-12T18:16:55.802Z INFO  sse_closed session=2f1c...
+```
+
+`LOG_FORMAT=json`:
+
+```json
+{"ts":"2026-05-12T18:16:41.044Z","level":"info","event":"tool_call","session":"2f1c...","tool":"search_notes","duration_ms":42,"ok":true}
+```
+
+The `session` field is identical across `sse_connected`, every `tool_call` on that connection, and `sse_closed`, so you can correlate tool activity to its SSE session and (in multi-tenant mode) to its Trilium host.
+
+### Event reference
+
+| Event | Level | Fields | When |
+|-------|-------|--------|------|
+| `server_started`        | info  | `transport`, `port?`, `mode?`, `gateway_auth?`        | After the listener is up (or stdio is connected). |
+| `startup_failed`        | error | `err`                                                  | Server failed to start. |
+| `list_tools`            | info  | `session`, `count`                                     | Client called `tools/list`. |
+| `tool_call`             | info  | `session`, `tool`, `duration_ms`, `ok`, `error?`, `code?`, `status?` | One per `tools/call`. `error` is one of `trilium` \| `zod` \| `diff` \| `unknown_tool` \| `unknown`. |
+| `tool_call_args`        | debug | `session`, `tool`, `args`                              | Per call, before dispatch. `args` is shallow + redacted (secrets stripped, content blobs replaced with `<string len=N>`, scalars truncated at 64 chars). |
+| `http_request`          | info  | `method`, `path`, `status`, `duration_ms`, `remote`    | One per HTTP request to the SSE gateway. Path is pre-`?` to avoid logging query-string secrets. |
+| `sse_connected`         | info  | `session`, `host`                                      | New SSE connection accepted. `host` is the Trilium hostname (never the full URL or token). |
+| `sse_closed`            | info  | `session`                                              | SSE connection closed by either side. |
+| `sse_post`              | debug | `session`, `bytes`                                     | Per `POST /message`, after body read. |
+| `sse_connect_failed`    | error | `session`, `err`                                       | `server.connect(transport)` threw. |
+| `unauthorized`          | warn  | `remote`                                               | Gateway bearer check failed. |
+| `missing_trilium_credentials` | warn | `remote`                                          | Multi-tenant connect without `X-Trilium-Url`+`X-Trilium-Token`. |
+| `url_rejected`          | warn  | `reason`                                               | SSRF guard rejected the client URL. |
+| `trilium_auth_failed`   | warn  | `host`, `status`, `code`                               | Trilium returned 401/403 to the connect-time probe. |
+| `trilium_validate_timeout` | warn | `host`                                                | Probe exceeded 10 s. |
+| `trilium_unreachable`   | warn  | `host`, `err`                                          | Trilium probe failed for any other reason. |
+| `allow_private_urls_enabled` | warn | *(none)*                                          | Operator started multi-tenant mode with `--allow-private-urls`. |
+| `request_handler_error` | error | `method`, `path`, `err`                                | Unhandled error in the HTTP handler chain. |
+
+Event names match the JSON `error` strings returned to the HTTP client where applicable, so a `grep` for a failure mode finds both the log line and the response.
+
+### What's never logged
+
+- ETAPI tokens, gateway bearer tokens, or any value of a field matching `/token|password|secret|authorization|api[_-]?key/i`
+- Note bodies, attachment bytes, search results, or any field named `content`, `text`, `body`, `data`, `attachment`, `blob`, `html`, `markdown` — replaced with `<string len=N>` / `<array len=N>` / `<object>` shape descriptors at `debug`, omitted entirely at `info`
+- Full Trilium URLs (which can theoretically embed credentials) — only the hostname is logged
+
+### Quick recipes
+
+Silence the server (e.g. when invoking under a noisy test harness):
+
+```bash
+LOG_LEVEL=silent triliumnext-mcp --token "$TRILIUM_TOKEN"
+```
+
+Tee structured logs into a file while still seeing them in the terminal:
+
+```bash
+LOG_FORMAT=json triliumnext-mcp --transport http --token "$TRILIUM_TOKEN" \
+  | tee >(jq -c . > /var/log/triliumnext-mcp.jsonl)
+```
+
+Find every failing tool call from the last run:
+
+```bash
+LOG_FORMAT=json triliumnext-mcp --transport http --token "$TRILIUM_TOKEN" \
+  | jq -c 'select(.event=="tool_call" and .ok==false)'
+```
+
+Watch one tenant's activity in a multi-tenant deployment (correlate by SSE session id):
+
+```bash
+docker logs -f triliumnext-mcp | grep "session=2f1c"
 ```
 
 ## Available Tools

@@ -75,12 +75,14 @@ async function startMcpServer(
 
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('MCP startup timeout')), 10_000);
-    proc.stderr?.on('data', (data) => {
-      if (data.toString().includes('listening')) {
+    const onReady = (data: Buffer): void => {
+      if (data.toString().includes('server_started')) {
         clearTimeout(timeout);
         resolve();
       }
-    });
+    };
+    proc.stdout?.on('data', onReady);
+    proc.stderr?.on('data', onReady);
     proc.on('error', reject);
     proc.on('exit', (code) => {
       if (code !== null && code !== 0) {

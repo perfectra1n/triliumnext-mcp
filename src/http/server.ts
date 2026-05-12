@@ -8,6 +8,7 @@ import { TriliumClient, TriliumClientError } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
 import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
+import type { Logger } from '../utils/logger.js';
 
 /** Upper bound on a single MCP JSON-RPC message POST body. The SDK enforces
  *  its own 4MB limit inside `handlePostMessage` when it reads the body itself,
@@ -29,7 +30,7 @@ interface Session {
   keepAlive: NodeJS.Timeout;
 }
 
-export async function startHttp(config: Config): Promise<void> {
+export async function startHttp(config: Config, logger: Logger): Promise<void> {
   const sessions = new Map<string, Session>();
   const gatewayAuth =
     config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
@@ -37,14 +38,37 @@ export async function startHttp(config: Config): Promise<void> {
   if (config.allowPrivateUrls && config.multiTenant) {
     // Loud but not fatal: private-IP block is the primary SSRF defense, and
     // some homelab operators legitimately need to disable it.
-    console.error(
-      '[triliumnext-mcp] WARNING: --allow-private-urls is set. Client-supplied X-Trilium-Url may target LAN/loopback hosts.'
-    );
+    logger.warn('allow_private_urls_enabled', {});
   }
 
   const httpServer = createHttpServer((req, res) => {
-    handleRequest(req, res, config, sessions, gatewayAuth).catch((err) => {
-      console.error('[triliumnext-mcp] request handler error:', err);
+    const t0 = performance.now();
+    const method = req.method ?? 'GET';
+    const rawUrl = req.url ?? '/';
+    const path = rawUrl.split('?')[0];
+    const remote = req.socket.remoteAddress;
+
+    let logged = false;
+    const logAccess = (): void => {
+      if (logged) return;
+      logged = true;
+      logger.info('http_request', {
+        method,
+        path,
+        status: res.statusCode,
+        duration_ms: Math.round(performance.now() - t0),
+        remote,
+      });
+    };
+    res.on('finish', logAccess);
+    res.on('close', logAccess);
+
+    handleRequest(req, res, config, sessions, gatewayAuth, logger).catch((err) => {
+      logger.error('request_handler_error', {
+        method,
+        path,
+        err: err instanceof Error ? err.message : String(err),
+      });
       if (!res.headersSent) {
         respondJson(res, 500, { error: 'internal_error' });
       } else {
@@ -60,9 +84,12 @@ export async function startHttp(config: Config): Promise<void> {
   httpServer.listen(config.httpPort, () => {
     const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
     const auth = config.gatewayAuth === 'bearer' ? `bearer (${config.gatewayTokens.length} token(s))` : 'none';
-    console.error(
-      `TriliumNext MCP server listening on port ${config.httpPort} [${mode}, gateway-auth=${auth}]`
-    );
+    logger.info('server_started', {
+      transport: 'http',
+      port: config.httpPort,
+      mode,
+      gateway_auth: auth,
+    });
   });
 }
 
@@ -71,7 +98,8 @@ async function handleRequest(
   res: ServerResponse,
   config: Config,
   sessions: Map<string, Session>,
-  gatewayAuth: GatewayAuth | null
+  gatewayAuth: GatewayAuth | null,
+  logger: Logger
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const url = req.url ?? '/';
@@ -82,12 +110,12 @@ async function handleRequest(
   }
 
   if (method === 'GET' && url === '/sse') {
-    await handleSseConnect(req, res, config, sessions, gatewayAuth);
+    await handleSseConnect(req, res, config, sessions, gatewayAuth, logger);
     return;
   }
 
   if (method === 'POST' && url.startsWith('/message')) {
-    await handleSsePost(req, res, sessions, config.maxPostBytes);
+    await handleSsePost(req, res, sessions, config.maxPostBytes, logger);
     return;
   }
 
@@ -99,10 +127,12 @@ async function handleSseConnect(
   res: ServerResponse,
   config: Config,
   sessions: Map<string, Session>,
-  gatewayAuth: GatewayAuth | null
+  gatewayAuth: GatewayAuth | null,
+  logger: Logger
 ): Promise<void> {
   // 1. Gateway auth gate
   if (gatewayAuth && !gatewayAuth.isAuthorized(req)) {
+    logger.warn('unauthorized', { remote: req.socket.remoteAddress });
     respondJson(res, 401, { error: 'unauthorized' });
     return;
   }
@@ -118,6 +148,7 @@ async function handleSseConnect(
     const headerUrl = firstHeader(req.headers['x-trilium-url']);
     const headerToken = firstHeader(req.headers['x-trilium-token']);
     if (!headerUrl || !headerToken) {
+      logger.warn('missing_trilium_credentials', { remote: req.socket.remoteAddress });
       respondJson(res, 401, { error: 'missing_trilium_credentials' });
       return;
     }
@@ -132,6 +163,7 @@ async function handleSseConnect(
       });
     } catch (err) {
       if (err instanceof UrlGuardError) {
+        logger.warn('url_rejected', { reason: err.reason });
         respondJson(res, 400, { error: 'url_rejected', reason: err.reason });
         return;
       }
@@ -140,6 +172,7 @@ async function handleSseConnect(
   } else {
     // Single-tenant: config guarantees these are non-null at this point.
     if (!config.triliumUrl || !config.triliumToken) {
+      logger.error('server_misconfigured', {});
       respondJson(res, 500, { error: 'server_misconfigured' });
       return;
     }
@@ -150,12 +183,14 @@ async function handleSseConnect(
   // 4. Build the client and validate creds BEFORE we let the SSE transport
   // write response headers (once start() runs, we can't return a clean JSON error).
   const triliumUrl = normalizeServerUrl(clientUrlRaw);
+  const triliumHost = safeHostname(triliumUrl);
   const client = new TriliumClient(triliumUrl, clientToken);
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
   } catch (err) {
     if (err instanceof TriliumClientError) {
       const status = err.status === 401 || err.status === 403 ? 401 : 502;
+      logger.warn('trilium_auth_failed', { host: triliumHost, status: err.status, code: err.code });
       respondJson(res, status, {
         error: 'trilium_auth_failed',
         status: err.status,
@@ -164,17 +199,22 @@ async function handleSseConnect(
       return;
     }
     if (err instanceof Error && err.message === 'timeout') {
+      logger.warn('trilium_validate_timeout', { host: triliumHost });
       respondJson(res, 504, { error: 'trilium_validate_timeout' });
       return;
     }
+    logger.warn('trilium_unreachable', {
+      host: triliumHost,
+      err: err instanceof Error ? err.message : String(err),
+    });
     respondJson(res, 502, { error: 'trilium_unreachable' });
     return;
   }
 
   // 5. Create the per-connection MCP Server + SSE transport.
-  const mcpServer = buildMcpServer(client);
   const transport = new SSEServerTransport('/message', res);
   const sessionId = transport.sessionId;
+  const mcpServer = buildMcpServer(client, { logger, sessionId });
 
   // 6. Register the session BEFORE awaiting connect(). server.connect() calls
   // transport.start() which writes the endpoint event; a very fast client
@@ -201,16 +241,21 @@ async function handleSseConnect(
   transport.onclose = () => {
     sessions.delete(sessionId);
     clearInterval(keepAlive);
+    logger.info('sse_closed', { session: sessionId });
   };
 
   try {
     await mcpServer.connect(transport);
+    logger.info('sse_connected', { session: sessionId, host: triliumHost });
   } catch (err) {
     // Roll back the session entry if connect failed. onclose will also fire
     // eventually, but we want to avoid a stale entry in the meantime.
     sessions.delete(sessionId);
     clearInterval(keepAlive);
-    console.error('[triliumnext-mcp] SSE connect failed:', err);
+    logger.error('sse_connect_failed', {
+      session: sessionId,
+      err: err instanceof Error ? err.message : String(err),
+    });
     if (!res.headersSent) {
       respondJson(res, 500, { error: 'sse_connect_failed' });
     } else {
@@ -227,7 +272,8 @@ async function handleSsePost(
   req: IncomingMessage,
   res: ServerResponse,
   sessions: Map<string, Session>,
-  maxPostBytes: number
+  maxPostBytes: number,
+  logger: Logger
 ): Promise<void> {
   // Fail fast on a Content-Length that already exceeds the cap, so we don't
   // pay to drain a giant request body just to reject it.
@@ -258,8 +304,11 @@ async function handleSsePost(
   // header presence (chunked requests omit Content-Length) and (b) bypass the
   // SDK's hardcoded 4MB internal limit by passing `parsedBody`.
   let parsedBody: unknown;
+  let bytes: number;
   try {
-    parsedBody = await readJsonBody(req, maxPostBytes);
+    const result = await readJsonBody(req, maxPostBytes);
+    parsedBody = result.parsed;
+    bytes = result.bytes;
   } catch (err) {
     if (err instanceof PayloadTooLargeError) {
       respondJson(res, 413, { error: 'payload_too_large' });
@@ -272,13 +321,15 @@ async function handleSsePost(
     throw err;
   }
 
+  logger.debug('sse_post', { session: sessionId, bytes });
+
   await session.transport.handlePostMessage(req, res, parsedBody);
 }
 
 class PayloadTooLargeError extends Error {}
 class BadJsonError extends Error {}
 
-async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
+async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<{ parsed: unknown; bytes: number }> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
@@ -291,9 +342,9 @@ async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<unk
     chunks.push(buf);
   }
   const raw = Buffer.concat(chunks).toString('utf-8');
-  if (raw.length === 0) return undefined;
+  if (raw.length === 0) return { parsed: undefined, bytes: total };
   try {
-    return JSON.parse(raw);
+    return { parsed: JSON.parse(raw), bytes: total };
   } catch {
     throw new BadJsonError();
   }
@@ -309,6 +360,14 @@ function firstHeader(value: string | string[] | undefined): string | null {
   const v = Array.isArray(value) ? value[0] : value;
   const trimmed = v.trim();
   return trimmed.length > 0 ? trimmed : null;
+}
+
+function safeHostname(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return '<invalid>';
+  }
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {

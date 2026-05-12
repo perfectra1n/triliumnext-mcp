@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import { ChildProcess } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
 import {
   startTriliumContainer,
   stopTriliumContainer,
@@ -422,55 +423,65 @@ describe('MCP Transport Integration Tests', () => {
       }
     });
 
-    it('should accept POST bodies larger than the SDK\'s internal 4MB limit', async () => {
-      // Default cap is 500 MB; we just need to exceed the SDK's hardcoded 4 MB.
+    it('should accept a >4MB random-binary attachment and store it byte-correctly', async () => {
+      // Default cap is 500 MB; we just need to exceed the SDK's hardcoded 4 MB
+      // internal getRawBody cap so the body must flow through readJsonBody +
+      // parsedBody. Random bytes (vs a degenerate 'A'.repeat) ensure every
+      // base64 character class is exercised in JSON.parse and base64 decode.
       const result = await createHttpClient(getTriliumHost());
       client = result.client;
       transport = result.transport;
       serverProcess = result.serverProcess;
 
-      // ~5 MiB of base64 payload — comfortably above the SDK's 4 MB internal
-      // cap, well below our default 500 MB cap. If the bypass-via-parsedBody
-      // wiring is broken, the SDK rejects this with HTTP 400 from getRawBody.
       const FIVE_MIB = 5 * 1024 * 1024;
-      const bigBase64 = 'A'.repeat(FIVE_MIB);
+      const binary = randomBytes(FIVE_MIB);
+      const sentBase64 = binary.toString('base64'); // ~6.67 MiB base64
 
-      // First create an owner note to attach to.
       const noteResponse = await client.callTool({
         name: 'create_note',
         arguments: {
           parentNoteId: 'root',
-          title: 'Big-attachment owner',
+          title: 'Big-binary-attachment owner',
           type: 'text',
           content: '<p>owner</p>',
         },
       });
-      const noteJson = JSON.parse(
+      const ownerId = JSON.parse(
         (noteResponse.content as Array<{ type: string; text: string }>)[0].text
-      );
-      const ownerId = noteJson.note.noteId as string;
+      ).note.noteId as string;
 
       try {
+        // Upload exercises handleSsePost → readJsonBody → JSON.parse →
+        // base64 decode → Trilium PUT. If readJsonBody truncated, JSON.parse
+        // would throw. If JSON.parse / base64 decode corrupted bytes, the
+        // server-side Buffer would have wrong length.
         const attachResponse = await client.callTool({
           name: 'create_attachment',
           arguments: {
             ownerId,
             role: 'file',
             mime: 'application/octet-stream',
-            title: 'big.bin',
-            content: bigBase64,
+            title: 'big-binary.bin',
+            content: sentBase64,
           },
         });
+        const attachment = JSON.parse(
+          (attachResponse.content as Array<{ type: string; text: string }>)[0].text
+        );
+        expect(attachment.attachmentId).toBeTruthy();
 
-        // Reaching this point at all proves the body cleared the HTTP+SDK gauntlet.
-        // Also assert structurally so a regression to e.g. an empty error response
-        // surfaces as a meaningful failure.
-        expect(attachResponse.content).toBeDefined();
-        const attachContent = attachResponse.content as Array<{ type: string; text: string }>;
-        expect(attachContent[0]?.type).toBe('text');
-        // Tool returns either the new attachment metadata or an error string;
-        // either way the round-trip succeeded at the transport layer.
-        expect(typeof attachContent[0]?.text).toBe('string');
+        // Byte-fidelity check: contentLength reported by Trilium must equal
+        // the original raw byte count. Anything wrong with how we read the
+        // request body or decoded the base64 server-side would surface here
+        // (truncation, character mangling, padding loss, off-by-one, etc.).
+        const metaResponse = await client.callTool({
+          name: 'get_attachment',
+          arguments: { attachmentId: attachment.attachmentId, include_content: false },
+        });
+        const meta = JSON.parse(
+          (metaResponse.content as Array<{ type: string; text: string }>)[0].text
+        );
+        expect(meta.contentLength).toBe(FIVE_MIB);
       } finally {
         await client
           .callTool({ name: 'delete_note', arguments: { noteId: ownerId, action: 'delete' } })

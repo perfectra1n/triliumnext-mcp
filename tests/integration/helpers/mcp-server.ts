@@ -53,12 +53,14 @@ export async function createHttpClient(
   // Wait for server ready message
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error('Server startup timeout')), 10000);
-    serverProcess.stderr?.on('data', (data) => {
-      if (data.toString().includes('listening')) {
+    const onReady = (data: Buffer): void => {
+      if (data.toString().includes('server_started')) {
         clearTimeout(timeout);
         resolve();
       }
-    });
+    };
+    serverProcess.stdout?.on('data', onReady);
+    serverProcess.stderr?.on('data', onReady);
     serverProcess.on('error', reject);
   });
 
