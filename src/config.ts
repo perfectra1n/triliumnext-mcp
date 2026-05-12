@@ -23,6 +23,7 @@ export function normalizeServerUrl(url: string): string {
 }
 
 export type GatewayAuthMode = 'none' | 'bearer';
+export type MetricsAuthMode = 'gateway' | 'bearer' | 'none';
 
 export interface Config {
   /**
@@ -70,6 +71,22 @@ export interface Config {
    * before dispatch, so this also bounds per-request memory.
    */
   maxPostBytes: number;
+  /**
+   * If true, expose a Prometheus-compatible `GET /metrics` endpoint on the SSE
+   * gateway. Opt-in; ignored when `transport=stdio` (no HTTP listener).
+   */
+  metricsEnabled: boolean;
+  /**
+   * Auth gate for `/metrics`:
+   *  - `gateway`: reuse the existing gateway bearer (default)
+   *  - `bearer`: a separate set of bearer tokens (see `metricsTokens`)
+   *  - `none`: open (use only when the endpoint is firewalled)
+   */
+  metricsAuth: MetricsAuthMode;
+  /**
+   * Accepted scrape bearer tokens (only meaningful when `metricsAuth='bearer'`).
+   */
+  metricsTokens: string[];
 }
 
 interface ConfigFile {
@@ -83,6 +100,9 @@ interface ConfigFile {
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
   maxPostBytes?: number;
+  metrics?: boolean;
+  metricsAuth?: MetricsAuthMode;
+  metricsTokens?: string[];
 }
 
 interface CliArgs {
@@ -97,11 +117,15 @@ interface CliArgs {
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
   maxPostBytes?: number;
+  metrics?: boolean;
+  metricsAuth?: string;
+  metricsTokens?: string[];
 }
 
 function parseCliArgs(args: string[]): CliArgs {
   const result: CliArgs = {};
   const gatewayTokens: string[] = [];
+  const metricsTokens: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -152,6 +176,17 @@ function parseCliArgs(args: string[]): CliArgs {
         }
         i++;
         break;
+      case '--metrics':
+        result.metrics = true;
+        break;
+      case '--metrics-auth':
+        result.metricsAuth = nextArg;
+        i++;
+        break;
+      case '--metrics-token':
+        if (nextArg) metricsTokens.push(nextArg);
+        i++;
+        break;
       case '--help':
       case '-h':
         result.help = true;
@@ -161,6 +196,9 @@ function parseCliArgs(args: string[]): CliArgs {
 
   if (gatewayTokens.length > 0) {
     result.gatewayTokens = gatewayTokens;
+  }
+  if (metricsTokens.length > 0) {
+    result.metricsTokens = metricsTokens;
   }
   return result;
 }
@@ -220,6 +258,14 @@ Multi-tenant HTTP options (require --transport http):
                                      transport. Accepts raw bytes or suffixed values
                                      (e.g. 500mb, 1gb). Default: 500mb.
 
+Metrics (require --transport http):
+  --metrics                          Expose Prometheus-compatible GET /metrics on the SSE
+                                     gateway. Opt-in; off by default.
+  --metrics-auth <mode>              Auth gate for /metrics: gateway | bearer | none
+                                     (default: gateway, which reuses --gateway-token)
+  --metrics-token <token>            Accepted scrape bearer token when --metrics-auth=bearer.
+                                     Repeatable; supply once per token.
+
   -h, --help                         Show this help message
 
 Environment Variables:
@@ -233,6 +279,9 @@ Environment Variables:
   TRILIUM_URL_ALLOWLIST              Comma-separated allowed hostnames for client URLs
   TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
   TRILIUM_MAX_POST_BYTES             Max SSE POST body size (raw bytes or e.g. 500mb, 1gb)
+  TRILIUM_METRICS                    "true" to expose GET /metrics (HTTP transport only)
+  TRILIUM_METRICS_AUTH               gateway | bearer | none (default: gateway)
+  TRILIUM_METRICS_TOKENS             Comma-separated scrape tokens (for TRILIUM_METRICS_AUTH=bearer)
 
 Logging:
   LOG_LEVEL                          silent | error | warn | info | debug (default: info)
@@ -358,6 +407,24 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.maxPostBytes ??
     DEFAULT_MAX_POST_BYTES;
 
+  const metricsEnabledRaw =
+    cli.metrics ?? parseBoolean(process.env.TRILIUM_METRICS) ?? file.metrics ?? false;
+
+  const metricsTokens =
+    cli.metricsTokens ??
+    (process.env.TRILIUM_METRICS_TOKENS ? splitCsv(process.env.TRILIUM_METRICS_TOKENS) : undefined) ??
+    file.metricsTokens ??
+    [];
+
+  const metricsAuthRaw =
+    cli.metricsAuth ?? process.env.TRILIUM_METRICS_AUTH ?? file.metricsAuth ?? undefined;
+  let metricsAuth: MetricsAuthMode;
+  if (metricsAuthRaw === 'gateway' || metricsAuthRaw === 'bearer' || metricsAuthRaw === 'none') {
+    metricsAuth = metricsAuthRaw;
+  } else {
+    metricsAuth = 'gateway';
+  }
+
   // Single-tenant mode: require token (URL has a sensible default). Historical behavior.
   if (!multiTenant && !rawToken) {
     console.error('Error: Trilium ETAPI token is required.');
@@ -394,6 +461,29 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     process.exit(1);
   }
 
+  // Metrics validation.
+  let metricsEnabled = metricsEnabledRaw;
+  if (metricsEnabled && transport !== 'http') {
+    console.error(
+      'Warning: --metrics has no effect with --transport stdio (no HTTP listener). Ignoring.'
+    );
+    metricsEnabled = false;
+  }
+  if (metricsEnabled && metricsAuth === 'bearer' && metricsTokens.length === 0) {
+    console.error('Error: --metrics-auth bearer requires at least one --metrics-token.');
+    console.error('Either provide a scrape token or use --metrics-auth gateway or --metrics-auth none.');
+    process.exit(1);
+  }
+  if (metricsEnabled && metricsAuth === 'gateway' && gatewayAuth === 'none') {
+    // gateway-auth=none means there's no bearer to reuse — metricsAuth=gateway
+    // would be silently equivalent to `none`. Make that explicit.
+    console.error(
+      'Warning: --metrics-auth gateway requested but --gateway-auth=none. ' +
+        'Falling back to --metrics-auth=none (the /metrics endpoint will be open).'
+    );
+    metricsAuth = 'none';
+  }
+
   const triliumUrl = multiTenant
     ? null
     : rawUrl
@@ -412,5 +502,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     urlAllowlist,
     allowPrivateUrls,
     maxPostBytes,
+    metricsEnabled,
+    metricsAuth,
+    metricsTokens,
   };
 }

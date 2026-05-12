@@ -8,6 +8,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - [Installation](#installation)
 - [Configuration](#configuration) — CLI, env vars, config file
 - [Logging](#logging) — what gets logged, where it goes, how to tune it
+- [Metrics](#metrics) — Prometheus `/metrics` endpoint, auth modes, exposed series
 - [Available Tools](#available-tools)
 - [Embedding Images and Files](#embedding-images-and-files)
 - [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) — run one server for many users
@@ -231,6 +232,162 @@ Watch one tenant's activity in a multi-tenant deployment (correlate by SSE sessi
 
 ```bash
 docker logs -f triliumnext-mcp | grep "session=2f1c"
+```
+
+## Metrics
+
+The server can expose a Prometheus-compatible `GET /metrics` endpoint on the SSE gateway. Off by default, opt in with `--metrics` or `TRILIUM_METRICS=true`. HTTP transport only — stdio mode has no listener, and the flag is ignored there with a warning.
+
+### Enabling
+
+```bash
+# Reuse the gateway bearer (default; same token that protects /sse)
+node dist/index.js \
+  --transport http \
+  --multi-tenant \
+  --gateway-token "$GATEWAY_TOKEN" \
+  --metrics
+```
+
+Same thing via env:
+
+```bash
+TRILIUM_TRANSPORT=http \
+TRILIUM_MULTI_TENANT=true \
+TRILIUM_GATEWAY_TOKENS=$GATEWAY_TOKEN \
+TRILIUM_METRICS=true \
+  node dist/index.js
+```
+
+### Auth modes
+
+Selected with `--metrics-auth <mode>` or `TRILIUM_METRICS_AUTH`. Default is `gateway`.
+
+| Mode | What it does | When to use |
+|------|--------------|-------------|
+| `gateway` *(default)* | Scrapers must present the same `Authorization: Bearer <token>` accepted by `/sse`. Zero new config. | Common case. Prometheus uses the same secret as your MCP clients. |
+| `bearer`              | Scrapers must present a token from a separate list, supplied via `--metrics-token <tok>` (repeatable) or `TRILIUM_METRICS_TOKENS=t1,t2`. Gateway tokens are **not** accepted. | When you want Prometheus to have its own credential you can rotate independently of MCP client tokens. |
+| `none`                | Endpoint is open. No `Authorization` required. | The endpoint is firewalled or sits on a private network where you trust everything that can reach it. |
+
+If you ask for `--metrics-auth gateway` but `--gateway-auth=none`, there's no bearer to reuse — the server falls back to `--metrics-auth=none` and prints a startup warning so the behavior is explicit. If you set `--metrics-auth bearer` without providing any `--metrics-token`, startup fails fast.
+
+### Deploying with Docker / Compose
+
+Add to `docker-compose.multi-tenant.yml` (already templated as commented-out entries in that file):
+
+```yaml
+services:
+  mcp-server:
+    environment:
+      - TRILIUM_METRICS=true
+      # Default: reuse the gateway bearer. No new config needed.
+      - TRILIUM_METRICS_AUTH=gateway
+      # Or, give Prometheus its own rotatable credential:
+      # - TRILIUM_METRICS_AUTH=bearer
+      # - TRILIUM_METRICS_TOKENS=${PROMETHEUS_SCRAPE_TOKEN}
+```
+
+In Kubernetes, the equivalent is two env vars (`TRILIUM_METRICS=true` and `TRILIUM_METRICS_AUTH`) on the Deployment plus a ServiceMonitor with `bearerTokenSecret` pointing at the token Secret.
+
+### Reverse-proxy hardening
+
+`/metrics` is served on the same listener and port as `/sse` (port 3000 by default). If you don't want public scrapers hammering the auth check, gate `/metrics` at the reverse proxy and only let your monitoring network through.
+
+**Caddy:**
+
+```
+mcp.example.com {
+    @metrics path /metrics
+    handle @metrics {
+        # only Prometheus can even reach /metrics; everyone else gets 404
+        @allowed remote_ip 10.0.0.0/8 192.168.0.0/16
+        handle @allowed {
+            reverse_proxy 127.0.0.1:3000
+        }
+        respond 404
+    }
+    handle {
+        reverse_proxy 127.0.0.1:3000 {
+            flush_interval -1
+        }
+    }
+}
+```
+
+**nginx:**
+
+```nginx
+location = /metrics {
+    allow 10.0.0.0/8;
+    allow 192.168.0.0/16;
+    deny all;
+    proxy_pass http://127.0.0.1:3000;
+}
+```
+
+This is defense-in-depth on top of the bearer auth — useful because metrics endpoints are routinely scanned by attackers, and a misconfigured `--metrics-auth=none` would otherwise leak operational data to anyone who finds the URL.
+
+### Sample Prometheus scrape config
+
+```yaml
+scrape_configs:
+  - job_name: triliumnext-mcp
+    scheme: https
+    static_configs:
+      - targets: ['mcp.example.com']
+    metrics_path: /metrics
+    authorization:
+      type: Bearer
+      credentials: 'YOUR_GATEWAY_OR_METRICS_TOKEN'
+```
+
+### Exposed series
+
+All series are namespaced `triliumnext_mcp_*`. Histogram buckets are in seconds.
+
+| Series | Type | Labels | Notes |
+|--------|------|--------|-------|
+| `triliumnext_mcp_build_info` | gauge | `version` | Always `1`. Use for join-on-version queries. |
+| `triliumnext_mcp_http_requests_total` | counter | `method`, `path`, `status` | `path` is normalized to `/health` \| `/sse` \| `/message` \| `/metrics` \| `unknown` to keep cardinality bounded. |
+| `triliumnext_mcp_http_request_duration_seconds` | histogram | `method`, `path` | Buckets: `0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10`. |
+| `triliumnext_mcp_tool_calls_total` | counter | `tool`, `ok`, `error` | `error` is `none` on success, otherwise one of `trilium`, `zod`, `diff`, `unknown_tool`, `unknown`. |
+| `triliumnext_mcp_tool_call_duration_seconds` | histogram | `tool` | Buckets: `0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60`. |
+| `triliumnext_mcp_sse_sessions` | gauge | — | Current open SSE sessions. |
+| `triliumnext_mcp_sse_connects_total` | counter | — | Successful SSE handshakes. |
+| `triliumnext_mcp_sse_closes_total` | counter | — | SSE sessions closed by either side. |
+| `triliumnext_mcp_sse_connect_failures_total` | counter | `reason` | `reason` ∈ `unauthorized` \| `missing_trilium_credentials` \| `url_rejected` \| `trilium_auth_failed` \| `trilium_validate_timeout` \| `trilium_unreachable` \| `sse_connect_failed` \| `server_misconfigured`. |
+| `triliumnext_mcp_process_uptime_seconds` | gauge | — | Synced from `process.uptime()` at scrape time. |
+| `triliumnext_mcp_process_resident_memory_bytes` | gauge | — | Synced from `process.memoryUsage().rss` at scrape time. |
+
+### Cardinality and what's intentionally NOT a label
+
+- **No `session` label.** SSE session ids are unbounded and per-connection. Use logs (which carry `session=…`) for per-session investigation; use metrics for fleet-level rollups.
+- **No tenant / Trilium-host label.** Same reason — and avoids putting tenant identifiers into a scrape surface that may have different access controls than the logs.
+- **No raw `path` for unknown routes.** Random scanners / typo'd URLs collapse to `unknown`, so a probe storm can't blow up cardinality.
+
+### Useful PromQL
+
+Tool error rate per tool:
+
+```promql
+sum by (tool) (rate(triliumnext_mcp_tool_calls_total{ok="false"}[5m]))
+  /
+sum by (tool) (rate(triliumnext_mcp_tool_calls_total[5m]))
+```
+
+p95 tool-call latency:
+
+```promql
+histogram_quantile(
+  0.95,
+  sum by (tool, le) (rate(triliumnext_mcp_tool_call_duration_seconds_bucket[5m]))
+)
+```
+
+SSE connect failures by reason:
+
+```promql
+sum by (reason) (rate(triliumnext_mcp_sse_connect_failures_total[5m]))
 ```
 
 ## Available Tools
@@ -660,6 +817,7 @@ Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Tril
 - [ ] Container runs as non-root (the shipped `Dockerfile` already uses `USER node`).
 - [ ] Reverse proxy logs scrubbed of `Authorization` / `X-Trilium-Token` headers if you forward request headers to an APM.
 - [ ] Firewall rules restrict ingress to the proxy host(s).
+- [ ] If `--metrics` is enabled: `/metrics` reachable only from the monitoring network (see [Reverse-proxy hardening](#reverse-proxy-hardening)), and `--metrics-auth=none` used only when that path-level allowlist is in place. Prefer `--metrics-auth=bearer` with a dedicated `--metrics-token` for credential rotation independent of MCP clients.
 
 ### What's not (yet) supported
 

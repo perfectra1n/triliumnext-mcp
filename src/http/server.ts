@@ -1,4 +1,4 @@
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer as createHttpServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
 
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
@@ -8,6 +8,8 @@ import { TriliumClient, TriliumClientError } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
 import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
+import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
+import { MetricsAuth } from './metricsAuth.js';
 import type { Logger } from '../utils/logger.js';
 
 /** Upper bound on a single MCP JSON-RPC message POST body. The SDK enforces
@@ -30,10 +32,15 @@ interface Session {
   keepAlive: NodeJS.Timeout;
 }
 
-export async function startHttp(config: Config, logger: Logger): Promise<void> {
+export async function startHttp(config: Config, logger: Logger): Promise<HttpServer> {
   const sessions = new Map<string, Session>();
   const gatewayAuth =
     config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
+
+  const metrics: Metrics | null = config.metricsEnabled ? createMetrics('1.0.0') : null;
+  const metricsAuth: MetricsAuth | null = metrics
+    ? new MetricsAuth(config.metricsAuth, { gateway: gatewayAuth, bearerTokens: config.metricsTokens })
+    : null;
 
   if (config.allowPrivateUrls && config.multiTenant) {
     // Loud but not fatal: private-IP block is the primary SSRF defense, and
@@ -49,21 +56,27 @@ export async function startHttp(config: Config, logger: Logger): Promise<void> {
     const remote = req.socket.remoteAddress;
 
     let logged = false;
-    const logAccess = (): void => {
+    const recordAccess = (): void => {
       if (logged) return;
       logged = true;
+      const durationSec = (performance.now() - t0) / 1000;
       logger.info('http_request', {
         method,
         path,
         status: res.statusCode,
-        duration_ms: Math.round(performance.now() - t0),
+        duration_ms: Math.round(durationSec * 1000),
         remote,
       });
+      if (metrics) {
+        const route = normalizeRoute(method, path);
+        metrics.httpRequestsTotal.inc({ method, path: route, status: String(res.statusCode) });
+        metrics.httpRequestDuration.observe({ method, path: route }, durationSec);
+      }
     };
-    res.on('finish', logAccess);
-    res.on('close', logAccess);
+    res.on('finish', recordAccess);
+    res.on('close', recordAccess);
 
-    handleRequest(req, res, config, sessions, gatewayAuth, logger).catch((err) => {
+    handleRequest(req, res, config, sessions, gatewayAuth, logger, metrics, metricsAuth).catch((err) => {
       logger.error('request_handler_error', {
         method,
         path,
@@ -81,16 +94,23 @@ export async function startHttp(config: Config, logger: Logger): Promise<void> {
     });
   });
 
-  httpServer.listen(config.httpPort, () => {
-    const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
-    const auth = config.gatewayAuth === 'bearer' ? `bearer (${config.gatewayTokens.length} token(s))` : 'none';
-    logger.info('server_started', {
-      transport: 'http',
-      port: config.httpPort,
-      mode,
-      gateway_auth: auth,
+  await new Promise<void>((resolve) => {
+    httpServer.listen(config.httpPort, () => {
+      const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
+      const auth = config.gatewayAuth === 'bearer' ? `bearer (${config.gatewayTokens.length} token(s))` : 'none';
+      const address = httpServer.address();
+      const actualPort = typeof address === 'object' && address ? address.port : config.httpPort;
+      logger.info('server_started', {
+        transport: 'http',
+        port: actualPort,
+        mode,
+        gateway_auth: auth,
+        metrics: metrics ? config.metricsAuth : 'off',
+      });
+      resolve();
     });
   });
+  return httpServer;
 }
 
 async function handleRequest(
@@ -99,7 +119,9 @@ async function handleRequest(
   config: Config,
   sessions: Map<string, Session>,
   gatewayAuth: GatewayAuth | null,
-  logger: Logger
+  logger: Logger,
+  metrics: Metrics | null,
+  metricsAuth: MetricsAuth | null
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const url = req.url ?? '/';
@@ -109,8 +131,13 @@ async function handleRequest(
     return;
   }
 
+  if (method === 'GET' && (url === '/metrics' || url.startsWith('/metrics?'))) {
+    handleMetrics(req, res, metrics, metricsAuth);
+    return;
+  }
+
   if (method === 'GET' && url === '/sse') {
-    await handleSseConnect(req, res, config, sessions, gatewayAuth, logger);
+    await handleSseConnect(req, res, config, sessions, gatewayAuth, logger, metrics);
     return;
   }
 
@@ -122,17 +149,46 @@ async function handleRequest(
   respondJson(res, 404, { error: 'not_found' });
 }
 
+function handleMetrics(
+  req: IncomingMessage,
+  res: ServerResponse,
+  metrics: Metrics | null,
+  metricsAuth: MetricsAuth | null
+): void {
+  if (!metrics || !metricsAuth) {
+    respondJson(res, 404, { error: 'metrics_disabled' });
+    return;
+  }
+  if (!metricsAuth.isAuthorized(req)) {
+    respondJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  metrics.collectProcess();
+  const body = metrics.registry.render();
+  res.writeHead(200, {
+    'Content-Type': 'text/plain; version=0.0.4; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+  });
+  res.end(body);
+}
+
 async function handleSseConnect(
   req: IncomingMessage,
   res: ServerResponse,
   config: Config,
   sessions: Map<string, Session>,
   gatewayAuth: GatewayAuth | null,
-  logger: Logger
+  logger: Logger,
+  metrics: Metrics | null
 ): Promise<void> {
+  const recordFailure = (reason: string): void => {
+    metrics?.sseConnectFailuresTotal.inc({ reason });
+  };
+
   // 1. Gateway auth gate
   if (gatewayAuth && !gatewayAuth.isAuthorized(req)) {
     logger.warn('unauthorized', { remote: req.socket.remoteAddress });
+    recordFailure('unauthorized');
     respondJson(res, 401, { error: 'unauthorized' });
     return;
   }
@@ -149,6 +205,7 @@ async function handleSseConnect(
     const headerToken = firstHeader(req.headers['x-trilium-token']);
     if (!headerUrl || !headerToken) {
       logger.warn('missing_trilium_credentials', { remote: req.socket.remoteAddress });
+      recordFailure('missing_trilium_credentials');
       respondJson(res, 401, { error: 'missing_trilium_credentials' });
       return;
     }
@@ -164,6 +221,7 @@ async function handleSseConnect(
     } catch (err) {
       if (err instanceof UrlGuardError) {
         logger.warn('url_rejected', { reason: err.reason });
+        recordFailure('url_rejected');
         respondJson(res, 400, { error: 'url_rejected', reason: err.reason });
         return;
       }
@@ -173,6 +231,7 @@ async function handleSseConnect(
     // Single-tenant: config guarantees these are non-null at this point.
     if (!config.triliumUrl || !config.triliumToken) {
       logger.error('server_misconfigured', {});
+      recordFailure('server_misconfigured');
       respondJson(res, 500, { error: 'server_misconfigured' });
       return;
     }
@@ -191,6 +250,7 @@ async function handleSseConnect(
     if (err instanceof TriliumClientError) {
       const status = err.status === 401 || err.status === 403 ? 401 : 502;
       logger.warn('trilium_auth_failed', { host: triliumHost, status: err.status, code: err.code });
+      recordFailure('trilium_auth_failed');
       respondJson(res, status, {
         error: 'trilium_auth_failed',
         status: err.status,
@@ -200,6 +260,7 @@ async function handleSseConnect(
     }
     if (err instanceof Error && err.message === 'timeout') {
       logger.warn('trilium_validate_timeout', { host: triliumHost });
+      recordFailure('trilium_validate_timeout');
       respondJson(res, 504, { error: 'trilium_validate_timeout' });
       return;
     }
@@ -207,6 +268,7 @@ async function handleSseConnect(
       host: triliumHost,
       err: err instanceof Error ? err.message : String(err),
     });
+    recordFailure('trilium_unreachable');
     respondJson(res, 502, { error: 'trilium_unreachable' });
     return;
   }
@@ -214,7 +276,7 @@ async function handleSseConnect(
   // 5. Create the per-connection MCP Server + SSE transport.
   const transport = new SSEServerTransport('/message', res);
   const sessionId = transport.sessionId;
-  const mcpServer = buildMcpServer(client, { logger, sessionId });
+  const mcpServer = buildMcpServer(client, { logger, sessionId, metrics: metrics ?? undefined });
 
   // 6. Register the session BEFORE awaiting connect(). server.connect() calls
   // transport.start() which writes the endpoint event; a very fast client
@@ -242,11 +304,19 @@ async function handleSseConnect(
     sessions.delete(sessionId);
     clearInterval(keepAlive);
     logger.info('sse_closed', { session: sessionId });
+    if (metrics) {
+      metrics.sseSessions.dec();
+      metrics.sseClosesTotal.inc();
+    }
   };
 
   try {
     await mcpServer.connect(transport);
     logger.info('sse_connected', { session: sessionId, host: triliumHost });
+    if (metrics) {
+      metrics.sseSessions.inc();
+      metrics.sseConnectsTotal.inc();
+    }
   } catch (err) {
     // Roll back the session entry if connect failed. onclose will also fire
     // eventually, but we want to avoid a stale entry in the meantime.
@@ -256,6 +326,7 @@ async function handleSseConnect(
       session: sessionId,
       err: err instanceof Error ? err.message : String(err),
     });
+    recordFailure('sse_connect_failed');
     if (!res.headersSent) {
       respondJson(res, 500, { error: 'sse_connect_failed' });
     } else {

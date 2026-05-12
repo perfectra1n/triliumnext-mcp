@@ -39,6 +39,15 @@ services:
       # - TRILIUM_URL_ALLOWLIST=notes.example.com,trilium.internal
       # Uncomment if you need to allow private IPs (homelab only):
       # - TRILIUM_ALLOW_PRIVATE_URLS=true
+      # Prometheus /metrics endpoint (opt-in). By default it reuses the
+      # gateway bearer above, so Prometheus must send the same Authorization
+      # header as MCP clients. Switch to TRILIUM_METRICS_AUTH=bearer +
+      # TRILIUM_METRICS_TOKENS=... to give scrapers a separate, rotatable
+      # token. Set TRILIUM_METRICS_AUTH=none ONLY if the endpoint is
+      # firewalled to your monitoring network.
+      # - TRILIUM_METRICS=true
+      # - TRILIUM_METRICS_AUTH=gateway
+      # - TRILIUM_METRICS_TOKENS=${PROMETHEUS_SCRAPE_TOKEN}
     ports:
       - "3000:3000"
     restart: unless-stopped

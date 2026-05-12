@@ -23,10 +23,12 @@ import { registerAttachmentTools, handleAttachmentTool } from './tools/attachmen
 import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js';
 import { startHttp } from './http/server.js';
 import { redactArgs, type Logger } from './utils/logger.js';
+import type { Metrics } from './http/metrics.js';
 
 export interface McpServerContext {
   logger: Logger;
   sessionId: string;
+  metrics?: Metrics;
 }
 
 /**
@@ -36,7 +38,7 @@ export interface McpServerContext {
  * state from other tenants.
  */
 export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Server {
-  const { logger, sessionId } = ctx;
+  const { logger, sessionId, metrics } = ctx;
   const server = new Server(
     {
       name: 'triliumnext-mcp',
@@ -67,6 +69,29 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     return { tools: allTools };
   });
 
+  const recordToolCall = (
+    tool: string,
+    t0: number,
+    outcome: { ok: boolean; error?: string; status?: number; code?: string; message?: string }
+  ): void => {
+    const durationMs = performance.now() - t0;
+    logger.info('tool_call', {
+      session: sessionId,
+      tool,
+      duration_ms: Math.round(durationMs),
+      ok: outcome.ok,
+      error: outcome.error,
+      status: outcome.status,
+      code: outcome.code,
+      message: outcome.message,
+    });
+    if (metrics) {
+      const errorLabel = outcome.ok ? 'none' : (outcome.error ?? 'unknown');
+      metrics.toolCallsTotal.inc({ tool, ok: outcome.ok ? 'true' : 'false', error: errorLabel });
+      metrics.toolCallDuration.observe({ tool }, durationMs / 1000);
+    }
+  };
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const t0 = performance.now();
@@ -80,53 +105,53 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
         >;
       } | null = await handleNoteTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleSearchTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleOrganizationTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleAttributeTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleCalendarTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleSystemTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleAttachmentTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
       result = await handleRevisionTool(client, name, args);
       if (result !== null) {
-        logToolCall(logger, sessionId, name, t0, { ok: true });
+        recordToolCall(name, t0, { ok: true });
         return result;
       }
 
-      logToolCall(logger, sessionId, name, t0, { ok: false, error: 'unknown_tool' });
+      recordToolCall(name, t0, { ok: false, error: 'unknown_tool' });
       return {
         content: [{ type: 'text', text: `Unknown tool: ${name}` }],
         isError: true,
@@ -135,7 +160,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       let structured;
       if (error instanceof TriliumClientError) {
         structured = formatTriliumError(error);
-        logToolCall(logger, sessionId, name, t0, {
+        recordToolCall(name, t0, {
           ok: false,
           error: 'trilium',
           status: error.status,
@@ -143,13 +168,13 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
         });
       } else if (error instanceof ZodError) {
         structured = formatZodError(error, name);
-        logToolCall(logger, sessionId, name, t0, { ok: false, error: 'zod' });
+        recordToolCall(name, t0, { ok: false, error: 'zod' });
       } else if (error instanceof DiffApplicationError) {
         structured = formatDiffError(error);
-        logToolCall(logger, sessionId, name, t0, { ok: false, error: 'diff' });
+        recordToolCall(name, t0, { ok: false, error: 'diff' });
       } else {
         structured = formatUnknownError(error);
-        logToolCall(logger, sessionId, name, t0, {
+        recordToolCall(name, t0, {
           ok: false,
           error: 'unknown',
           message: error instanceof Error ? error.message : String(error),
@@ -160,21 +185,6 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   });
 
   return server;
-}
-
-function logToolCall(
-  logger: Logger,
-  session: string,
-  tool: string,
-  t0: number,
-  outcome: Record<string, unknown>
-): void {
-  logger.info('tool_call', {
-    session,
-    tool,
-    duration_ms: Math.round(performance.now() - t0),
-    ...outcome,
-  });
 }
 
 async function startStdio(config: Config, logger: Logger): Promise<void> {
