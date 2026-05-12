@@ -10,6 +10,8 @@ import { GatewayAuth } from './auth.js';
 import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
 import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
 import { MetricsAuth } from './metricsAuth.js';
+import { CorsPolicy } from './cors.js';
+import { RateLimiter } from './rateLimit.js';
 import type { Logger } from '../utils/logger.js';
 
 /** Upper bound on a single MCP JSON-RPC message POST body. The SDK enforces
@@ -41,6 +43,11 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
   const metricsAuth: MetricsAuth | null = metrics
     ? new MetricsAuth(config.metricsAuth, { gateway: gatewayAuth, bearerTokens: config.metricsTokens })
     : null;
+  const cors = new CorsPolicy(config.corsOrigins);
+  const rateLimiter = new RateLimiter({
+    rps: config.rateLimitRps,
+    burst: config.rateLimitBurst,
+  });
 
   if (config.allowPrivateUrls && config.multiTenant) {
     // Loud but not fatal: private-IP block is the primary SSRF defense, and
@@ -75,6 +82,34 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     };
     res.on('finish', recordAccess);
     res.on('close', recordAccess);
+
+    // Apply CORS headers to every response, and short-circuit OPTIONS preflight.
+    cors.apply(req, res);
+    if (cors.handlePreflight(req, res)) {
+      return;
+    }
+
+    // Rate limit everything except /health (cheap liveness) and OPTIONS
+    // (already short-circuited above for CORS-enabled deployments).
+    if (rateLimiter.enabled && req.method !== 'OPTIONS') {
+      const rawPath = (req.url ?? '/').split('?')[0];
+      if (rawPath !== '/health') {
+        const decision = rateLimiter.check(req);
+        if (!decision.allowed) {
+          logger.warn('rate_limited', {
+            remote: req.socket.remoteAddress,
+            path: rawPath,
+            reason: decision.reason,
+          });
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': String(decision.retryAfter ?? 1),
+          });
+          res.end(JSON.stringify({ error: 'rate_limited', reason: decision.reason }));
+          return;
+        }
+      }
+    }
 
     handleRequest(req, res, config, sessions, gatewayAuth, logger, metrics, metricsAuth).catch((err) => {
       logger.error('request_handler_error', {

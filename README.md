@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
   - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses) · [Request body size limits](#request-body-size-limits)
   - [Connecting clients](#connecting-clients) — Claude Desktop, Claude Code, SDK
   - [SSRF configuration](#ssrf-configuration) · [Reverse-proxy](#reverse-proxy-tls-termination)
-  - [Security model](#security-model) · [Production checklist](#production-checklist) · [Troubleshooting](#troubleshooting)
+  - [Security model](#security-model) · [Troubleshooting](#troubleshooting)
 - [Debugging with MCP Inspector](#debugging-with-mcp-inspector)
 - [Development](#development) — build, test, docker
 - [Getting an ETAPI Token](#getting-an-etapi-token)
@@ -806,26 +806,7 @@ Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Tril
 - **Backend auth** (which Trilium to talk to) is each client's own ETAPI token. It's only ever used to construct that client's `TriliumClient`; it's never logged.
 - **Creds are validated at connect time** with a 10-second timeout, so a bad or slow Trilium target fails the SSE handshake instead of hanging the connection.
 - **No TLS in-process.** Use a reverse proxy. The server listens on plain HTTP and expects to run behind one.
-- **No per-user identity.** The gateway token is a capability — anyone holding it can open a session and provide any Trilium credentials. If you need per-principal identity (OIDC, JWT), handle it at the reverse-proxy layer and pass through.
-
-### Production checklist
-
-- [ ] TLS terminated by a reverse proxy (Caddy / nginx / Traefik) — never expose port 3000 directly to the public internet.
-- [ ] Gateway token generated from a CSPRNG (`openssl rand -hex 32`) and rotated on compromise by restarting with a new token.
-- [ ] `--trilium-url-allowlist` set to the hostnames your users should legitimately reach, or the default private-IP block left in place.
-- [ ] `/health` exposed internally only (behind the proxy), so external scanners can't fingerprint the service.
-- [ ] Container runs as non-root (the shipped `Dockerfile` already uses `USER node`).
-- [ ] Reverse proxy logs scrubbed of `Authorization` / `X-Trilium-Token` headers if you forward request headers to an APM.
-- [ ] Firewall rules restrict ingress to the proxy host(s).
-- [ ] If `--metrics` is enabled: `/metrics` reachable only from the monitoring network (see [Reverse-proxy hardening](#reverse-proxy-hardening)), and `--metrics-auth=none` used only when that path-level allowlist is in place. Prefer `--metrics-auth=bearer` with a dedicated `--metrics-token` for credential rotation independent of MCP clients.
-
-### What's not (yet) supported
-
-- StreamableHTTP transport (MCP's newer replacement for SSE) — on the roadmap; the routing layer is structured to allow it alongside `/sse`.
-- Rate limiting — handle at the reverse-proxy layer for now.
-- CORS — no browser MCP clients today; add if/when they appear.
-- Per-principal gateway identity (OIDC, JWT) — use reverse-proxy auth (mod_auth_openidc, oauth2-proxy) if you need it.
-- Per-tenant audit logs / metrics — the per-connection `Server` makes this straightforward to add but isn't implemented yet.
+- **Per-principal identity** is available via `--gateway-auth jwt` (see below). When you need to attribute actions to specific users, prefer JWT over a shared bearer token.
 
 ### Troubleshooting
 

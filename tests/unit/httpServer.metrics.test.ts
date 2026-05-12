@@ -36,6 +36,9 @@ function makeConfig(overrides: Partial<Config>): Config {
     metricsEnabled: false,
     metricsAuth: 'gateway',
     metricsTokens: [],
+    corsOrigins: [],
+    rateLimitRps: 0,
+    rateLimitBurst: 0,
     ...overrides,
   };
 }

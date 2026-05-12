@@ -87,6 +87,23 @@ export interface Config {
    * Accepted scrape bearer tokens (only meaningful when `metricsAuth='bearer'`).
    */
   metricsTokens: string[];
+  /**
+   * CORS allowlist of origins (e.g. `https://app.example.com`). Empty disables CORS
+   * entirely. `*` enables wildcard mode (the request Origin is echoed back so
+   * credentialed requests still work — browsers reject `Allow-Origin: *` with
+   * credentials).
+   */
+  corsOrigins: string[];
+  /**
+   * Rate-limit refill rate in requests/sec, applied per remote IP and per
+   * gateway token. `0` disables the in-process limiter (still recommend doing
+   * limiting at the reverse proxy in multi-replica setups).
+   */
+  rateLimitRps: number;
+  /**
+   * Token-bucket burst size — the max requests allowed before refill matters.
+   */
+  rateLimitBurst: number;
 }
 
 interface ConfigFile {
@@ -103,6 +120,9 @@ interface ConfigFile {
   metrics?: boolean;
   metricsAuth?: MetricsAuthMode;
   metricsTokens?: string[];
+  corsOrigins?: string[];
+  rateLimitRps?: number;
+  rateLimitBurst?: number;
 }
 
 interface CliArgs {
@@ -120,6 +140,9 @@ interface CliArgs {
   metrics?: boolean;
   metricsAuth?: string;
   metricsTokens?: string[];
+  corsOrigins?: string[];
+  rateLimitRps?: number;
+  rateLimitBurst?: number;
 }
 
 function parseCliArgs(args: string[]): CliArgs {
@@ -185,6 +208,27 @@ function parseCliArgs(args: string[]): CliArgs {
         break;
       case '--metrics-token':
         if (nextArg) metricsTokens.push(nextArg);
+        i++;
+        break;
+      case '--cors-origin':
+        if (nextArg) {
+          result.corsOrigins ??= [];
+          result.corsOrigins.push(...splitCsv(nextArg));
+        }
+        i++;
+        break;
+      case '--rate-limit-rps':
+        if (nextArg) {
+          const n = Number(nextArg);
+          if (Number.isFinite(n) && n >= 0) result.rateLimitRps = n;
+        }
+        i++;
+        break;
+      case '--rate-limit-burst':
+        if (nextArg) {
+          const n = parseInt(nextArg, 10);
+          if (Number.isInteger(n) && n >= 0) result.rateLimitBurst = n;
+        }
         i++;
         break;
       case '--help':
@@ -266,6 +310,15 @@ Metrics (require --transport http):
   --metrics-token <token>            Accepted scrape bearer token when --metrics-auth=bearer.
                                      Repeatable; supply once per token.
 
+CORS (require --transport http):
+  --cors-origin <origin>             Allowed CORS origin. Repeatable, or supply a comma-
+                                     separated list. Use '*' for wildcard. Off by default.
+
+Rate limiting (require --transport http):
+  --rate-limit-rps <rps>             Sustained refill rate per IP and per gateway token, in
+                                     requests/second. Off by default (0).
+  --rate-limit-burst <n>             Maximum burst before refill matters. Off by default (0).
+
   -h, --help                         Show this help message
 
 Environment Variables:
@@ -282,6 +335,9 @@ Environment Variables:
   TRILIUM_METRICS                    "true" to expose GET /metrics (HTTP transport only)
   TRILIUM_METRICS_AUTH               gateway | bearer | none (default: gateway)
   TRILIUM_METRICS_TOKENS             Comma-separated scrape tokens (for TRILIUM_METRICS_AUTH=bearer)
+  TRILIUM_CORS_ORIGINS               Comma-separated allowed CORS origins. '*' for wildcard.
+  TRILIUM_RATE_LIMIT_RPS             Sustained refill rate per IP and per gateway token (req/s).
+  TRILIUM_RATE_LIMIT_BURST           Maximum burst before refill matters.
 
 Logging:
   LOG_LEVEL                          silent | error | warn | info | debug (default: info)
@@ -306,6 +362,12 @@ Priority (highest to lowest):
 function emptyToUndefined(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   return value.length > 0 ? value : undefined;
+}
+
+function parseNumber(value: string | undefined): number | undefined {
+  if (value === undefined || value === '') return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
 }
 
 function parseBoolean(value: string | undefined): boolean | undefined {
@@ -416,6 +478,24 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.metricsTokens ??
     [];
 
+  const corsOrigins =
+    cli.corsOrigins ??
+    (process.env.TRILIUM_CORS_ORIGINS ? splitCsv(process.env.TRILIUM_CORS_ORIGINS) : undefined) ??
+    file.corsOrigins ??
+    [];
+
+  const rateLimitRps =
+    cli.rateLimitRps ??
+    parseNumber(process.env.TRILIUM_RATE_LIMIT_RPS) ??
+    file.rateLimitRps ??
+    0;
+
+  const rateLimitBurst =
+    cli.rateLimitBurst ??
+    parseNumber(process.env.TRILIUM_RATE_LIMIT_BURST) ??
+    file.rateLimitBurst ??
+    0;
+
   const metricsAuthRaw =
     cli.metricsAuth ?? process.env.TRILIUM_METRICS_AUTH ?? file.metricsAuth ?? undefined;
   let metricsAuth: MetricsAuthMode;
@@ -505,5 +585,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     metricsEnabled,
     metricsAuth,
     metricsTokens,
+    corsOrigins,
+    rateLimitRps,
+    rateLimitBurst,
   };
 }
