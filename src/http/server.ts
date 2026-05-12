@@ -1,12 +1,17 @@
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
 
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
+import { randomUUID } from 'node:crypto';
 
 import { normalizeServerUrl, type Config } from '../config.js';
 import { TriliumClient, TriliumClientError } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
+import { JwtAuth } from './jwtAuth.js';
+import { GatewayPolicy } from './gatewayPolicy.js';
 import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
 import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
 import { MetricsAuth } from './metricsAuth.js';
@@ -34,12 +39,31 @@ interface Session {
   keepAlive: NodeJS.Timeout;
 }
 
+interface StreamableSession {
+  transport: StreamableHTTPServerTransport;
+  mcpServer: McpServer;
+}
+
 export async function startHttp(config: Config, logger: Logger): Promise<HttpServer> {
   const sessions = new Map<string, Session>();
+  const streamableSessions = new Map<string, StreamableSession>();
   const gatewayAuth =
     config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
+  const jwtAuth =
+    config.gatewayAuth === 'jwt'
+      ? new JwtAuth({
+          secrets: config.jwtSecrets,
+          jwksUrl: config.jwtJwksUrl ?? undefined,
+          issuer: config.jwtIssuer ?? undefined,
+          audience: config.jwtAudience ?? undefined,
+          principalClaim: config.jwtPrincipalClaim,
+        })
+      : null;
+  const gatewayPolicy = new GatewayPolicy(config.gatewayAuth, gatewayAuth, jwtAuth);
 
-  const metrics: Metrics | null = config.metricsEnabled ? createMetrics('1.0.0') : null;
+  const metrics: Metrics | null = config.metricsEnabled
+    ? createMetrics('1.0.0', { includePrincipal: config.metricsIncludePrincipal })
+    : null;
   const metricsAuth: MetricsAuth | null = metrics
     ? new MetricsAuth(config.metricsAuth, { gateway: gatewayAuth, bearerTokens: config.metricsTokens })
     : null;
@@ -111,7 +135,7 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
       }
     }
 
-    handleRequest(req, res, config, sessions, gatewayAuth, logger, metrics, metricsAuth).catch((err) => {
+    handleRequest(req, res, config, sessions, streamableSessions, gatewayPolicy, logger, metrics, metricsAuth).catch((err) => {
       logger.error('request_handler_error', {
         method,
         path,
@@ -132,7 +156,12 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
   await new Promise<void>((resolve) => {
     httpServer.listen(config.httpPort, () => {
       const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
-      const auth = config.gatewayAuth === 'bearer' ? `bearer (${config.gatewayTokens.length} token(s))` : 'none';
+      const auth =
+      config.gatewayAuth === 'bearer'
+        ? `bearer (${config.gatewayTokens.length} token(s))`
+        : config.gatewayAuth === 'jwt'
+          ? `jwt (${config.jwtJwksUrl ? 'jwks' : 'hs256'})`
+          : 'none';
       const address = httpServer.address();
       const actualPort = typeof address === 'object' && address ? address.port : config.httpPort;
       logger.info('server_started', {
@@ -153,13 +182,15 @@ async function handleRequest(
   res: ServerResponse,
   config: Config,
   sessions: Map<string, Session>,
-  gatewayAuth: GatewayAuth | null,
+  streamableSessions: Map<string, StreamableSession>,
+  gatewayPolicy: GatewayPolicy,
   logger: Logger,
   metrics: Metrics | null,
   metricsAuth: MetricsAuth | null
 ): Promise<void> {
   const method = req.method ?? 'GET';
   const url = req.url ?? '/';
+  const pathOnly = url.split('?')[0];
 
   if (method === 'GET' && url === '/health') {
     respondJson(res, 200, { status: 'ok' });
@@ -172,7 +203,7 @@ async function handleRequest(
   }
 
   if (method === 'GET' && url === '/sse') {
-    await handleSseConnect(req, res, config, sessions, gatewayAuth, logger, metrics);
+    await handleSseConnect(req, res, config, sessions, gatewayPolicy, logger, metrics);
     return;
   }
 
@@ -181,7 +212,260 @@ async function handleRequest(
     return;
   }
 
+  if (pathOnly === '/mcp') {
+    await handleStreamable(req, res, config, streamableSessions, gatewayPolicy, logger, metrics);
+    return;
+  }
+
   respondJson(res, 404, { error: 'not_found' });
+}
+
+/**
+ * StreamableHTTP transport handler. Single endpoint /mcp supporting GET, POST,
+ * and DELETE; the SDK transport multiplexes init / messages / SSE on it.
+ *
+ * Session lifecycle:
+ *  - First POST with an `initialize` message: validate creds, build a fresh
+ *    transport + MCP server + TriliumClient, register on `onsessioninitialized`.
+ *  - Subsequent requests with MCP-Session-Id: dispatch to the existing
+ *    transport.
+ *  - DELETE with MCP-Session-Id: tears the session down.
+ *
+ * Per-tenant isolation, gateway auth, SSRF guard, and rate-limit policy mirror
+ * the SSE path so operators get one consistent security surface across
+ * transports.
+ */
+async function handleStreamable(
+  req: IncomingMessage,
+  res: ServerResponse,
+  config: Config,
+  streamableSessions: Map<string, StreamableSession>,
+  gatewayPolicy: GatewayPolicy,
+  logger: Logger,
+  metrics: Metrics | null
+): Promise<void> {
+  const method = req.method ?? 'GET';
+  const sessionId = firstHeader(req.headers['mcp-session-id']);
+
+  const recordFailure = (reason: string): void => {
+    metrics?.sseConnectFailuresTotal.inc({ reason });
+  };
+
+  // 1. Gateway auth gate — applies to every method.
+  const authResult = await gatewayPolicy.authorize(req);
+  if (!authResult.authorized) {
+    logger.warn('unauthorized', {
+      remote: req.socket.remoteAddress,
+      transport: 'streamable',
+      reason: authResult.reason,
+    });
+    recordFailure('unauthorized');
+    respondJson(res, 401, { error: 'unauthorized' });
+    return;
+  }
+  const principal = authResult.principal;
+
+  // 2. Existing-session path — fast route for any method that carries a
+  // session id we already know about.
+  if (sessionId) {
+    const existing = streamableSessions.get(sessionId);
+    if (existing) {
+      try {
+        if (method === 'POST') {
+          const parsedBody = await readJsonBody(req, config.maxPostBytes);
+          await existing.transport.handleRequest(req, res, parsedBody.parsed);
+        } else {
+          await existing.transport.handleRequest(req, res);
+        }
+      } catch (err) {
+        if (err instanceof PayloadTooLargeError) {
+          respondJson(res, 413, { error: 'payload_too_large' });
+          return;
+        }
+        if (err instanceof BadJsonError) {
+          respondJson(res, 400, { error: 'invalid_json' });
+          return;
+        }
+        throw err;
+      }
+      return;
+    }
+    // Unknown session id — distinguish from "no session id".
+    respondJson(res, 404, { error: 'unknown_session' });
+    return;
+  }
+
+  // 3. No session id. Only a POST initialize is allowed at this point; the
+  // transport itself otherwise rejects with a 400.
+  if (method !== 'POST') {
+    respondJson(res, 400, { error: 'missing_session_id' });
+    return;
+  }
+
+  // 3a. Read the body so we can: classify it as initialize, run auth/SSRF
+  // checks, then re-hand it to the transport via parsedBody.
+  let parsedBody: unknown;
+  try {
+    parsedBody = (await readJsonBody(req, config.maxPostBytes)).parsed;
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      respondJson(res, 413, { error: 'payload_too_large' });
+      return;
+    }
+    if (err instanceof BadJsonError) {
+      respondJson(res, 400, { error: 'invalid_json' });
+      return;
+    }
+    throw err;
+  }
+  if (!isInitializeRequest(parsedBody)) {
+    respondJson(res, 400, { error: 'missing_session_id' });
+    return;
+  }
+
+  // 3b. Resolve backend creds (single- vs multi-tenant), same rules as /sse.
+  let clientUrlRaw: string;
+  let clientToken: string;
+  if (config.multiTenant) {
+    const headerUrl = firstHeader(req.headers['x-trilium-url']);
+    const headerToken = firstHeader(req.headers['x-trilium-token']);
+    if (!headerUrl || !headerToken) {
+      logger.warn('missing_trilium_credentials', { remote: req.socket.remoteAddress });
+      recordFailure('missing_trilium_credentials');
+      respondJson(res, 401, { error: 'missing_trilium_credentials' });
+      return;
+    }
+    clientUrlRaw = headerUrl;
+    clientToken = headerToken;
+    try {
+      await assertUrlIsSafe(clientUrlRaw, {
+        allowlist: config.urlAllowlist,
+        allowPrivate: config.allowPrivateUrls,
+      });
+    } catch (err) {
+      if (err instanceof UrlGuardError) {
+        logger.warn('url_rejected', { reason: err.reason });
+        recordFailure('url_rejected');
+        respondJson(res, 400, { error: 'url_rejected', reason: err.reason });
+        return;
+      }
+      throw err;
+    }
+  } else {
+    if (!config.triliumUrl || !config.triliumToken) {
+      logger.error('server_misconfigured', {});
+      recordFailure('server_misconfigured');
+      respondJson(res, 500, { error: 'server_misconfigured' });
+      return;
+    }
+    clientUrlRaw = config.triliumUrl;
+    clientToken = config.triliumToken;
+  }
+
+  const triliumUrl = normalizeServerUrl(clientUrlRaw);
+  const triliumHost = safeHostname(triliumUrl);
+  const client = new TriliumClient(triliumUrl, clientToken);
+  try {
+    await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
+  } catch (err) {
+    if (err instanceof TriliumClientError) {
+      const status = err.status === 401 || err.status === 403 ? 401 : 502;
+      logger.warn('trilium_auth_failed', { host: triliumHost, status: err.status, code: err.code });
+      recordFailure('trilium_auth_failed');
+      respondJson(res, status, {
+        error: 'trilium_auth_failed',
+        status: err.status,
+        code: err.code,
+      });
+      return;
+    }
+    if (err instanceof Error && err.message === 'timeout') {
+      logger.warn('trilium_validate_timeout', { host: triliumHost });
+      recordFailure('trilium_validate_timeout');
+      respondJson(res, 504, { error: 'trilium_validate_timeout' });
+      return;
+    }
+    logger.warn('trilium_unreachable', {
+      host: triliumHost,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    recordFailure('trilium_unreachable');
+    respondJson(res, 502, { error: 'trilium_unreachable' });
+    return;
+  }
+
+  // 3c. Build a fresh MCP server + transport for this new session. We don't
+  // know the session id yet — it's generated by the transport on init — so
+  // start with a placeholder; logger correlation comes from onsessioninitialized.
+  const mcpServer = buildMcpServer(client, {
+    logger,
+    sessionId: 'streamable-pending',
+    metrics: metrics ?? undefined,
+    principal: principal ?? undefined,
+  });
+
+  let registeredId: string | null = null;
+  const transport: StreamableHTTPServerTransport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(),
+    onsessioninitialized: (sid) => {
+      registeredId = sid;
+      streamableSessions.set(sid, { transport, mcpServer });
+      logger.info('mcp_session_opened', {
+        session: sid,
+        host: triliumHost,
+        transport: 'streamable',
+        principal,
+      });
+      if (metrics) {
+        metrics.sseSessions.inc();
+        metrics.sseConnectsTotal.inc();
+      }
+    },
+    onsessionclosed: (sid) => {
+      const removed = streamableSessions.delete(sid);
+      if (removed) {
+        logger.info('mcp_session_closed', { session: sid, transport: 'streamable' });
+        if (metrics) {
+          metrics.sseSessions.dec();
+          metrics.sseClosesTotal.inc();
+        }
+      }
+    },
+  });
+  // The transport's own close — fires when the underlying request stream ends
+  // for the standalone GET stream. The session may still be live across
+  // subsequent requests, so we ONLY clean up if onsessionclosed wasn't already
+  // the path that removed us.
+  transport.onclose = () => {
+    if (registeredId && streamableSessions.has(registeredId)) {
+      streamableSessions.delete(registeredId);
+      logger.info('mcp_session_closed', { session: registeredId, transport: 'streamable' });
+      if (metrics) {
+        metrics.sseSessions.dec();
+        metrics.sseClosesTotal.inc();
+      }
+    }
+  };
+
+  try {
+    await mcpServer.connect(transport);
+    await transport.handleRequest(req, res, parsedBody);
+  } catch (err) {
+    logger.error('streamable_init_failed', {
+      err: err instanceof Error ? err.message : String(err),
+    });
+    recordFailure('sse_connect_failed');
+    if (registeredId) streamableSessions.delete(registeredId);
+    if (!res.headersSent) {
+      respondJson(res, 500, { error: 'streamable_init_failed' });
+    } else {
+      try {
+        res.end();
+      } catch {
+        /* ignore */
+      }
+    }
+  }
 }
 
 function handleMetrics(
@@ -212,7 +496,7 @@ async function handleSseConnect(
   res: ServerResponse,
   config: Config,
   sessions: Map<string, Session>,
-  gatewayAuth: GatewayAuth | null,
+  gatewayPolicy: GatewayPolicy,
   logger: Logger,
   metrics: Metrics | null
 ): Promise<void> {
@@ -221,12 +505,17 @@ async function handleSseConnect(
   };
 
   // 1. Gateway auth gate
-  if (gatewayAuth && !gatewayAuth.isAuthorized(req)) {
-    logger.warn('unauthorized', { remote: req.socket.remoteAddress });
+  const authResult = await gatewayPolicy.authorize(req);
+  if (!authResult.authorized) {
+    logger.warn('unauthorized', {
+      remote: req.socket.remoteAddress,
+      reason: authResult.reason,
+    });
     recordFailure('unauthorized');
     respondJson(res, 401, { error: 'unauthorized' });
     return;
   }
+  const principal = authResult.principal;
 
   // 2. Resolve backend creds. In multi-tenant mode, require BOTH X-Trilium-Url
   // and X-Trilium-Token from the client as an atomic pair — no fallback to
@@ -311,7 +600,12 @@ async function handleSseConnect(
   // 5. Create the per-connection MCP Server + SSE transport.
   const transport = new SSEServerTransport('/message', res);
   const sessionId = transport.sessionId;
-  const mcpServer = buildMcpServer(client, { logger, sessionId, metrics: metrics ?? undefined });
+  const mcpServer = buildMcpServer(client, {
+    logger,
+    sessionId,
+    metrics: metrics ?? undefined,
+    principal: principal ?? undefined,
+  });
 
   // 6. Register the session BEFORE awaiting connect(). server.connect() calls
   // transport.start() which writes the endpoint event; a very fast client
@@ -347,7 +641,7 @@ async function handleSseConnect(
 
   try {
     await mcpServer.connect(transport);
-    logger.info('sse_connected', { session: sessionId, host: triliumHost });
+    logger.info('sse_connected', { session: sessionId, host: triliumHost, principal });
     if (metrics) {
       metrics.sseSessions.inc();
       metrics.sseConnectsTotal.inc();

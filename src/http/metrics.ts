@@ -245,6 +245,13 @@ export interface Metrics {
   httpRequestDuration: Histogram;
   toolCallsTotal: Counter;
   toolCallDuration: Histogram;
+  /**
+   * Opt-in per-principal counter. Only declared when
+   * `createMetrics(version, { includePrincipal: true })` — keeps cardinality
+   * bounded by default (one series-tuple per tool×ok×error instead of times
+   * principals).
+   */
+  toolCallsByPrincipalTotal?: Counter;
   sseSessions: Gauge;
   sseConnectsTotal: Counter;
   sseClosesTotal: Counter;
@@ -255,10 +262,19 @@ export interface Metrics {
   collectProcess(): void;
 }
 
+export interface CreateMetricsOptions {
+  /**
+   * If true, declare per-principal counters. Only enable when you trust the
+   * principal namespace to be bounded (e.g., a known user list from your IdP).
+   * Cardinality scales as principals × tools × outcomes.
+   */
+  includePrincipal?: boolean;
+}
+
 const HTTP_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10];
 const TOOL_BUCKETS = [0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60];
 
-export function createMetrics(version: string): Metrics {
+export function createMetrics(version: string, opts: CreateMetricsOptions = {}): Metrics {
   const registry = new Registry();
 
   const buildInfo = registry.register(
@@ -299,6 +315,16 @@ export function createMetrics(version: string): Metrics {
       TOOL_BUCKETS
     )
   );
+
+  const toolCallsByPrincipalTotal = opts.includePrincipal
+    ? registry.register(
+        new Counter(
+          'triliumnext_mcp_tool_calls_by_principal_total',
+          'Per-principal tool invocation counter. Cardinality scales with principals × tools.',
+          ['principal', 'tool', 'ok', 'error']
+        )
+      )
+    : undefined;
 
   const sseSessions = registry.register(
     new Gauge('triliumnext_mcp_sse_sessions', 'Currently open SSE sessions.')
@@ -341,6 +367,7 @@ export function createMetrics(version: string): Metrics {
     httpRequestDuration,
     toolCallsTotal,
     toolCallDuration,
+    toolCallsByPrincipalTotal,
     sseSessions,
     sseConnectsTotal,
     sseClosesTotal,
@@ -357,5 +384,6 @@ export function normalizeRoute(method: string, path: string): string {
   if (path === '/sse') return '/sse';
   if (path === '/metrics') return '/metrics';
   if (path === '/message' || path.startsWith('/message')) return '/message';
+  if (path === '/mcp' || path.startsWith('/mcp?')) return '/mcp';
   return method === 'GET' ? 'GET:unknown' : 'unknown';
 }

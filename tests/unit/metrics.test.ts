@@ -199,6 +199,31 @@ describe('createMetrics — declared surface', () => {
   });
 });
 
+describe('createMetrics — opt-in per-principal counter', () => {
+  it('is absent by default', () => {
+    const m = createMetrics('1.0.0');
+    expect(m.toolCallsByPrincipalTotal).toBeUndefined();
+    const body = m.registry.render();
+    expect(body).not.toContain('triliumnext_mcp_tool_calls_by_principal_total');
+  });
+
+  it('is declared when includePrincipal=true', () => {
+    const m = createMetrics('1.0.0', { includePrincipal: true });
+    expect(m.toolCallsByPrincipalTotal).toBeDefined();
+    m.toolCallsByPrincipalTotal!.inc({
+      principal: 'alice@example.com',
+      tool: 'search_notes',
+      ok: 'true',
+      error: 'none',
+    });
+    const body = m.registry.render();
+    expect(body).toContain('# HELP triliumnext_mcp_tool_calls_by_principal_total');
+    expect(body).toContain(
+      'triliumnext_mcp_tool_calls_by_principal_total{principal="alice@example.com",tool="search_notes",ok="true",error="none"} 1'
+    );
+  });
+});
+
 describe('normalizeRoute', () => {
   it('returns canonical names for known paths', () => {
     expect(normalizeRoute('GET', '/health')).toBe('/health');

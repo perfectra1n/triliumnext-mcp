@@ -29,6 +29,11 @@ export interface McpServerContext {
   logger: Logger;
   sessionId: string;
   metrics?: Metrics;
+  /**
+   * Authenticated principal id (from `gatewayAuth=jwt`). Threaded into
+   * tool_call audit logs and, when enabled, into per-tenant metric labels.
+   */
+  principal?: string;
 }
 
 /**
@@ -38,7 +43,7 @@ export interface McpServerContext {
  * state from other tenants.
  */
 export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Server {
-  const { logger, sessionId, metrics } = ctx;
+  const { logger, sessionId, metrics, principal } = ctx;
   const server = new Server(
     {
       name: 'triliumnext-mcp',
@@ -65,7 +70,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   ];
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
-    logger.info('list_tools', { session: sessionId, count: allTools.length });
+    logger.info('list_tools', { session: sessionId, principal, count: allTools.length });
     return { tools: allTools };
   });
 
@@ -77,6 +82,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     const durationMs = performance.now() - t0;
     logger.info('tool_call', {
       session: sessionId,
+      principal,
       tool,
       duration_ms: Math.round(durationMs),
       ok: outcome.ok,
@@ -86,16 +92,20 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       message: outcome.message,
     });
     if (metrics) {
+      const okLabel = outcome.ok ? 'true' : 'false';
       const errorLabel = outcome.ok ? 'none' : (outcome.error ?? 'unknown');
-      metrics.toolCallsTotal.inc({ tool, ok: outcome.ok ? 'true' : 'false', error: errorLabel });
+      metrics.toolCallsTotal.inc({ tool, ok: okLabel, error: errorLabel });
       metrics.toolCallDuration.observe({ tool }, durationMs / 1000);
+      if (metrics.toolCallsByPrincipalTotal && principal) {
+        metrics.toolCallsByPrincipalTotal.inc({ principal, tool, ok: okLabel, error: errorLabel });
+      }
     }
   };
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const t0 = performance.now();
-    logger.debug('tool_call_args', { session: sessionId, tool: name, args: redactArgs(args) });
+    logger.debug('tool_call_args', { session: sessionId, principal, tool: name, args: redactArgs(args) });
 
     try {
       let result: {

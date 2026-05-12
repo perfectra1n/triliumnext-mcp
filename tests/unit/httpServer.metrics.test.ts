@@ -36,9 +36,15 @@ function makeConfig(overrides: Partial<Config>): Config {
     metricsEnabled: false,
     metricsAuth: 'gateway',
     metricsTokens: [],
+    metricsIncludePrincipal: false,
     corsOrigins: [],
     rateLimitRps: 0,
     rateLimitBurst: 0,
+    jwtSecrets: [],
+    jwtJwksUrl: null,
+    jwtIssuer: null,
+    jwtAudience: null,
+    jwtPrincipalClaim: 'sub',
     ...overrides,
   };
 }

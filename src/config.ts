@@ -22,7 +22,7 @@ export function normalizeServerUrl(url: string): string {
   return normalized;
 }
 
-export type GatewayAuthMode = 'none' | 'bearer';
+export type GatewayAuthMode = 'none' | 'bearer' | 'jwt';
 export type MetricsAuthMode = 'gateway' | 'bearer' | 'none';
 
 export interface Config {
@@ -88,6 +88,12 @@ export interface Config {
    */
   metricsTokens: string[];
   /**
+   * If true, declare an opt-in `triliumnext_mcp_tool_calls_by_principal_total`
+   * counter labeled by JWT principal. Only enable with `gatewayAuth='jwt'` and
+   * a bounded principal namespace — cardinality scales as principals × tools.
+   */
+  metricsIncludePrincipal: boolean;
+  /**
    * CORS allowlist of origins (e.g. `https://app.example.com`). Empty disables CORS
    * entirely. `*` enables wildcard mode (the request Origin is echoed back so
    * credentialed requests still work — browsers reject `Allow-Origin: *` with
@@ -104,6 +110,16 @@ export interface Config {
    * Token-bucket burst size — the max requests allowed before refill matters.
    */
   rateLimitBurst: number;
+  /**
+   * JWT-mode gateway auth knobs (only meaningful when `gatewayAuth='jwt'`).
+   * At least one of `jwtSecrets` or `jwtJwksUrl` must be set. Issuer/audience
+   * are optional; the principal claim defaults to `sub`.
+   */
+  jwtSecrets: string[];
+  jwtJwksUrl: string | null;
+  jwtIssuer: string | null;
+  jwtAudience: string | null;
+  jwtPrincipalClaim: string;
 }
 
 interface ConfigFile {
@@ -120,9 +136,15 @@ interface ConfigFile {
   metrics?: boolean;
   metricsAuth?: MetricsAuthMode;
   metricsTokens?: string[];
+  metricsIncludePrincipal?: boolean;
   corsOrigins?: string[];
   rateLimitRps?: number;
   rateLimitBurst?: number;
+  jwtSecrets?: string[];
+  jwtJwksUrl?: string;
+  jwtIssuer?: string;
+  jwtAudience?: string;
+  jwtPrincipalClaim?: string;
 }
 
 interface CliArgs {
@@ -140,15 +162,22 @@ interface CliArgs {
   metrics?: boolean;
   metricsAuth?: string;
   metricsTokens?: string[];
+  metricsIncludePrincipal?: boolean;
   corsOrigins?: string[];
   rateLimitRps?: number;
   rateLimitBurst?: number;
+  jwtSecrets?: string[];
+  jwtJwksUrl?: string;
+  jwtIssuer?: string;
+  jwtAudience?: string;
+  jwtPrincipalClaim?: string;
 }
 
 function parseCliArgs(args: string[]): CliArgs {
   const result: CliArgs = {};
   const gatewayTokens: string[] = [];
   const metricsTokens: string[] = [];
+  const jwtSecrets: string[] = [];
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -210,6 +239,9 @@ function parseCliArgs(args: string[]): CliArgs {
         if (nextArg) metricsTokens.push(nextArg);
         i++;
         break;
+      case '--metrics-include-principal':
+        result.metricsIncludePrincipal = true;
+        break;
       case '--cors-origin':
         if (nextArg) {
           result.corsOrigins ??= [];
@@ -231,6 +263,26 @@ function parseCliArgs(args: string[]): CliArgs {
         }
         i++;
         break;
+      case '--jwt-secret':
+        if (nextArg) jwtSecrets.push(nextArg);
+        i++;
+        break;
+      case '--jwt-jwks-url':
+        result.jwtJwksUrl = nextArg;
+        i++;
+        break;
+      case '--jwt-issuer':
+        result.jwtIssuer = nextArg;
+        i++;
+        break;
+      case '--jwt-audience':
+        result.jwtAudience = nextArg;
+        i++;
+        break;
+      case '--jwt-principal-claim':
+        result.jwtPrincipalClaim = nextArg;
+        i++;
+        break;
       case '--help':
       case '-h':
         result.help = true;
@@ -243,6 +295,9 @@ function parseCliArgs(args: string[]): CliArgs {
   }
   if (metricsTokens.length > 0) {
     result.metricsTokens = metricsTokens;
+  }
+  if (jwtSecrets.length > 0) {
+    result.jwtSecrets = jwtSecrets;
   }
   return result;
 }
@@ -291,8 +346,8 @@ Options:
 Multi-tenant HTTP options (require --transport http):
   --multi-tenant                     Each SSE client supplies its own Trilium URL + token
                                      via X-Trilium-Url and X-Trilium-Token headers
-  --gateway-auth <mode>              Gateway auth mode: none or bearer (default: bearer when
-                                     multi-tenant is enabled, none otherwise)
+  --gateway-auth <mode>              Gateway auth mode: none, bearer, or jwt
+                                     (default: bearer when multi-tenant is enabled, none otherwise)
   --gateway-token <token>            Accepted bearer token. Repeatable; supply once per token.
   --trilium-url-allowlist <hosts>    Comma-separated hostnames permitted in X-Trilium-Url.
                                      Supports suffix match (example.com matches a.example.com).
@@ -309,6 +364,9 @@ Metrics (require --transport http):
                                      (default: gateway, which reuses --gateway-token)
   --metrics-token <token>            Accepted scrape bearer token when --metrics-auth=bearer.
                                      Repeatable; supply once per token.
+  --metrics-include-principal        Declare a per-principal tool_calls counter. Cardinality
+                                     scales with principals × tools — only enable when the
+                                     principal namespace is bounded (typical JWT setups).
 
 CORS (require --transport http):
   --cors-origin <origin>             Allowed CORS origin. Repeatable, or supply a comma-
@@ -318,6 +376,13 @@ Rate limiting (require --transport http):
   --rate-limit-rps <rps>             Sustained refill rate per IP and per gateway token, in
                                      requests/second. Off by default (0).
   --rate-limit-burst <n>             Maximum burst before refill matters. Off by default (0).
+
+JWT gateway auth (--gateway-auth jwt):
+  --jwt-secret <secret>              HS256 shared secret (repeatable for rotation).
+  --jwt-jwks-url <url>               JWKS URL for asymmetric verification (RS256/ES256/EdDSA).
+  --jwt-issuer <iss>                 Required iss claim (optional).
+  --jwt-audience <aud>               Required aud claim (optional).
+  --jwt-principal-claim <name>       Which claim names the user. Default: sub.
 
   -h, --help                         Show this help message
 
@@ -335,9 +400,15 @@ Environment Variables:
   TRILIUM_METRICS                    "true" to expose GET /metrics (HTTP transport only)
   TRILIUM_METRICS_AUTH               gateway | bearer | none (default: gateway)
   TRILIUM_METRICS_TOKENS             Comma-separated scrape tokens (for TRILIUM_METRICS_AUTH=bearer)
+  TRILIUM_METRICS_INCLUDE_PRINCIPAL  "true" to expose per-principal tool_calls counter (JWT only)
   TRILIUM_CORS_ORIGINS               Comma-separated allowed CORS origins. '*' for wildcard.
   TRILIUM_RATE_LIMIT_RPS             Sustained refill rate per IP and per gateway token (req/s).
   TRILIUM_RATE_LIMIT_BURST           Maximum burst before refill matters.
+  TRILIUM_JWT_SECRETS                Comma-separated HS256 shared secrets.
+  TRILIUM_JWT_JWKS_URL               JWKS URL for asymmetric verification.
+  TRILIUM_JWT_ISSUER                 Required iss claim.
+  TRILIUM_JWT_AUDIENCE               Required aud claim.
+  TRILIUM_JWT_PRINCIPAL_CLAIM        Claim name carrying the principal (default: sub).
 
 Logging:
   LOG_LEVEL                          silent | error | warn | info | debug (default: info)
@@ -444,7 +515,7 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   const gatewayAuthRaw =
     cli.gatewayAuth ?? process.env.TRILIUM_GATEWAY_AUTH ?? file.gatewayAuth ?? undefined;
   let gatewayAuth: GatewayAuthMode;
-  if (gatewayAuthRaw === 'bearer' || gatewayAuthRaw === 'none') {
+  if (gatewayAuthRaw === 'bearer' || gatewayAuthRaw === 'none' || gatewayAuthRaw === 'jwt') {
     gatewayAuth = gatewayAuthRaw;
   } else {
     // Default: require bearer when multi-tenant is on, otherwise keep legacy unauth behavior
@@ -478,6 +549,12 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.metricsTokens ??
     [];
 
+  const metricsIncludePrincipal =
+    cli.metricsIncludePrincipal ??
+    parseBoolean(process.env.TRILIUM_METRICS_INCLUDE_PRINCIPAL) ??
+    file.metricsIncludePrincipal ??
+    false;
+
   const corsOrigins =
     cli.corsOrigins ??
     (process.env.TRILIUM_CORS_ORIGINS ? splitCsv(process.env.TRILIUM_CORS_ORIGINS) : undefined) ??
@@ -495,6 +572,36 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     parseNumber(process.env.TRILIUM_RATE_LIMIT_BURST) ??
     file.rateLimitBurst ??
     0;
+
+  const jwtSecrets =
+    cli.jwtSecrets ??
+    (process.env.TRILIUM_JWT_SECRETS ? splitCsv(process.env.TRILIUM_JWT_SECRETS) : undefined) ??
+    file.jwtSecrets ??
+    [];
+
+  const jwtJwksUrl =
+    cli.jwtJwksUrl ??
+    emptyToUndefined(process.env.TRILIUM_JWT_JWKS_URL) ??
+    file.jwtJwksUrl ??
+    null;
+
+  const jwtIssuer =
+    cli.jwtIssuer ??
+    emptyToUndefined(process.env.TRILIUM_JWT_ISSUER) ??
+    file.jwtIssuer ??
+    null;
+
+  const jwtAudience =
+    cli.jwtAudience ??
+    emptyToUndefined(process.env.TRILIUM_JWT_AUDIENCE) ??
+    file.jwtAudience ??
+    null;
+
+  const jwtPrincipalClaim =
+    cli.jwtPrincipalClaim ??
+    emptyToUndefined(process.env.TRILIUM_JWT_PRINCIPAL_CLAIM) ??
+    file.jwtPrincipalClaim ??
+    'sub';
 
   const metricsAuthRaw =
     cli.metricsAuth ?? process.env.TRILIUM_METRICS_AUTH ?? file.metricsAuth ?? undefined;
@@ -541,6 +648,14 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     process.exit(1);
   }
 
+  // JWT auth needs at least one verifier configured.
+  if (gatewayAuth === 'jwt' && jwtSecrets.length === 0 && !jwtJwksUrl) {
+    console.error(
+      'Error: --gateway-auth jwt requires at least one --jwt-secret (HS256) or --jwt-jwks-url (RS256/ES256).'
+    );
+    process.exit(1);
+  }
+
   // Metrics validation.
   let metricsEnabled = metricsEnabledRaw;
   if (metricsEnabled && transport !== 'http') {
@@ -562,6 +677,14 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
         'Falling back to --metrics-auth=none (the /metrics endpoint will be open).'
     );
     metricsAuth = 'none';
+  }
+  if (metricsEnabled && metricsAuth === 'gateway' && gatewayAuth === 'jwt') {
+    console.error(
+      'Error: --metrics-auth=gateway is incompatible with --gateway-auth=jwt. ' +
+        'Prometheus typically ships a static bearer token; use --metrics-auth=bearer ' +
+        'with --metrics-token, or --metrics-auth=none.'
+    );
+    process.exit(1);
   }
 
   const triliumUrl = multiTenant
@@ -585,8 +708,14 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     metricsEnabled,
     metricsAuth,
     metricsTokens,
+    metricsIncludePrincipal,
     corsOrigins,
     rateLimitRps,
     rateLimitBurst,
+    jwtSecrets,
+    jwtJwksUrl,
+    jwtIssuer,
+    jwtAudience,
+    jwtPrincipalClaim,
   };
 }

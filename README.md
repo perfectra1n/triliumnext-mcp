@@ -16,6 +16,9 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
   - [Quick start (Docker)](#quick-start-docker) / [(local)](#quick-start-local)
   - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses) · [Request body size limits](#request-body-size-limits)
   - [Connecting clients](#connecting-clients) — Claude Desktop, Claude Code, SDK
+  - [JWT / OIDC gateway auth](#jwt--oidc-gateway-auth) · [CORS](#cors) · [Rate limiting](#rate-limiting)
+  - [StreamableHTTP transport](#streamablehttp-transport) — newer MCP transport alongside `/sse`
+  - [Per-tenant audit + metrics](#per-tenant-audit--metrics)
   - [SSRF configuration](#ssrf-configuration) · [Reverse-proxy](#reverse-proxy-tls-termination)
   - [Security model](#security-model) · [Troubleshooting](#troubleshooting)
 - [Debugging with MCP Inspector](#debugging-with-mcp-inspector)
@@ -31,7 +34,9 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - **Four content modes on `write_note`** — metadata, replace, append, and edit (search/replace or unified diff)
 - **Markdown support** — write in markdown, stored as HTML automatically
 - **Image-aware content retrieval** — `get_note` with `include_content=true` returns embedded images as visual content blocks
-- Support for both STDIO and HTTP (SSE) transports, including **multi-tenant SSE mode** where each client brings its own Trilium URL + ETAPI token
+- Support for **STDIO**, **HTTP/SSE**, and **StreamableHTTP** transports, including **multi-tenant** mode where each client brings its own Trilium URL + ETAPI token
+- **Pluggable gateway auth** — none, shared-secret bearer, or **JWT/OIDC** (HS256 secrets + JWKS for RS256/ES256/EdDSA)
+- **CORS** for browser-based MCP clients, **in-process rate limiting** per IP + per gateway token, and **Prometheus metrics** with optional per-principal labels
 - Flexible configuration via CLI, environment variables, or config file
 - TypeScript with full type safety
 
@@ -715,6 +720,138 @@ const client = new Client({ name: 'my-app', version: '1.0.0' });
 await client.connect(transport);
 ```
 
+### StreamableHTTP transport
+
+In addition to the older HTTP+SSE transport (`GET /sse` + `POST /message`), this server exposes the newer **StreamableHTTP** transport at `GET|POST|DELETE /mcp` on the same port. StreamableHTTP is the direction MCP is heading — single endpoint, session id in a header instead of a query string, optional resumability via Last-Event-ID. Both transports run side-by-side; clients can pick whichever the SDK they ship supports.
+
+**Initialize handshake (POST /mcp):**
+
+```bash
+curl -X POST https://mcp.example.com/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "X-Trilium-Url: https://notes.example.com" \
+  -H "X-Trilium-Token: $ETAPI_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize",
+       "params":{"protocolVersion":"2024-11-05","capabilities":{},
+                 "clientInfo":{"name":"my-app","version":"1.0.0"}}}'
+```
+
+The response carries an `MCP-Session-Id` header. Subsequent requests echo it back:
+
+```bash
+curl -X POST https://mcp.example.com/mcp \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "MCP-Session-Id: <sid>" \
+  -H "Content-Type: application/json" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+```
+
+`DELETE /mcp` with the session id closes the session cleanly. The gateway-auth / SSRF / rate-limit / Trilium-validation pipeline is identical to `/sse` — switching transports never changes the security surface.
+
+**TypeScript SDK:**
+
+```ts
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+
+const transport = new StreamableHTTPClientTransport(new URL('https://mcp.example.com/mcp'), {
+  requestInit: {
+    headers: {
+      Authorization: `Bearer ${TOKEN}`,
+      'X-Trilium-Url': 'https://notes.example.com',
+      'X-Trilium-Token': ETAPI_TOKEN,
+    },
+  },
+});
+const client = new Client({ name: 'my-app', version: '1.0.0' });
+await client.connect(transport);
+```
+
+### JWT / OIDC gateway auth
+
+For per-user identity, use `--gateway-auth jwt` instead of `bearer`. Tokens are validated for signature, expiration (`exp`), not-before (`nbf`), and (optionally) issuer + audience. The authenticated **principal claim** (default `sub`) is threaded into every audit log line and — opt-in — into metric labels.
+
+**HS256 shared secret(s):**
+
+```bash
+node dist/index.js \
+  --transport http \
+  --multi-tenant \
+  --gateway-auth jwt \
+  --jwt-secret "$JWT_SHARED_SECRET" \
+  --jwt-issuer "https://idp.example.com" \
+  --jwt-audience "mcp-gateway"
+```
+
+`--jwt-secret` is repeatable so you can roll secrets: deploy the new one alongside the old, then drop the old once all issuers have rotated.
+
+**RS256 / ES256 / EdDSA via JWKS:**
+
+```bash
+node dist/index.js \
+  --transport http --multi-tenant \
+  --gateway-auth jwt \
+  --jwt-jwks-url "https://idp.example.com/.well-known/jwks.json" \
+  --jwt-issuer "https://idp.example.com" \
+  --jwt-audience "mcp-gateway"
+```
+
+The JWKS URL is fetched on demand and cached; key rotation works automatically as the IdP publishes new keys.
+
+**Customize the principal claim:**
+
+```bash
+--jwt-principal-claim email   # use the email claim instead of sub
+```
+
+Env equivalents: `TRILIUM_JWT_SECRETS` (CSV), `TRILIUM_JWT_JWKS_URL`, `TRILIUM_JWT_ISSUER`, `TRILIUM_JWT_AUDIENCE`, `TRILIUM_JWT_PRINCIPAL_CLAIM`. Validation: `--gateway-auth jwt` requires at least one secret OR a JWKS URL, else startup fails.
+
+**Algorithms accepted (default set):** `HS256 HS384 HS512 RS256 RS384 RS512 ES256 ES384 EdDSA`. `alg=none` is always rejected.
+
+### CORS
+
+Off by default. For browser-based clients, allow specific origins:
+
+```bash
+--cors-origin https://app.example.com --cors-origin https://admin.example.com
+# or wildcard (echoes Origin so credentials still work):
+--cors-origin '*'
+```
+
+Env: `TRILIUM_CORS_ORIGINS=https://a.example.com,https://b.example.com`. Preflight (OPTIONS) responses allow `Authorization`, `X-Trilium-Url`, `X-Trilium-Token`, `MCP-Session-Id`, and `Content-Type` by default. The server never emits literal `Allow-Origin: *` even in wildcard mode — it always echoes the request `Origin`, because browsers reject wildcards with credentials.
+
+### Rate limiting
+
+In-process token-bucket limiter, applied per remote IP **and** per gateway bearer/JWT token (whichever appears in `Authorization`). Both axes are enforced independently — exceeding either limit returns `429 rate_limited` with a `Retry-After` header.
+
+```bash
+--rate-limit-rps 10 --rate-limit-burst 30
+```
+
+Env: `TRILIUM_RATE_LIMIT_RPS`, `TRILIUM_RATE_LIMIT_BURST`. `/health` is never rate-limited (cheap liveness). `/metrics` is rate-limited like everything else.
+
+This is in-process, not a Redis-backed distributed limiter — multi-replica deployments should also limit at the reverse proxy, with this server's limits as defense-in-depth.
+
+### Per-tenant audit + metrics
+
+With `--gateway-auth jwt`, every audit log line carries the authenticated `principal` field — both `tool_call` and `mcp_session_opened`/`sse_connected` events. That gives you per-user tool usage in your log shipper without any extra work.
+
+For Prometheus, the per-principal counter is **opt-in** for cardinality safety:
+
+```bash
+--metrics --metrics-include-principal
+```
+
+Env: `TRILIUM_METRICS_INCLUDE_PRINCIPAL=true`. When on, a new series appears:
+
+```
+# HELP triliumnext_mcp_tool_calls_by_principal_total Per-principal tool invocation counter…
+# TYPE triliumnext_mcp_tool_calls_by_principal_total counter
+triliumnext_mcp_tool_calls_by_principal_total{principal="alice@example.com",tool="search_notes",ok="true",error="none"} 12
+```
+
+Cardinality scales as principals × tools × outcomes. Only enable when your principal namespace is bounded (e.g., a known IdP user list). The base `tool_calls_total` series stays principal-free and is always safe to enable.
+
 ### SSRF configuration
 
 | Flag | Behavior |
@@ -806,7 +943,7 @@ Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Tril
 - **Backend auth** (which Trilium to talk to) is each client's own ETAPI token. It's only ever used to construct that client's `TriliumClient`; it's never logged.
 - **Creds are validated at connect time** with a 10-second timeout, so a bad or slow Trilium target fails the SSE handshake instead of hanging the connection.
 - **No TLS in-process.** Use a reverse proxy. The server listens on plain HTTP and expects to run behind one.
-- **Per-principal identity** is available via `--gateway-auth jwt` (see below). When you need to attribute actions to specific users, prefer JWT over a shared bearer token.
+- **Per-principal identity** is available via `--gateway-auth jwt` ([above](#jwt--oidc-gateway-auth)). When you need to attribute actions to specific users, prefer JWT over a shared bearer token — the authenticated principal threads automatically into audit logs and (opt-in) into per-principal metric labels.
 
 ### Troubleshooting
 
