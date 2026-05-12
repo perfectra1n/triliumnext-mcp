@@ -34,16 +34,19 @@ export class GatewayPolicy {
 
   async authorize(req: IncomingMessage): Promise<AuthorizeResult> {
     if (this.mode === 'none') return { authorized: true, principal: null };
-    if (this.mode === 'bearer') {
-      const ok = this.bearer!.isAuthorized(req);
+    if (this.mode === 'bearer' && this.bearer) {
+      const ok = this.bearer.isAuthorized(req);
       return { authorized: ok, principal: null, reason: ok ? undefined : 'bad_token' };
     }
-    // jwt
-    const result = await this.jwt!.authorize(req);
-    return {
-      authorized: result.authorized,
-      principal: result.principal,
-      reason: result.reason,
-    };
+    if (this.mode === 'jwt' && this.jwt) {
+      const result = await this.jwt.authorize(req);
+      return {
+        authorized: result.authorized,
+        principal: result.principal,
+        reason: result.reason,
+      };
+    }
+    // Constructor invariants guarantee we never reach here in practice.
+    return { authorized: false, principal: null, reason: 'misconfigured' };
   }
 }
