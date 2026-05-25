@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import * as net from 'node:net';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -31,11 +32,16 @@ export async function createStdioClient(triliumUrl: string) {
   return { client, transport };
 }
 
-export async function createHttpClient(
+/**
+ * Spawn the MCP server in HTTP mode and return both the spawned process and
+ * its listening port. The caller picks the wire transport (SSE or
+ * StreamableHTTP) — those just differ in which endpoint they hit.
+ */
+async function spawnHttpServer(
   triliumUrl: string,
   port?: number,
   extraEnv: Record<string, string> = {}
-) {
+): Promise<{ serverProcess: ChildProcess; port: number }> {
   const serverPort = port ?? (await getAvailablePort());
 
   const serverProcess = spawn('node', [SERVER_ENTRY], {
@@ -64,7 +70,38 @@ export async function createHttpClient(
     serverProcess.on('error', reject);
   });
 
+  return { serverProcess, port: serverPort };
+}
+
+export async function createHttpClient(
+  triliumUrl: string,
+  port?: number,
+  extraEnv: Record<string, string> = {}
+) {
+  const { serverProcess, port: serverPort } = await spawnHttpServer(triliumUrl, port, extraEnv);
+
   const transport = new SSEClientTransport(new URL(`http://localhost:${serverPort}/sse`));
+  const client = new Client({ name: 'test-client', version: '1.0.0' });
+  await client.connect(transport);
+
+  return { client, transport, serverProcess, port: serverPort };
+}
+
+/**
+ * Create a client speaking the StreamableHTTP transport against the /mcp
+ * endpoint. This is the modern HTTP transport — distinct from the legacy
+ * SSE transport above which uses /sse + /message.
+ */
+export async function createStreamableHttpClient(
+  triliumUrl: string,
+  port?: number,
+  extraEnv: Record<string, string> = {}
+) {
+  const { serverProcess, port: serverPort } = await spawnHttpServer(triliumUrl, port, extraEnv);
+
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`http://localhost:${serverPort}/mcp`)
+  );
   const client = new Client({ name: 'test-client', version: '1.0.0' });
   await client.connect(transport);
 
@@ -73,7 +110,7 @@ export async function createHttpClient(
 
 export async function cleanup(
   client: Client,
-  transport: StdioClientTransport | SSEClientTransport,
+  transport: StdioClientTransport | SSEClientTransport | StreamableHTTPClientTransport,
   serverProcess?: ChildProcess
 ) {
   await client.close().catch(() => {});
