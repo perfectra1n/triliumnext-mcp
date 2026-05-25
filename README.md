@@ -33,7 +33,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 - **Data URL support** — pass image/file data as raw base64 or `data:` URLs
 - **Four content modes on `write_note`** — metadata, replace, append, and edit (search/replace or unified diff)
 - **Markdown support** — write in markdown, stored as HTML automatically
-- **Image-aware content retrieval** — `get_note` with `include_content=true` returns embedded images as visual content blocks
+- **Image-aware content retrieval** — `get_note` returns embedded images as MCP image blocks alongside the note body
 - Support for **STDIO**, **HTTP/SSE**, and **StreamableHTTP** transports, including **multi-tenant** mode where each client brings its own Trilium URL + ETAPI token
 - **Pluggable gateway auth** — none, shared-secret bearer, or **JWT/OIDC** (HS256 secrets + JWKS for RS256/ES256/EdDSA)
 - **CORS** for browser-based MCP clients, **in-process rate limiting** per IP + per gateway token, and **Prometheus metrics** with optional per-principal labels
@@ -403,7 +403,7 @@ The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](ht
 
 | Tool | Description |
 |------|-------------|
-| `get_note` | Read a note. Returns metadata by default; pass `include_content=true` to also fetch the body and embedded images. |
+| `get_note` | Read a note. Returns the body, metadata, and embedded images by default; pass `include_content=false` for metadata-only reads (e.g. tree navigation). |
 | `get_note_history` | Get recent changes (creations, modifications, deletions) across the tree, with optional subtree filtering. |
 | `create_note` | Create a note with title, content, type, and parent. Supports inline image/file embedding. |
 | `write_note` | Write to a note via `mode`: `"metadata"` (title/type/mime), `"replace"` (overwrite content), `"append"` (concatenate), `"edit"` (search/replace or unified diff). Supports inline image/file embedding in `replace`/`append` modes. |
@@ -440,7 +440,7 @@ The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](ht
 
 | Tool | Description |
 |------|-------------|
-| `get_attachment` | Read an attachment (pass `attachmentId`) or list a note's attachments (pass `noteId`). With `attachmentId`, set `include_content=true` to fetch the body — images come back as MCP image blocks. |
+| `get_attachment` | Read an attachment (pass `attachmentId`) or list a note's attachments (pass `noteId`). With `attachmentId`, the body is returned by default — images come back as MCP image blocks. Pass `include_content=false` when you only need metadata (e.g. checking size before pulling a large binary). |
 | `create_attachment` | Create a new attachment (image or file) for a note. |
 | `write_attachment` | Write to an attachment via `mode`: `"metadata"`, `"replace"`, or `"edit"`. |
 | `delete_attachment` | Delete an attachment. |
@@ -449,7 +449,7 @@ The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](ht
 
 | Tool | Description |
 |------|-------------|
-| `get_revisions` | Get note revisions. Pass `noteId` to list all revisions of a note; pass `revisionId` for a single revision (set `include_content=true` to fetch its HTML content). |
+| `get_revisions` | Get note revisions. Pass `noteId` to list all revisions of a note; pass `revisionId` for a single revision with its HTML content (pass `include_content=false` for metadata-only). |
 
 ### System (2 tools)
 
@@ -465,8 +465,8 @@ The tool surface was consolidated in a breaking release. The mapping from the ol
 | v1 tool | v2 equivalent |
 |---|---|
 | `create_note` | `create_note` (unchanged) |
-| `get_note` | `get_note` (default `include_content=false` preserves fast metadata reads) |
-| `get_note_content` | `get_note` with `include_content=true` |
+| `get_note` | `get_note` with `include_content=false` |
+| `get_note_content` | `get_note` (default `include_content=true` returns the body) |
 | `update_note` | `write_note` with `mode="metadata"` |
 | `update_note_content` | `write_note` with `mode="replace"` (or `mode="edit"` for search/replace and diff) |
 | `append_note_content` | `write_note` with `mode="append"` (or `mode="edit"` for search/replace and diff) |
@@ -488,13 +488,13 @@ The tool surface was consolidated in a breaking release. The mapping from the ol
 | `get_inbox_note` | `get_special_note` with `kind="inbox"` |
 | `create_attachment` | `create_attachment` (unchanged) |
 | `get_attachment` | `get_attachment` with `include_content=false` |
-| `get_attachment_content` | `get_attachment` with `include_content=true` |
+| `get_attachment_content` | `get_attachment` (default `include_content=true` returns the body) |
 | `update_attachment` | `write_attachment` with `mode="metadata"` |
 | `update_attachment_content` | `write_attachment` with `mode="replace"` or `mode="edit"` |
 | `delete_attachment` | `delete_attachment` (unchanged) |
 | `get_note_revisions` | `get_revisions` with `noteId` |
-| `get_revision` | `get_revisions` with `revisionId` (default `include_content=false`) |
-| `get_revision_content` | `get_revisions` with `revisionId` and `include_content=true` |
+| `get_revision` | `get_revisions` with `revisionId` and `include_content=false` |
+| `get_revision_content` | `get_revisions` with `revisionId` (default `include_content=true` returns the HTML body) |
 | `create_revision` | `create_revision` (unchanged) |
 | `create_backup` | `manage_system` with `action="backup"` |
 | `export_note` | `manage_system` with `action="export"` |

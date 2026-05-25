@@ -294,24 +294,26 @@ const getNoteSchema = z.object({
   include_content: z
     .boolean()
     .optional()
-    .default(false)
+    .default(true)
     .describe(
-      'If true, also fetches the note body. Default false returns metadata only (fast read). ' +
-        'When true, the response includes the content as text and embedded image attachments as MCP image blocks.'
+      'Whether to include the note body in the response. Defaults to true — the response contains the content ' +
+        '(HTML by default, or markdown if format="markdown") plus image blocks for any embedded image attachments. ' +
+        'Set to false only for metadata-only navigation (walking the tree, inspecting attributes/parents/children) ' +
+        'where you explicitly do not need the body.'
     ),
   format: z
     .enum(['html', 'markdown'])
     .optional()
     .describe(
-      'Content format when include_content=true. Use "markdown" to convert stored HTML to markdown. ' +
-        'Defaults to "html". Only meaningful when include_content=true.'
+      'Content format. Use "markdown" to convert stored HTML to markdown. Defaults to "html". ' +
+        'Ignored when include_content=false.'
     ),
   includeImages: z
     .boolean()
     .optional()
     .describe(
-      'When include_content=true, whether to fetch embedded images as image content blocks. ' +
-        'Defaults to true. Ignored when include_content=false.'
+      'Whether to fetch embedded images as MCP image blocks. Defaults to true. ' +
+        'Ignored when include_content=false.'
     ),
 });
 
@@ -479,9 +481,11 @@ export function registerNoteTools(): Tool[] {
     // and lets clients with first-N pre-load policies load reads before writes.
     defineTool(
       'get_note',
-      'Read a note. Returns metadata (title, type, attributes, parent/child IDs) by default — set include_content=true to also fetch the body. ' +
-        'When include_content=true, the response contains: one text block with the note body (HTML by default or markdown if format="markdown"), followed by one image block per embedded image attachment (unless includeImages=false). ' +
-        'Leave include_content=false for fast navigation/inspection; set true when you need to read the content itself.',
+      'Read a note. Returns the note body (HTML by default, or markdown with format="markdown") together with metadata ' +
+        '(title, type, attributes, parent/child IDs) and any embedded image attachments as MCP image blocks. ' +
+        'This is the canonical and complete way to read a note — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
+        '(e.g. via curl, fetch, or shell). The response format is already designed for direct LLM consumption. ' +
+        'If you only need the title, type, attributes, or parent/child IDs (e.g. for tree navigation), pass include_content=false to skip the body.',
       getNoteSchema,
       { title: 'Read note', readOnlyHint: true }
     ),
@@ -638,7 +642,7 @@ export async function handleNoteTool(
             .join('\n');
           finalText +=
             `\n\n---\n**Attachments:** This note has ${otherAttachments.length} non-image attachment(s) ` +
-            `that can be fetched using get_attachment with include_content=true:\n${attachmentList}`;
+            `that can be fetched by calling get_attachment with the attachmentId below:\n${attachmentList}`;
         }
 
         if (failed.length > 0) {

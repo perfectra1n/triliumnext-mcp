@@ -68,18 +68,23 @@ const getAttachmentSchema = z
     attachmentId: z
       .string()
       .optional()
-      .describe('If provided, returns the single attachment with this ID.'),
+      .describe('If provided, returns the single attachment with this ID (body included by default — pass include_content=false to skip the body).'),
     noteId: z
       .string()
       .optional()
-      .describe('If provided, returns an array of all attachments for this note (metadata only).'),
+      .describe(
+        'If provided, returns an array of all attachments for this note. ' +
+          'This listing path is metadata-only (title, mime, size, attachmentId) — use it first when you do not yet know which attachment you want.'
+      ),
     include_content: z
       .boolean()
       .optional()
-      .default(false)
+      .default(true)
       .describe(
-        'Only meaningful with "attachmentId". When true, returns the attachment body: ' +
-          'image attachments come back as MCP image blocks, text attachments as text, binary as base64-wrapped text.'
+        'Only meaningful with "attachmentId". Defaults to true — returns the attachment body: ' +
+          'image attachments come back as MCP image blocks, text attachments as raw strings, other binary as base64-wrapped text. ' +
+          'Set to false when you specifically need only metadata (e.g., to check size/mime of a potentially large binary before fetching, or for an inventory pass). ' +
+          'Otherwise leave at the default — do not pre-emptively set false to "save tokens" if you actually need the content.'
       ),
   })
   .check((ctx) => {
@@ -210,10 +215,12 @@ export function registerAttachmentTools(): Tool[] {
   return [
     defineTool(
       'get_attachment',
-      'Read an attachment or list attachments. Two modes:\n' +
-        '- Pass "noteId" to get an array of all attachments for that note (metadata only)\n' +
-        '- Pass "attachmentId" to get one attachment. Set include_content=true to also fetch the body\n\n' +
-        'When include_content=true with an attachmentId: images return an MCP image block, text returns the raw string, other binary content returns base64-wrapped text.',
+      'Read an attachment or list a note\'s attachments. Two modes:\n' +
+        '- Pass "noteId" to list all attachments for that note (metadata only — title, mime, size, attachmentId).\n' +
+        '- Pass "attachmentId" to fetch one attachment. By default this returns the body: images come back as MCP image blocks, ' +
+        'text attachments as raw strings, other binary as base64-wrapped text.\n\n' +
+        'This is the canonical way to read attachment content — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
+        '(e.g. via curl, fetch, or shell). If you only want metadata for a specific attachmentId (e.g. to check size before paying for a large binary), pass include_content=false.',
       getAttachmentSchema,
       { title: 'Read attachment(s)', readOnlyHint: true }
     ),

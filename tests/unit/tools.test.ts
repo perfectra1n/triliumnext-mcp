@@ -189,10 +189,25 @@ describe('Note tools', () => {
       client = createMockClient();
     });
 
-    it('returns metadata only by default', async () => {
+    it('fetches content by default (include_content omitted)', async () => {
       (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1', title: 'T' });
+      (client.getNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>body</p>');
+      (client.getNoteAttachments as ReturnType<typeof vi.fn>).mockResolvedValue([]);
 
       const result = await handleNoteTool(client, 'get_note', { noteId: 'n1' });
+
+      expect(client.getNote).toHaveBeenCalledWith('n1');
+      expect(client.getNoteContent).toHaveBeenCalledWith('n1');
+      expect(result?.content[0]).toMatchObject({ type: 'text', text: expect.stringContaining('body') });
+    });
+
+    it('returns metadata only when include_content=false', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1', title: 'T' });
+
+      const result = await handleNoteTool(client, 'get_note', {
+        noteId: 'n1',
+        include_content: false,
+      });
 
       expect(client.getNote).toHaveBeenCalledWith('n1');
       expect(client.getNoteContent).not.toHaveBeenCalled();
@@ -853,12 +868,26 @@ describe('Attachment tools', () => {
       expect(client.getNoteAttachments).toHaveBeenCalledWith('n1');
     });
 
-    it('returns metadata when given attachmentId (default)', async () => {
+    it('returns content by default when given attachmentId', async () => {
       (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
         attachmentId: 'a1',
         mime: 'text/plain',
       });
-      await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
+      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockResolvedValue('hello');
+      const result = await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
+      expect(client.getAttachmentContent).toHaveBeenCalledWith('a1');
+      expect(result?.content[0]).toMatchObject({ type: 'text', text: 'hello' });
+    });
+
+    it('returns metadata only when include_content=false', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'text/plain',
+      });
+      await handleAttachmentTool(client, 'get_attachment', {
+        attachmentId: 'a1',
+        include_content: false,
+      });
       expect(client.getAttachmentContent).not.toHaveBeenCalled();
     });
 
@@ -1002,14 +1031,25 @@ describe('Revision tools', () => {
     expect(client.getRevisionContent).not.toHaveBeenCalled();
   });
 
-  it('metadata mode (revisionId, default) returns single revision', async () => {
+  it('content mode (revisionId, default) returns HTML body', async () => {
+    (client.getRevisionContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>old</p>');
+    const result = await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
+    expect(client.getRevisionContent).toHaveBeenCalledWith('r1');
+    expect(client.getRevision).not.toHaveBeenCalled();
+    expect(result?.content[0]).toMatchObject({ type: 'text', text: '<p>old</p>' });
+  });
+
+  it('metadata mode (revisionId + include_content=false) returns single revision metadata', async () => {
     (client.getRevision as ReturnType<typeof vi.fn>).mockResolvedValue({ revisionId: 'r1' });
-    await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
+    await handleRevisionTool(client, 'get_revisions', {
+      revisionId: 'r1',
+      include_content: false,
+    });
     expect(client.getRevision).toHaveBeenCalledWith('r1');
     expect(client.getRevisionContent).not.toHaveBeenCalled();
   });
 
-  it('content mode (revisionId + include_content=true) returns HTML', async () => {
+  it('content mode (revisionId + explicit include_content=true) returns HTML', async () => {
     (client.getRevisionContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>old</p>');
     const result = await handleRevisionTool(client, 'get_revisions', {
       revisionId: 'r1',

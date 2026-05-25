@@ -838,7 +838,7 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         content: pngBase64,
       });
 
-      // Call handleNoteTool with include_content (default true for attachments)
+      // include_content=true ensures we exercise the embedded-image block path
       const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });
 
       expect(result).not.toBeNull();

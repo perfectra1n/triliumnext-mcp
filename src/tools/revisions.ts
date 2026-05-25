@@ -16,14 +16,17 @@ const getRevisionsSchema = z
     revisionId: z
       .string()
       .optional()
-      .describe('If provided, returns a single revision. Use include_content to also fetch the body.'),
+      .describe(
+        'If provided, returns a single revision with its HTML body included by default. ' +
+          'Pass include_content=false to skip the body when you only need revision metadata.'
+      ),
     include_content: z
       .boolean()
       .optional()
-      .default(false)
+      .default(true)
       .describe(
-        'Only meaningful with "revisionId". When true, returns the HTML content of the revision snapshot. ' +
-          'Default false returns metadata only.'
+        'Only meaningful with "revisionId". Defaults to true — returns the HTML body of the revision snapshot. ' +
+          'Set to false to return revision metadata only (revisionId, title, type, dates, content length).'
       ),
   })
   .check((ctx) => {
@@ -50,10 +53,12 @@ export function registerRevisionTools(): Tool[] {
   return [
     defineTool(
       'get_revisions',
-      'Get note revisions (historical snapshots). Three uses depending on inputs:\n' +
-        '- Pass "noteId" to list all revisions for that note (metadata only)\n' +
-        '- Pass "revisionId" to fetch a single revision (metadata)\n' +
-        '- Pass "revisionId" with include_content=true to fetch the revision\'s HTML content\n\n' +
+      'Get note revisions (historical snapshots). Two modes:\n' +
+        '- Pass "noteId" to list all revisions for that note (metadata only — revisionId, title, type, dates, content length).\n' +
+        '- Pass "revisionId" to fetch a single revision; the HTML body is included by default. ' +
+        'Pass include_content=false on the revisionId path when you only need the revision\'s metadata.\n\n' +
+        'This is the canonical way to read revision content — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
+        '(e.g. via curl, fetch, or shell). ' +
         'Distinct from get_note_history (which is a change log across notes). Revisions are content snapshots of a single note.',
       getRevisionsSchema,
       { title: 'Get revisions', readOnlyHint: true }
