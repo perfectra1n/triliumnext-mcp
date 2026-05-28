@@ -76,6 +76,68 @@ describe('TriliumClient', () => {
     });
   });
 
+  describe('note URLs', () => {
+    it('derives the web base by stripping /etapi from the base URL', () => {
+      expect(client.getWebBaseUrl()).toBe('http://localhost:37740');
+    });
+
+    it('uses an explicit web base override when provided', () => {
+      const overridden = new TriliumClient(
+        'http://internal:37740/etapi',
+        'tok',
+        'https://trilium.example.com/'
+      );
+      expect(overridden.getWebBaseUrl()).toBe('https://trilium.example.com');
+    });
+
+    it('builds a full-path URL by walking parentNoteIds to root', async () => {
+      mockFetch
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ parentNoteIds: ['mid'] }) })
+        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ parentNoteIds: ['root'] }) });
+
+      const url = await client.getNoteUrl('leaf');
+      expect(url).toBe('http://localhost:37740/#root/mid/leaf');
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('uses the parent hint for the first hop to save a fetch', async () => {
+      // Only the grandparent ("mid") should be fetched; the immediate parent is supplied.
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ parentNoteIds: ['root'] }),
+      });
+
+      const url = await client.getNoteUrl('leaf', 'mid');
+      expect(url).toBe('http://localhost:37740/#root/mid/leaf');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns a root-anchored link for a note directly under root', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ parentNoteIds: ['root'] }),
+      });
+
+      const url = await client.getNoteUrl('topnote');
+      expect(url).toBe('http://localhost:37740/#root/topnote');
+    });
+
+    it('falls back to a bare noteId link when an ancestor lookup fails', async () => {
+      mockFetch.mockRejectedValue(new Error('network down'));
+
+      const url = await client.getNoteUrl('leaf');
+      expect(url).toBe('http://localhost:37740/#leaf');
+    });
+
+    it('returns just root for the root note without any fetch', async () => {
+      const url = await client.getNoteUrl('root');
+      expect(url).toBe('http://localhost:37740/#root');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+  });
+
   describe('createNote', () => {
     it('should create a note with the correct body', async () => {
       const mockResult = {

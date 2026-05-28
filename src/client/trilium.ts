@@ -37,11 +37,80 @@ export class TriliumClientError extends Error {
 export class TriliumClient {
   private readonly baseUrl: string;
   private readonly token: string;
+  private readonly webBaseUrl: string;
 
-  constructor(baseUrl: string, token: string) {
+  /**
+   * @param baseUrl  ETAPI base URL (e.g. `http://host:port/etapi`).
+   * @param token    ETAPI auth token.
+   * @param webBaseUrl  Optional user-facing web-UI root for clickable note links.
+   *   When omitted, it is derived from `baseUrl` by stripping a trailing `/etapi`.
+   */
+  constructor(baseUrl: string, token: string, webBaseUrl?: string) {
     // Remove trailing slash if present
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.token = token;
+    this.webBaseUrl = (webBaseUrl ?? baseUrl)
+      .replace(/\/etapi\/*$/i, '')
+      .replace(/\/+$/, '');
+  }
+
+  /** The user-facing Trilium web-UI base URL used for note links. */
+  getWebBaseUrl(): string {
+    return this.webBaseUrl;
+  }
+
+  /**
+   * Builds a clickable web-UI URL that opens the given note in Trilium, of the
+   * form `<webBase>/#root/<ancestors>/<noteId>`. Walks `parentNoteIds` up to the
+   * root to construct the full note path.
+   *
+   * Never throws: if the ancestor walk fails (e.g. a parent lookup errors), it
+   * falls back to a bare `<webBase>/#<noteId>` link, which Trilium still resolves.
+   * URL building must never break the create/edit operation that produced it.
+   *
+   * @param viaParentNoteId Optional known immediate parent, used for the first
+   *   hop to save a `getNote` call (e.g. the branch parent of a just-created note).
+   */
+  async getNoteUrl(noteId: EntityId, viaParentNoteId?: EntityId): Promise<string> {
+    try {
+      const path = await this.buildNotePath(noteId, viaParentNoteId);
+      return `${this.webBaseUrl}/#${path}`;
+    } catch {
+      return `${this.webBaseUrl}/#${noteId}`;
+    }
+  }
+
+  private async buildNotePath(noteId: EntityId, viaParentNoteId?: EntityId): Promise<string> {
+    if (noteId === 'root') return 'root';
+
+    const segments: EntityId[] = [noteId];
+    const seen = new Set<EntityId>([noteId]);
+    let cursor = noteId;
+    let hint = viaParentNoteId;
+
+    // Cap the walk to guard against unexpected cycles or pathological depth.
+    for (let depth = 0; depth < 50; depth++) {
+      let parentId = hint;
+      hint = undefined; // hint only applies to the first hop
+      if (parentId === undefined) {
+        const note = await this.getNote(cursor);
+        parentId = note.parentNoteIds.find((p) => !seen.has(p));
+      }
+
+      if (!parentId || parentId === 'root') {
+        segments.unshift('root');
+        return segments.join('/');
+      }
+
+      segments.unshift(parentId);
+      seen.add(parentId);
+      cursor = parentId;
+    }
+
+    // Depth cap hit without reaching root — prefix what we have so the link is
+    // still anchored under root.
+    segments.unshift('root');
+    return segments.join('/');
   }
 
   private async request<T>(

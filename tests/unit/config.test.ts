@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { loadConfig, normalizeServerUrl } from '../../src/config.js';
+import { loadConfig, normalizeServerUrl, deriveWebBaseUrl } from '../../src/config.js';
 
 describe('loadConfig', () => {
   const originalEnv = process.env;
@@ -22,6 +22,7 @@ describe('loadConfig', () => {
     delete process.env.TRILIUM_METRICS;
     delete process.env.TRILIUM_METRICS_AUTH;
     delete process.env.TRILIUM_METRICS_TOKENS;
+    delete process.env.TRILIUM_PUBLIC_URL;
   });
 
   afterEach(() => {
@@ -125,6 +126,54 @@ describe('loadConfig', () => {
     const config = loadConfig(['--url', 'http://localhost:8080/']);
     expect(config).not.toBeNull();
     expect(config!.triliumUrl).toBe('http://localhost:8080/etapi');
+  });
+
+  describe('publicUrl', () => {
+    it('defaults to null when not provided', () => {
+      process.env.TRILIUM_TOKEN = 'test-token';
+      const config = loadConfig([]);
+      expect(config!.publicUrl).toBeNull();
+    });
+
+    it('reads --public-url and strips trailing slashes', () => {
+      process.env.TRILIUM_TOKEN = 'test-token';
+      const config = loadConfig(['--public-url', 'https://trilium.example.com/']);
+      expect(config!.publicUrl).toBe('https://trilium.example.com');
+    });
+
+    it('reads TRILIUM_PUBLIC_URL from the environment', () => {
+      process.env.TRILIUM_TOKEN = 'test-token';
+      process.env.TRILIUM_PUBLIC_URL = 'https://notes.example.com';
+      const config = loadConfig([]);
+      expect(config!.publicUrl).toBe('https://notes.example.com');
+    });
+
+    it('strips an accidental /etapi suffix from the public URL', () => {
+      process.env.TRILIUM_TOKEN = 'test-token';
+      const config = loadConfig(['--public-url', 'https://notes.example.com/etapi']);
+      expect(config!.publicUrl).toBe('https://notes.example.com');
+    });
+
+    it('--public-url takes priority over TRILIUM_PUBLIC_URL', () => {
+      process.env.TRILIUM_TOKEN = 'test-token';
+      process.env.TRILIUM_PUBLIC_URL = 'https://env.example.com';
+      const config = loadConfig(['--public-url', 'https://cli.example.com']);
+      expect(config!.publicUrl).toBe('https://cli.example.com');
+    });
+  });
+
+  describe('deriveWebBaseUrl', () => {
+    it('strips a trailing /etapi segment', () => {
+      expect(deriveWebBaseUrl('http://localhost:37740/etapi')).toBe('http://localhost:37740');
+    });
+
+    it('leaves a bare web root unchanged', () => {
+      expect(deriveWebBaseUrl('http://localhost:37740')).toBe('http://localhost:37740');
+    });
+
+    it('removes trailing slashes', () => {
+      expect(deriveWebBaseUrl('http://localhost:37740/etapi/')).toBe('http://localhost:37740');
+    });
   });
 
   describe('multi-tenant mode', () => {

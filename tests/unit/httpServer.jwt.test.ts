@@ -21,6 +21,7 @@ function makeConfig(overrides: Partial<Config>): Config {
   return {
     triliumUrl: 'http://localhost:65535/etapi',
     triliumToken: 'dummy',
+    publicUrl: null,
     transport: 'http',
     httpPort: 0,
     multiTenant: false,

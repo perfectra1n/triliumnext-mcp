@@ -22,6 +22,7 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
   return {
     createNote: vi.fn(),
     getNote: vi.fn(),
+    getNoteUrl: vi.fn().mockResolvedValue('http://localhost:37740/#root/n1'),
     getNoteContent: vi.fn(),
     updateNote: vi.fn(),
     updateNoteContent: vi.fn(),
@@ -146,7 +147,10 @@ describe('Note tools', () => {
     });
 
     it('creates a text note', async () => {
-      const expected = { note: { noteId: 'n1', title: 'T' }, branch: { branchId: 'b1' } };
+      const expected = {
+        note: { noteId: 'n1', title: 'T' },
+        branch: { branchId: 'b1', parentNoteId: 'root' },
+      };
       (client.createNote as ReturnType<typeof vi.fn>).mockResolvedValue(expected);
 
       const result = await handleNoteTool(client, 'create_note', {
@@ -158,6 +162,27 @@ describe('Note tools', () => {
 
       expect(client.createNote).toHaveBeenCalled();
       expect(result?.content[0]).toMatchObject({ type: 'text' });
+    });
+
+    it('includes the note url in the response', async () => {
+      (client.createNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        note: { noteId: 'n1', title: 'T' },
+        branch: { branchId: 'b1', parentNoteId: 'root' },
+      });
+      (client.getNoteUrl as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'http://localhost:37740/#root/n1'
+      );
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'T',
+        type: 'text',
+        content: '<p>hi</p>',
+      });
+
+      expect(client.getNoteUrl).toHaveBeenCalledWith('n1', 'root');
+      const payload = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(payload.url).toBe('http://localhost:37740/#root/n1');
     });
 
     it('requires parentNoteId / title / type / content', async () => {
@@ -273,6 +298,36 @@ describe('Note tools', () => {
       });
 
       expect(client.updateNote).toHaveBeenCalledWith('n1', { title: 'New' });
+    });
+
+    it('includes the note url in every write mode', async () => {
+      (client.updateNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        title: 'New',
+        parentNoteIds: ['root'],
+      });
+      (client.updateNoteContent as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+      (client.getNoteUrl as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'http://localhost:37740/#root/n1'
+      );
+
+      const meta = await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'metadata',
+        title: 'New',
+      });
+      expect(JSON.parse((meta?.content[0] as { text: string }).text).url).toBe(
+        'http://localhost:37740/#root/n1'
+      );
+
+      const replace = await handleNoteTool(client, 'write_note', {
+        noteId: 'n1',
+        mode: 'replace',
+        content: '<p>x</p>',
+      });
+      expect(JSON.parse((replace?.content[0] as { text: string }).text).url).toBe(
+        'http://localhost:37740/#root/n1'
+      );
     });
 
     it('mode="metadata" requires at least one of title/type/mime', async () => {
@@ -513,6 +568,31 @@ describe('Organization tools', () => {
 
       expect(client.createBranch).toHaveBeenCalled();
       expect(client.deleteBranch).toHaveBeenCalledWith('old-b');
+    });
+
+    it('action="move" returns a url for the new location', async () => {
+      (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        parentBranchIds: ['old-b'],
+      });
+      (client.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        branchId: 'new-b',
+        parentNoteId: 'newParent',
+      });
+      (client.getNoteUrl as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'http://localhost:37740/#root/newParent/n1'
+      );
+
+      const result = await handleOrganizationTool(client, 'organize_note', {
+        action: 'move',
+        noteId: 'n1',
+        newParentNoteId: 'newParent',
+      });
+
+      expect(client.getNoteUrl).toHaveBeenCalledWith('n1', 'newParent');
+      expect(JSON.parse((result?.content[0] as { text: string }).text).url).toBe(
+        'http://localhost:37740/#root/newParent/n1'
+      );
     });
 
     it('action="move" requires noteId + newParentNoteId', async () => {
@@ -762,6 +842,17 @@ describe('System tools', () => {
     it('accepts format="markdown"', async () => {
       await handleSystemTool(client, 'create_revision', { noteId: 'n1', format: 'markdown' });
       expect(client.createRevision).toHaveBeenCalledWith('n1', 'markdown');
+    });
+
+    it('appends the note url to the success message', async () => {
+      (client.getNoteUrl as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'http://localhost:37740/#root/n1'
+      );
+      const result = await handleSystemTool(client, 'create_revision', { noteId: 'n1' });
+      expect(client.getNoteUrl).toHaveBeenCalledWith('n1');
+      expect((result?.content[0] as { text: string }).text).toContain(
+        'http://localhost:37740/#root/n1'
+      );
     });
   });
 

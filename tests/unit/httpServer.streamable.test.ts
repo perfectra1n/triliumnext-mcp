@@ -25,6 +25,7 @@ function makeConfig(overrides: Partial<Config>): Config {
   return {
     triliumUrl: 'http://localhost:65535/etapi',
     triliumToken: 'dummy',
+    publicUrl: null,
     transport: 'http',
     httpPort: 0,
     multiTenant: false,
@@ -111,7 +112,20 @@ describe('/mcp — StreamableHTTP transport', () => {
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
     });
     expect(res.status).toBe(404);
-    expect(await res.json()).toEqual({ error: 'unknown_session' });
+    const body = (await res.json()) as {
+      error: string;
+      message: string;
+      hint: string;
+      transport: string;
+      sessionId: string;
+    };
+    expect(body.error).toBe('unknown_session');
+    expect(body.transport).toBe('streamable');
+    expect(body.sessionId).toBe('nope-not-a-real-session');
+    // The whole point of the friendlier error: an LLM or operator reading
+    // this response can immediately see what to do.
+    expect(body.message).toMatch(/restart|expired|closed/i);
+    expect(body.hint).toMatch(/initialize|\/mcp/i);
   });
 
   it('rejects requests when gateway-auth=bearer and no token is provided', async () => {
@@ -171,5 +185,41 @@ describe('/mcp — StreamableHTTP transport', () => {
     });
     expect(res.status).toBe(401);
     expect(await res.json()).toEqual({ error: 'missing_trilium_credentials' });
+  });
+});
+
+describe('/message — SSE transport', () => {
+  it('returns 404 unknown_session with an actionable message for a stale sessionId', async () => {
+    const s = await track(startTestServer({}));
+    const res = await fetch(s.url('/message?sessionId=ghost-session-id'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as {
+      error: string;
+      message: string;
+      hint: string;
+      transport: string;
+      sessionId: string;
+    };
+    expect(body.error).toBe('unknown_session');
+    expect(body.transport).toBe('sse');
+    expect(body.sessionId).toBe('ghost-session-id');
+    expect(body.message).toMatch(/restart|expired|closed/i);
+    // SSE clients reconnect by re-opening /sse, not by POSTing initialize.
+    expect(body.hint).toMatch(/\/sse|endpoint/i);
+  });
+
+  it('returns 400 missing_session_id when sessionId is absent', async () => {
+    const s = await track(startTestServer({}));
+    const res = await fetch(s.url('/message'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list' }),
+    });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: 'missing_session_id' });
   });
 });

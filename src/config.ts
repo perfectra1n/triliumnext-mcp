@@ -22,6 +22,16 @@ export function normalizeServerUrl(url: string): string {
   return normalized;
 }
 
+/**
+ * Derives the Trilium web-UI base URL (what a user's browser opens) from a
+ * server URL by stripping a trailing `/etapi` segment and any trailing slashes.
+ *
+ * Example: `http://localhost:37740/etapi` -> `http://localhost:37740`.
+ */
+export function deriveWebBaseUrl(url: string): string {
+  return url.replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
+}
+
 export type GatewayAuthMode = 'none' | 'bearer' | 'jwt';
 export type MetricsAuthMode = 'gateway' | 'bearer' | 'none';
 
@@ -37,6 +47,15 @@ export interface Config {
    * mode; required and non-null in single-tenant mode.
    */
   triliumToken: string | null;
+  /**
+   * Optional override for the user-facing Trilium web-UI base URL used when
+   * building clickable note links returned to the user. Set this when the MCP
+   * server reaches Trilium at a different address than the user's browser does
+   * (e.g. an internal ETAPI host vs. a public reverse-proxy domain). When unset,
+   * the web base is derived from `triliumUrl` by stripping `/etapi`. Ignored in
+   * multi-tenant mode, where each tenant's link base is derived per connection.
+   */
+  publicUrl: string | null;
   transport: 'stdio' | 'http';
   httpPort: number;
   /**
@@ -125,6 +144,7 @@ export interface Config {
 interface ConfigFile {
   url?: string;
   token?: string;
+  publicUrl?: string;
   transport?: 'stdio' | 'http';
   httpPort?: number;
   multiTenant?: boolean;
@@ -150,6 +170,7 @@ interface ConfigFile {
 interface CliArgs {
   url?: string;
   token?: string;
+  publicUrl?: string;
   transport?: string;
   port?: number;
   help?: boolean;
@@ -192,6 +213,10 @@ function parseCliArgs(args: string[]): CliArgs {
       case '--token':
       case '-t':
         result.token = nextArg;
+        i++;
+        break;
+      case '--public-url':
+        result.publicUrl = nextArg;
         i++;
         break;
       case '--transport':
@@ -340,6 +365,10 @@ Options:
   -u, --url <url>                    Trilium server URL (default: http://localhost:37740)
                                      Can be base URL or full ETAPI URL - /etapi is appended if missing
   -t, --token <token>                Trilium ETAPI token
+  --public-url <url>                 User-facing Trilium web URL for note links returned to the
+                                     user. Defaults to --url with /etapi stripped. Set this when
+                                     the MCP server and the user reach Trilium at different
+                                     addresses (e.g. internal ETAPI host vs. public domain).
   --transport <type>                 Transport type: stdio or http (default: stdio)
   -p, --port <port>                  HTTP server port when using http transport (default: 3000)
 
@@ -389,6 +418,8 @@ JWT gateway auth (--gateway-auth jwt):
 Environment Variables:
   TRILIUM_URL                        Trilium server URL (base or full ETAPI URL)
   TRILIUM_TOKEN                      Trilium ETAPI token
+  TRILIUM_PUBLIC_URL                 User-facing Trilium web URL for note links (defaults to
+                                     TRILIUM_URL with /etapi stripped)
   TRILIUM_TRANSPORT                  stdio or http
   TRILIUM_HTTP_PORT                  Port for HTTP transport
   TRILIUM_MULTI_TENANT               "true" to enable multi-tenant mode
@@ -489,6 +520,9 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     cli.url ?? emptyToUndefined(process.env.TRILIUM_URL) ?? file.url;
   const rawToken =
     cli.token ?? emptyToUndefined(process.env.TRILIUM_TOKEN) ?? file.token ?? '';
+
+  const rawPublicUrl =
+    cli.publicUrl ?? emptyToUndefined(process.env.TRILIUM_PUBLIC_URL) ?? file.publicUrl;
 
   const transportValue =
     cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
@@ -694,9 +728,15 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
       : normalizeServerUrl('http://localhost:37740');
   const triliumToken = multiTenant ? null : rawToken;
 
+  // The public URL is the web-UI root used for clickable note links. Normalize
+  // it the same way as a derived base (strip any accidental /etapi + slashes) so
+  // operators can pass either the bare host or the ETAPI URL.
+  const publicUrl = rawPublicUrl ? deriveWebBaseUrl(rawPublicUrl) : null;
+
   return {
     triliumUrl,
     triliumToken,
+    publicUrl,
     transport,
     httpPort,
     multiTenant,

@@ -6,7 +6,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { randomUUID } from 'node:crypto';
 
-import { normalizeServerUrl, type Config } from '../config.js';
+import { normalizeServerUrl, deriveWebBaseUrl, type Config } from '../config.js';
 import { TriliumClient, TriliumClientError } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
@@ -290,8 +290,24 @@ async function handleStreamable(
       }
       return;
     }
-    // Unknown session id — distinguish from "no session id".
-    respondJson(res, 404, { error: 'unknown_session' });
+    // Unknown session id — distinguish from "no session id". Most often this
+    // is a client holding a session id from a previous server process: the
+    // server restarted (sessions live in-process memory) and the client kept
+    // its old id. Surface that hint so the operator / SDK has somewhere to go.
+    logger.info('unknown_session', {
+      transport: 'streamable',
+      session: sessionId,
+      remote: req.socket.remoteAddress,
+    });
+    respondJson(res, 404, {
+      error: 'unknown_session',
+      message:
+        'No session with this MCP-Session-Id is registered on this server. ' +
+        'The server may have restarted, or the session may have been closed/expired.',
+      hint: 'Reinitialize by POSTing an `initialize` request to /mcp without the MCP-Session-Id header to obtain a fresh session id.',
+      transport: 'streamable',
+      sessionId,
+    });
     return;
   }
 
@@ -364,7 +380,13 @@ async function handleStreamable(
 
   const triliumUrl = normalizeServerUrl(clientUrlRaw);
   const triliumHost = safeHostname(triliumUrl);
-  const client = new TriliumClient(triliumUrl, clientToken);
+  // Single-tenant may override the user-facing note-link base via publicUrl; in
+  // multi-tenant mode each connection's link base is derived from its own URL.
+  const webBaseUrl =
+    !config.multiTenant && config.publicUrl
+      ? config.publicUrl
+      : deriveWebBaseUrl(triliumUrl);
+  const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
   } catch (err) {
@@ -567,7 +589,13 @@ async function handleSseConnect(
   // write response headers (once start() runs, we can't return a clean JSON error).
   const triliumUrl = normalizeServerUrl(clientUrlRaw);
   const triliumHost = safeHostname(triliumUrl);
-  const client = new TriliumClient(triliumUrl, clientToken);
+  // Single-tenant may override the user-facing note-link base via publicUrl; in
+  // multi-tenant mode each connection's link base is derived from its own URL.
+  const webBaseUrl =
+    !config.multiTenant && config.publicUrl
+      ? config.publicUrl
+      : deriveWebBaseUrl(triliumUrl);
+  const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
   } catch (err) {
@@ -695,8 +723,24 @@ async function handleSsePost(
 
   const session = sessions.get(sessionId);
   if (!session) {
-    // 404 (not 503) — unknown session looks like a nonexistent resource.
-    respondJson(res, 404, { error: 'unknown_session' });
+    // 404 (not 503) — unknown session looks like a nonexistent resource. Most
+    // often the server restarted (sessions live in-process memory) and the
+    // client kept its old sessionId; surface the hint so the operator / SDK
+    // can react instead of just retrying the same dead session.
+    logger.info('unknown_session', {
+      transport: 'sse',
+      session: sessionId,
+      remote: req.socket.remoteAddress,
+    });
+    respondJson(res, 404, {
+      error: 'unknown_session',
+      message:
+        'No SSE session with this sessionId is registered on this server. ' +
+        'The server may have restarted, or the session may have been closed/expired.',
+      hint: 'Reopen the SSE connection by GETting /sse to receive a new sessionId via the `endpoint` event, then POST tool requests to that new sessionId.',
+      transport: 'sse',
+      sessionId,
+    });
     return;
   }
 

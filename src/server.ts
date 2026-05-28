@@ -13,6 +13,7 @@ import {
 } from './errors/index.js';
 import { DiffApplicationError } from './tools/diff.js';
 import type { Config } from './config.js';
+import { deriveWebBaseUrl } from './config.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
@@ -202,7 +203,11 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
     // Unreachable: loadConfig enforces this invariant for stdio. Defensive.
     throw new Error('stdio transport requires TRILIUM_URL and TRILIUM_TOKEN');
   }
-  const client = new TriliumClient(config.triliumUrl, config.triliumToken);
+  const client = new TriliumClient(
+    config.triliumUrl,
+    config.triliumToken,
+    config.publicUrl ?? deriveWebBaseUrl(config.triliumUrl)
+  );
   const server = buildMcpServer(client, { logger, sessionId: 'stdio' });
   const transport = new StdioServerTransport();
   await server.connect(transport);

@@ -78,6 +78,7 @@ triliumnext-mcp --url http://localhost:37740/etapi --token YOUR_TOKEN
 Options:
 - `-u, --url <url>` — Trilium ETAPI URL (default: `http://localhost:37740/etapi`)
 - `-t, --token <token>` — Trilium ETAPI token (required in single-tenant mode)
+- `--public-url <url>` — user-facing Trilium web URL used for the clickable note links returned to the user. Defaults to `--url` with `/etapi` stripped. Set this only when the MCP server reaches Trilium at a different address than the user's browser does (e.g. an internal ETAPI host behind a public reverse-proxy domain).
 - `--transport <type>` — Transport type: `stdio` or `http` (default: `stdio`)
 - `-p, --port <port>` — HTTP server port when using http transport (default: `3000`)
 - `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `500mb`). See [Request body size limits](#request-body-size-limits).
@@ -95,6 +96,7 @@ Multi-tenant HTTP options (see [Multi-tenant HTTP deployment](#multi-tenant-http
 ```bash
 export TRILIUM_URL=http://localhost:37740/etapi
 export TRILIUM_TOKEN=your-etapi-token
+export TRILIUM_PUBLIC_URL=https://trilium.example.com  # optional; web URL for note links (defaults to TRILIUM_URL without /etapi)
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
 export TRILIUM_MAX_POST_BYTES=500mb  # SSE POST body cap; see "Request body size limits"
@@ -400,6 +402,8 @@ sum by (reason) (rate(triliumnext_mcp_sse_connect_failures_total[5m]))
 The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](https://github.com/perfectra1n/triliumnext-mcp/issues/6)) improves reliability on clients that pre-load only a subset of a server's tools (claude.ai web, Cursor's 40-tool cap), and consolidates near-duplicate operations behind a `mode` or `action` discriminator. Destructive verbs (`delete_*`) stay as their own tools by design. See [Migrating from v1](#migrating-from-v1) below for the old→new mapping.
 
 ### Notes (5 tools)
+
+The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone, and `create_revision`) include a `url` field in their response that links straight to the note in the Trilium web UI (e.g. `http://localhost:37740/#root/<path>/<noteId>`), so the assistant can hand the user a clickable link when it's done. The link base is derived from `--url`/`TRILIUM_URL` (with `/etapi` stripped) unless overridden via `--public-url`/`TRILIUM_PUBLIC_URL`.
 
 | Tool | Description |
 |------|-------------|

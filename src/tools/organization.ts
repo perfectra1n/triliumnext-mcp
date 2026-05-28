@@ -93,7 +93,8 @@ export function registerOrganizationTools(): Tool[] {
         '- "reorder": change display order of notes under a parent by updating branch positions\n' +
         '- "unlink": remove a specific parent-child branch without deleting the note (unless it\'s the last branch)\n\n' +
         'IMPORTANT: Before "move" or "clone", use search_notes and get_note_tree to explore the hierarchy and suggest the right destination. ' +
-        'WARNING: "unlink" on the last branch of a note deletes the note itself.',
+        'WARNING: "unlink" on the last branch of a note deletes the note itself. ' +
+        'For "move" and "clone", the response includes a "url" field linking to the note at its new location — give it to the user when you are done.',
       organizeNoteSchema,
       { title: 'Organize notes', readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     ),
@@ -126,11 +127,13 @@ export async function handleOrganizationTool(
         await client.deleteBranch(note.parentBranchIds[0]);
       }
 
+      const url = await client.getNoteUrl(noteId, newBranch.parentNoteId);
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, action: 'move', branch: newBranch }, null, 2),
+            text: JSON.stringify({ success: true, action: 'move', branch: newBranch, url }, null, 2),
           },
         ],
       };
@@ -144,9 +147,10 @@ export async function handleOrganizationTool(
         parentNoteId,
         prefix: parsed.prefix,
       });
+      const url = await client.getNoteUrl(noteId, branch.parentNoteId);
       return {
         content: [
-          { type: 'text', text: JSON.stringify({ action: 'clone', branch }, null, 2) },
+          { type: 'text', text: JSON.stringify({ action: 'clone', branch, url }, null, 2) },
         ],
       };
     }

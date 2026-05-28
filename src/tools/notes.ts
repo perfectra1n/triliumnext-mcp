@@ -233,6 +233,10 @@ const INTERNAL_LINK_GUIDANCE =
   'When format="markdown", do NOT use markdown link syntax for internal links — [text](#root/...) gets converted to a bare <a href> without class/data-note-path and Trilium will not render it as a reference link. Write the full <a class="reference-link" ...> tag as raw HTML inside the markdown content. ' +
   'Example: <a class="reference-link" href="#root/abc123def/xyz789ghi" data-note-path="root/abc123def/xyz789ghi">Project Plan</a>.';
 
+export const NOTE_URL_GUIDANCE =
+  'The response includes a "url" field that opens this note directly in Trilium. ' +
+  'When you have finished, give this URL to the user so they can jump straight to the note.';
+
 const createNoteSchema = z.object({
   parentNoteId: z
     .string()
@@ -503,7 +507,8 @@ export function registerNoteTools(): Tool[] {
         'Supports positioning, tree display, and date options. For text notes, content can be HTML (default) or markdown (set format to "markdown"). ' +
         'Supports embedding images and files: pass "images" and/or "files" arrays with base64 data IN THE SAME CALL, and reference them in content using image:0/file:0 placeholders (e.g., <img src="image:0"> or <a href="file:0">). ' +
         'The N in image:N / file:N indexes into the array provided in this call — it does NOT reference attachments uploaded previously. ' +
-        'Unresolved placeholders will cause the call to fail with a clear error.',
+        'Unresolved placeholders will cause the call to fail with a clear error. ' +
+        NOTE_URL_GUIDANCE,
       createNoteSchema,
       { title: 'Create note', readOnlyHint: false, destructiveHint: false, idempotentHint: false }
     ),
@@ -517,7 +522,8 @@ export function registerNoteTools(): Tool[] {
         'For "replace"/"append" on text notes, "content" can be HTML (default) or markdown (set format="markdown"). ' +
         'To embed images/files, pass "images"/"files" arrays with base64 data and reference them via image:0/file:0 placeholders in "content". ' +
         'Unresolved placeholders will cause the call to fail with a clear error. ' +
-        '"edit" mode operates on stored HTML and cannot be combined with format="markdown" or images/files.',
+        '"edit" mode operates on stored HTML and cannot be combined with format="markdown" or images/files. ' +
+        NOTE_URL_GUIDANCE,
       writeNoteSchema,
       { title: 'Write note', readOnlyHint: false, destructiveHint: true, idempotentHint: false }
     ),
@@ -583,11 +589,13 @@ export async function handleNoteTool(
         await client.updateNoteContent(result.note.noteId, content);
       }
 
+      const url = await client.getNoteUrl(result.note.noteId, result.branch.parentNoteId);
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ note: result.note, branch: result.branch }, null, 2),
+            text: JSON.stringify({ note: result.note, branch: result.branch, url }, null, 2),
           },
         ],
       };
@@ -670,8 +678,9 @@ export async function handleNoteTool(
         if (parsed.type !== undefined) patch.type = parsed.type as NoteType;
         if (parsed.mime !== undefined) patch.mime = parsed.mime;
         const result = await client.updateNote(parsed.noteId, patch);
+        const url = await client.getNoteUrl(parsed.noteId, result.parentNoteIds?.[0]);
         return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
+          content: [{ type: 'text', text: JSON.stringify({ ...result, url }, null, 2) }],
         };
       }
 
@@ -711,11 +720,17 @@ export async function handleNoteTool(
         verifySearchReplaceResults(readBack, parsed.changes);
       }
 
+      const url = await client.getNoteUrl(parsed.noteId);
+
       return {
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, noteId: parsed.noteId, mode: parsed.mode }, null, 2),
+            text: JSON.stringify(
+              { success: true, noteId: parsed.noteId, mode: parsed.mode, url },
+              null,
+              2
+            ),
           },
         ],
       };

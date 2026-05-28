@@ -25,6 +25,7 @@ function makeConfig(overrides: Partial<Config>): Config {
   return {
     triliumUrl: 'http://localhost:65535/etapi', // unused; /metrics doesn't touch Trilium
     triliumToken: 'dummy',
+    publicUrl: null,
     transport: 'http',
     httpPort: 0, // ephemeral
     multiTenant: false,

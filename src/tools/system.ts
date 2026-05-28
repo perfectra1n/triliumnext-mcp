@@ -60,7 +60,8 @@ export function registerSystemTools(): Tool[] {
     defineTool(
       'create_revision',
       'Create a revision (snapshot) of a note. Useful before making significant edits to preserve the current state. ' +
-        'Revisions can be viewed and restored in Trilium. To read revisions later, use get_revisions.',
+        'Revisions can be viewed and restored in Trilium. To read revisions later, use get_revisions. ' +
+        'The response includes a URL that opens the note in Trilium — give it to the user when you are done.',
       createRevisionSchema,
       {
         title: 'Create revision snapshot',
@@ -96,11 +97,14 @@ export async function handleSystemTool(
     case 'create_revision': {
       const parsed = createRevisionSchema.parse(args);
       await client.createRevision(parsed.noteId, parsed.format ?? 'html');
+      const url = await client.getNoteUrl(parsed.noteId);
       return {
         content: [
           {
             type: 'text',
-            text: `Revision created for note ${parsed.noteId}. The revision is now available in Trilium's note history.`,
+            text:
+              `Revision created for note ${parsed.noteId}. The revision is now available in Trilium's note history. ` +
+              `View the note: ${url}`,
           },
         ],
       };
