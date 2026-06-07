@@ -243,7 +243,10 @@ const createNoteSchema = z.object({
     .min(1, 'Parent note ID is required')
     .describe('ID of the parent note. Before choosing a parent, use search_notes and get_note_tree to explore the existing note hierarchy and find the most appropriate location. Only use "root" when the note truly belongs at the top level — most notes belong under an existing section or folder.'),
   title: z.string().min(1, 'Title is required').describe('Title of the new note'),
-  type: noteTypeSchema.describe('Type of the note'),
+  type: noteTypeSchema.describe(
+    'Type of the note. For runnable scripts, render notes, or widgets, see the server instructions ' +
+      'for the required mime and the follow-up set_attribute wiring that makes them work.'
+  ),
   content: z
     .string()
     .describe(
@@ -264,7 +267,9 @@ const createNoteSchema = z.object({
     .string()
     .optional()
     .describe(
-      'MIME type (required for code, file, image notes). Examples: application/javascript, text/x-python, text/markdown'
+      'MIME type (required for code, file, image notes). Examples: application/javascript, text/x-python, text/markdown. ' +
+        'For runnable scripts use application/javascript;env=frontend (browser) or application/javascript;env=backend (server). ' +
+        'canvas/mindMap use application/json; render notes use an empty mime.'
     ),
   notePosition: positionSchema
     .optional()
@@ -335,7 +340,13 @@ const writeNoteSchema = z
       ),
     title: z.string().optional().describe('New title (metadata mode only)'),
     type: noteTypeSchema.optional().describe('New type (metadata mode only)'),
-    mime: z.string().optional().describe('New MIME type (metadata mode only)'),
+    mime: z
+      .string()
+      .optional()
+      .describe(
+        'New MIME type (metadata mode only). For runnable scripts use application/javascript;env=frontend ' +
+          'or application/javascript;env=backend; see the server instructions for the attribute wiring.'
+      ),
     content: z
       .string()
       .optional()

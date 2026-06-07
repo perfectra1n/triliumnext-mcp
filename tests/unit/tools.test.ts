@@ -66,8 +66,8 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
 // ============================================================================
 
 describe('NOTE_TYPES', () => {
-  it('contains the 15 note types Trilium supports', () => {
-    expect(NOTE_TYPES).toHaveLength(15);
+  it('contains the 18 note types Trilium supports', () => {
+    expect(NOTE_TYPES).toHaveLength(18);
     expect(new Set(NOTE_TYPES)).toEqual(
       new Set([
         'text',
@@ -80,6 +80,9 @@ describe('NOTE_TYPES', () => {
         'book',
         'noteMap',
         'mermaid',
+        'canvas',
+        'mindMap',
+        'geoMap',
         'webView',
         'shortcut',
         'doc',

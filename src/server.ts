@@ -14,6 +14,7 @@ import {
 import { DiffApplicationError } from './tools/diff.js';
 import type { Config } from './config.js';
 import { deriveWebBaseUrl } from './config.js';
+import { SERVER_INSTRUCTIONS } from './server-instructions.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
@@ -54,6 +55,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       capabilities: {
         tools: {},
       },
+      instructions: SERVER_INSTRUCTIONS,
     }
   );
 
