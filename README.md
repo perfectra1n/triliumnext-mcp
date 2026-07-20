@@ -60,6 +60,30 @@ claude mcp add trilium node /path/to/triliumnext-mcp/dist/index.js \
 
 This adds the server at user scope (available across all repositories) in your `~/.claude.json`.
 
+### Using with claude.ai (web/desktop) over SSE
+
+When running in HTTP/SSE mode and connecting from claude.ai (web or desktop), some MCP hosts apply a *deferred tool loading* strategy: only a subset of the server's 35 tools land in the assistant's active context at session start, with the remainder expected to be pulled in on demand. In practice some tools — most often the write-side ones like `create_note`, `update_note_content`, `append_note_content`, `delete_note`, `delete_branch` — may show up in the tool-discovery response with full schemas but then fail when invoked with an error like:
+
+> `<tool_name> has not been loaded yet`
+
+This is a client-side behaviour, not a server issue; the server advertises all tools correctly via `tools/list`. See [#6](https://github.com/perfectra1n/triliumnext-mcp/issues/6) for background.
+
+**Workaround — direct SSE client.** A minimal reference client using only the Python standard library is provided in [`examples/reference-sse-client.py`](examples/reference-sse-client.py). It speaks JSON-RPC over `/sse` + `/message` and can invoke any tool from a shell, which works well as an escape hatch from agents that can shell out:
+
+```bash
+# List all 35 tools
+python3 examples/reference-sse-client.py list
+
+# Call a tool (JSON arguments on stdin)
+echo '{"parentNoteId":"root","title":"Test","type":"text","content":"hi"}' \
+    | python3 examples/reference-sse-client.py call create_note
+
+# Point at a different server
+TRILIUM_MCP_URL=http://other-host:3100 python3 examples/reference-sse-client.py list
+```
+
+Read-side tools (`search_notes`, `get_note_content`, `get_note_attachments`, `create_revision`, etc.) are typically pre-loaded and work natively, so a hybrid pattern tends to be most ergonomic: use native MCP tools for read/snapshot, and the reference client for writes.
+
 ## Configuration
 
 Configuration precedence (highest to lowest):
