@@ -134,12 +134,30 @@ describe('preprocessSearchQuery', () => {
       expect(preprocessSearchQuery('id: abc123')).toEqual({ type: 'noteIdLookup', query: 'abc123' });
     });
 
-    it('should detect single alphanumeric token with digits as noteId (heuristic)', () => {
-      expect(preprocessSearchQuery('abc123def')).toEqual({ type: 'noteIdLookup', query: 'abc123def' });
+    it('should detect single 12-char alphanumeric token with digits as noteId (heuristic)', () => {
+      expect(preprocessSearchQuery('abc123def456')).toEqual({
+        type: 'noteIdLookup',
+        query: 'abc123def456',
+      });
     });
 
-    it('should detect long noteId-like tokens', () => {
-      expect(preprocessSearchQuery('note1234abcdef5678')).toEqual({ type: 'noteIdLookup', query: 'note1234abcdef5678' });
+    it('should NOT auto-detect tokens shorter than 12 chars (search terms like web3)', () => {
+      expect(preprocessSearchQuery('abc123def')).toEqual({ type: 'search', query: 'abc123def' });
+      expect(preprocessSearchQuery('web3')).toEqual({ type: 'search', query: 'web3' });
+    });
+
+    it('should NOT auto-detect tokens longer than 12 chars', () => {
+      expect(preprocessSearchQuery('note1234abcdef5678')).toEqual({
+        type: 'search',
+        query: 'note1234abcdef5678',
+      });
+    });
+
+    it('should NOT auto-detect 12-char all-letter tokens (digit required)', () => {
+      expect(preprocessSearchQuery('abcdefghijkl')).toEqual({
+        type: 'search',
+        query: 'abcdefghijkl',
+      });
     });
 
     it('should NOT treat pure-alpha words as noteId', () => {
@@ -150,8 +168,9 @@ describe('preprocessSearchQuery', () => {
       expect(preprocessSearchQuery('123')).toEqual({ type: 'search', query: '123' });
     });
 
-    it('should detect 4-char token with digit as noteId', () => {
-      expect(preprocessSearchQuery('ab1c')).toEqual({ type: 'noteIdLookup', query: 'ab1c' });
+    it('should NOT auto-detect 4-char tokens (id: prefix required for short IDs)', () => {
+      expect(preprocessSearchQuery('ab1c')).toEqual({ type: 'search', query: 'ab1c' });
+      expect(preprocessSearchQuery('id:ab1c')).toEqual({ type: 'noteIdLookup', query: 'ab1c' });
     });
 
     it('should NOT treat multi-word queries as noteId', () => {

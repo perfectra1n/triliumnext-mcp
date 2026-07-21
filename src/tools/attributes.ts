@@ -15,11 +15,15 @@ const getAttributesSchema = z
     noteId: z
       .string()
       .optional()
-      .describe('If provided, returns all attributes of this note grouped by type (labels, relations).'),
+      .describe(
+        'If provided, returns all attributes of this note grouped by type (labels, relations).'
+      ),
     attributeId: z
       .string()
       .optional()
-      .describe('If provided, returns the single attribute with this ID (noteId, type, name, value, position).'),
+      .describe(
+        'If provided, returns the single attribute with this ID (noteId, type, name, value, position).'
+      ),
   })
   .check((ctx) => {
     const { noteId, attributeId } = ctx.value;
@@ -49,6 +53,14 @@ const setAttributeSchema = z.object({
     .min(1, 'Attribute name is required')
     .describe('Name of the attribute (without # or ~)'),
   value: z.string().describe('Value (for labels) or target noteId (for relations)'),
+  mode: z
+    .enum(['upsert', 'add'])
+    .default('upsert')
+    .describe(
+      '"upsert" (default) — update the first existing attribute with the same type+name, or create ' +
+        'one if none exists. "add" — always create a new attribute, enabling multiple same-name ' +
+        'labels (e.g. several #tag values on one note). Ignored when attributeId is provided.'
+    ),
   isInheritable: z.boolean().optional().describe('Whether inherited by child notes'),
   position: positionSchema
     .optional()
@@ -79,15 +91,18 @@ export function registerAttributeTools(): Tool[] {
     ),
     defineTool(
       'set_attribute',
-      'Add or update an attribute on a note (upsert). For labels, value is the label value. ' +
-        'For relations, value is the target noteId. If the attribute (noteId+type+name) already exists, ' +
-        'its value/position are updated; otherwise a new attribute is created.',
+      'Add or update an attribute on a note. For labels, value is the label value. ' +
+        'For relations, value is the target noteId. Default mode "upsert": if an attribute with the ' +
+        'same noteId+type+name already exists, its value/position are updated (the first match, if ' +
+        'several share the name); otherwise a new attribute is created. Pass mode="add" to always ' +
+        'create — Trilium allows multiple same-name labels (e.g. several #tag values).',
       setAttributeSchema,
       {
-        title: 'Set attribute (upsert)',
+        title: 'Set attribute',
         readOnlyHint: false,
         destructiveHint: false,
-        idempotentHint: true,
+        // Not idempotent: mode="add" creates a new attribute on every call.
+        idempotentHint: false,
       }
     ),
     defineTool(
@@ -139,7 +154,7 @@ export async function handleAttributeTool(
       const parsed = setAttributeSchema.parse(args);
 
       let existingAttr = null;
-      if (!parsed.attributeId) {
+      if (!parsed.attributeId && parsed.mode !== 'add') {
         const note = await client.getNote(parsed.noteId);
         existingAttr = note.attributes.find(
           (a) => a.type === parsed.type && a.name === parsed.name

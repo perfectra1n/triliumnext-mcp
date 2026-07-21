@@ -12,24 +12,18 @@ import {
 } from './validators.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
-import { isImageMimeType, isBinaryMimeType, base64ToBuffer } from './attachments.js';
+import { isImageMimeType, isBinaryMimeType, base64ToBuffer, parseDataUrl } from './attachments.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
-
-/**
- * Parse a data URL (data:mime;base64,content) and extract the MIME type and base64 content.
- * Returns null if the string is not a data URL.
- */
-function parseDataUrl(data: string): { mime: string; base64: string } | null {
-  const match = data.match(/^data:([^;]+);base64,(.+)$/s);
-  if (!match) return null;
-  return { mime: match[1], base64: match[2] };
-}
+import { CONTENT_CHAR_CAP } from './contentLimits.js';
 
 /**
  * Resolve the data field: if it's a data URL, extract base64 + mime (overriding explicit mime).
  * If it's raw base64, return as-is with the explicit mime.
  */
-function resolveAttachmentData(entry: { data: string; mime: string }): { data: string; mime: string } {
+function resolveAttachmentData(entry: { data: string; mime: string }): {
+  data: string;
+  mime: string;
+} {
   const parsed = parseDataUrl(entry.data);
   if (parsed) {
     return { data: parsed.base64, mime: parsed.mime };
@@ -38,22 +32,31 @@ function resolveAttachmentData(entry: { data: string; mime: string }): { data: s
 }
 
 const imageEntrySchema = z.object({
-  data: z.string().describe(
-    'Image data as base64 string or data URL (data:image/png;base64,...). ' +
-    'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
-  ),
-  mime: z.string().describe('MIME type of the image (e.g., "image/png", "image/jpeg"). Ignored if data is a data URL.'),
+  data: z
+    .string()
+    .describe(
+      'Image data as base64 string or data URL (data:image/png;base64,...). ' +
+        'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
+    ),
+  mime: z
+    .string()
+    .describe(
+      'MIME type of the image (e.g., "image/png", "image/jpeg"). Ignored if data is a data URL.'
+    ),
   filename: z.string().describe('Filename for the image attachment (e.g., "screenshot.png")'),
 });
 
-const imagesFieldSchema = z.array(imageEntrySchema).optional().describe(
-  'Optional array of images to embed in the note. The data field accepts raw base64 or a data URL (data:image/png;base64,...). ' +
-  'Reference images in your content using placeholder URLs: in markdown use ![alt](image:0), ![alt](image:1), etc. ' +
-  'In HTML use <img src="image:0"> (double quotes required). The number is the zero-based index into THIS array — ' +
-  'placeholders do NOT reference attachments uploaded in earlier calls. Images and placeholders must be provided together in the same call. ' +
-  'Images without a corresponding placeholder are appended at the end of the content. ' +
-  'To reference an attachment you uploaded separately, use its real URL: <img src="api/attachments/{attachmentId}/image/{filename}">.'
-);
+const imagesFieldSchema = z
+  .array(imageEntrySchema)
+  .optional()
+  .describe(
+    'Optional array of images to embed in the note. The data field accepts raw base64 or a data URL (data:image/png;base64,...). ' +
+      'Reference images in your content using placeholder URLs: in markdown use ![alt](image:0), ![alt](image:1), etc. ' +
+      'In HTML use <img src="image:0"> (double quotes required). The number is the zero-based index into THIS array — ' +
+      'placeholders do NOT reference attachments uploaded in earlier calls. Images and placeholders must be provided together in the same call. ' +
+      'Images without a corresponding placeholder are appended at the end of the content. ' +
+      'To reference an attachment you uploaded separately, use its real URL: <img src="api/attachments/{attachmentId}/image/{filename}">.'
+  );
 
 /**
  * Create attachments for each image and replace placeholder references in HTML content.
@@ -107,22 +110,31 @@ async function processImages(
 }
 
 const fileEntrySchema = z.object({
-  data: z.string().describe(
-    'File data as base64 string or data URL (data:application/pdf;base64,...). ' +
-    'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
-  ),
-  mime: z.string().describe('MIME type of the file (e.g., "application/pdf", "text/csv"). Ignored if data is a data URL.'),
+  data: z
+    .string()
+    .describe(
+      'File data as base64 string or data URL (data:application/pdf;base64,...). ' +
+        'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
+    ),
+  mime: z
+    .string()
+    .describe(
+      'MIME type of the file (e.g., "application/pdf", "text/csv"). Ignored if data is a data URL.'
+    ),
   filename: z.string().describe('Filename for the file attachment (e.g., "report.pdf")'),
 });
 
-const filesFieldSchema = z.array(fileEntrySchema).optional().describe(
-  'Optional array of files to attach and embed as download links in the note. The data field accepts raw base64 or a data URL. ' +
-  'Reference files in your content using placeholder URLs: in markdown use [label](file:0), [label](file:1), etc. ' +
-  'In HTML use <a href="file:0">label</a> (double quotes required). The number is the zero-based index into THIS array — ' +
-  'placeholders do NOT reference attachments uploaded in earlier calls. Files and placeholders must be provided together in the same call. ' +
-  'Files without a corresponding placeholder are appended at the end of the content as download links. ' +
-  'To reference an attachment you uploaded separately, use its real URL: <a href="api/attachments/{attachmentId}/download">label</a>.'
-);
+const filesFieldSchema = z
+  .array(fileEntrySchema)
+  .optional()
+  .describe(
+    'Optional array of files to attach and embed as download links in the note. The data field accepts raw base64 or a data URL. ' +
+      'Reference files in your content using placeholder URLs: in markdown use [label](file:0), [label](file:1), etc. ' +
+      'In HTML use <a href="file:0">label</a> (double quotes required). The number is the zero-based index into THIS array — ' +
+      'placeholders do NOT reference attachments uploaded in earlier calls. Files and placeholders must be provided together in the same call. ' +
+      'Files without a corresponding placeholder are appended at the end of the content as download links. ' +
+      'To reference an attachment you uploaded separately, use its real URL: <a href="api/attachments/{attachmentId}/download">label</a>.'
+  );
 
 /**
  * Create attachments for each file and replace placeholder references in HTML content.
@@ -241,7 +253,9 @@ const createNoteSchema = z.object({
   parentNoteId: z
     .string()
     .min(1, 'Parent note ID is required')
-    .describe('ID of the parent note. Before choosing a parent, use search_notes and get_note_tree to explore the existing note hierarchy and find the most appropriate location. Only use "root" when the note truly belongs at the top level — most notes belong under an existing section or folder.'),
+    .describe(
+      'ID of the parent note. Before choosing a parent, use search_notes and get_note_tree to explore the existing note hierarchy and find the most appropriate location. Only use "root" when the note truly belongs at the top level — most notes belong under an existing section or folder.'
+    ),
   title: z.string().min(1, 'Title is required').describe('Title of the new note'),
   type: noteTypeSchema.describe(
     'Type of the note. For runnable scripts, render notes, or widgets, see the server instructions ' +
@@ -258,7 +272,7 @@ const createNoteSchema = z.object({
     ),
   format: z
     .enum(['html', 'markdown'])
-    .optional()
+    .default('html')
     .describe(
       'Content format for text notes. Use "markdown" to automatically convert markdown to HTML. ' +
         'Defaults to "html". Only applies to text notes.'
@@ -312,17 +326,36 @@ const getNoteSchema = z.object({
     ),
   format: z
     .enum(['html', 'markdown'])
-    .optional()
+    .default('html')
     .describe(
       'Content format. Use "markdown" to convert stored HTML to markdown. Defaults to "html". ' +
         'Ignored when include_content=false.'
     ),
   includeImages: z
     .boolean()
-    .optional()
+    .default(true)
     .describe(
       'Whether to fetch embedded images as MCP image blocks. Defaults to true. ' +
         'Ignored when include_content=false.'
+    ),
+  content_start: z
+    .number()
+    .int('content_start must be an integer')
+    .min(0, 'content_start must be >= 0')
+    .default(0)
+    .describe(
+      'Character offset into the (format-converted) content to start from — for paging through ' +
+        'large notes. Defaults to 0. The metadata block reports the returned range and total size.'
+    ),
+  content_max_chars: z
+    .number()
+    .int('content_max_chars must be an integer')
+    .min(1, 'content_max_chars must be at least 1')
+    .max(500_000, 'content_max_chars cannot exceed 500000')
+    .default(CONTENT_CHAR_CAP)
+    .describe(
+      `Maximum content characters to return (default ${CONTENT_CHAR_CAP}). When the note is larger, ` +
+        'the content is truncated with a notice explaining how to fetch the rest.'
     ),
 });
 
@@ -370,7 +403,7 @@ const writeNoteSchema = z
       .describe('"edit" mode: unified diff to apply to existing content.'),
     format: z
       .enum(['html', 'markdown'])
-      .optional()
+      .default('html')
       .describe(
         'Content format for text notes. Use "markdown" to auto-convert markdown to HTML. ' +
           'Defaults to "html". Only applies in "replace"/"append" modes.'
@@ -453,7 +486,8 @@ const writeNoteSchema = z
         ctx.issues.push({
           code: 'custom',
           input: ctx.value,
-          message: 'format="markdown" cannot be used with mode="edit" — diffs operate on stored HTML',
+          message:
+            'format="markdown" cannot be used with mode="edit" — diffs operate on stored HTML',
           path: ['format'],
         });
       }
@@ -461,7 +495,8 @@ const writeNoteSchema = z
         ctx.issues.push({
           code: 'custom',
           input: ctx.value,
-          message: 'mode="edit" cannot include images/files — use mode="replace"/"append" to embed attachments',
+          message:
+            'mode="edit" cannot include images/files — use mode="replace"/"append" to embed attachments',
           path: [],
         });
       }
@@ -496,8 +531,11 @@ export function registerNoteTools(): Tool[] {
     // and lets clients with first-N pre-load policies load reads before writes.
     defineTool(
       'get_note',
-      'Read a note. Returns the note body (HTML by default, or markdown with format="markdown") together with metadata ' +
-        '(title, type, attributes, parent/child IDs) and any embedded image attachments as MCP image blocks. ' +
+      'Read a note. The response has two text blocks — first the metadata JSON (title, type, attributes, ' +
+        'parent/child IDs, plus a contentInfo object with total size and the returned character range), then the ' +
+        'note body (HTML by default, or markdown with format="markdown") — followed by any embedded image ' +
+        `attachments as MCP image blocks. Bodies over ${CONTENT_CHAR_CAP} characters are truncated with a notice; ` +
+        'page through large notes with content_start/content_max_chars. ' +
         'This is the canonical and complete way to read a note — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
         '(e.g. via curl, fetch, or shell). The response format is already designed for direct LLM consumption. ' +
         'If you only need the title, type, attributes, or parent/child IDs (e.g. for tree navigation), pass include_content=false to skip the body.',
@@ -543,7 +581,12 @@ export function registerNoteTools(): Tool[] {
       'Delete or restore a note. Required "action": "delete" soft-deletes the note (and all its branches); "undelete" restores a previously-deleted note. ' +
         'Restoring requires at least one undeleted parent. Use get_note_history to find deleted notes.',
       deleteNoteSchema,
-      { title: 'Delete or restore note', readOnlyHint: false, destructiveHint: true, idempotentHint: true }
+      {
+        title: 'Delete or restore note',
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+      }
     ),
   ];
 }
@@ -557,7 +600,9 @@ export async function handleNoteTool(
   name: string,
   args: unknown
 ): Promise<{
-  content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }>;
+  content: Array<
+    { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
+  >;
 } | null> {
   switch (name) {
     case 'create_note': {
@@ -623,11 +668,36 @@ export async function handleNoteTool(
       }
 
       const rawHtml = await client.getNoteContent(parsed.noteId);
-      const textContent = parsed.format === 'markdown' ? convertHtmlToMarkdown(rawHtml) : rawHtml;
+      const converted = parsed.format === 'markdown' ? convertHtmlToMarkdown(rawHtml) : rawHtml;
+
+      const totalChars = converted.length;
+      const start = Math.min(parsed.content_start, totalChars);
+      const end = Math.min(start + parsed.content_max_chars, totalChars);
+      const truncated = end < totalChars;
+      let textContent = converted.slice(start, end);
+      if (truncated) {
+        textContent +=
+          `\n\n---\n**Content truncated:** showing characters ${start}-${end} of ${totalChars}. ` +
+          `Call get_note again with content_start=${end} to continue` +
+          (parsed.format === 'markdown'
+            ? '.'
+            : ' (format="markdown" is usually more token-efficient).');
+      }
+
+      const metaBlock = {
+        ...meta,
+        contentInfo: {
+          format: parsed.format,
+          totalChars,
+          returnedStart: start,
+          returnedEnd: end,
+          truncated,
+        },
+      };
 
       const out: Array<
         { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
-      > = [];
+      > = [{ type: 'text', text: JSON.stringify(metaBlock, null, 2) }];
 
       const wantImages = parsed.includeImages !== false;
       if (wantImages) {
@@ -639,7 +709,12 @@ export async function handleNoteTool(
           imageAttachments.map(async (a) => {
             try {
               const data = await client.getAttachmentContentAsBase64(a.attachmentId);
-              return { attachmentId: a.attachmentId, success: true as const, data, mimeType: a.mime };
+              return {
+                attachmentId: a.attachmentId,
+                success: true as const,
+                data,
+                mimeType: a.mime,
+              };
             } catch (error) {
               return {
                 attachmentId: a.attachmentId,
@@ -657,7 +732,9 @@ export async function handleNoteTool(
 
         if (otherAttachments.length > 0) {
           const attachmentList = otherAttachments
-            .map((a) => `- **${a.title || a.attachmentId}** (${a.mime}) - ID: \`${a.attachmentId}\``)
+            .map(
+              (a) => `- **${a.title || a.attachmentId}** (${a.mime}) - ID: \`${a.attachmentId}\``
+            )
             .join('\n');
           finalText +=
             `\n\n---\n**Attachments:** This note has ${otherAttachments.length} non-image attachment(s) ` +
@@ -755,7 +832,11 @@ export async function handleNoteTool(
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ success: true, noteId: parsed.noteId, action: 'delete' }, null, 2),
+              text: JSON.stringify(
+                { success: true, noteId: parsed.noteId, action: 'delete' },
+                null,
+                2
+              ),
             },
           ],
         };

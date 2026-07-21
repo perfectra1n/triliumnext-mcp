@@ -123,7 +123,10 @@ export const dateSchema = z
  */
 export const weekSchema = z
   .string()
-  .regex(/^\d{4}-W\d{2}$/, 'Invalid week format. Expected: "YYYY-Www" (e.g., "2024-W03")');
+  .regex(
+    /^\d{4}-W(0[1-9]|[1-4]\d|5[0-3])$/,
+    'Invalid week format. Expected: "YYYY-Www" with W01-W53 (e.g., "2024-W03")'
+  );
 
 /**
  * Month validator for calendar operations

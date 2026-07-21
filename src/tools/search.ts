@@ -20,12 +20,32 @@ const searchNotesSchema = z.object({
   fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
   includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
   ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
+  ancestorDepth: z
+    .string()
+    .regex(
+      /^(eq|lt|gt)\d{1,3}$/,
+      'Invalid ancestorDepth. Expected eqN, ltN, or gtN (e.g. "eq1", "lt3")'
+    )
+    .optional()
+    .describe(
+      'Depth constraint relative to ancestorNoteId: "eq1" = direct children only, ' +
+        '"lt3" = fewer than 3 levels deep, "gt1" = deeper than direct children.'
+    ),
   orderBy: z
     .string()
     .optional()
-    .describe('Property to order by (title, dateCreated, dateModified)'),
+    .describe(
+      'Property to order by: title, dateCreated, dateModified, utcDateCreated, utcDateModified, ' +
+        'isProtected, isArchived, or a label (e.g. "#publicationDate").'
+    ),
   orderDirection: orderDirectionSchema.optional().describe('Order direction'),
-  limit: searchLimitSchema.optional().describe('Maximum number of results'),
+  limit: searchLimitSchema
+    .optional()
+    .describe('Maximum number of results. No default — pass one to bound large result sets.'),
+  debug: z
+    .boolean()
+    .optional()
+    .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
 });
 
 const getNoteTreeSchema = z.object({
@@ -33,7 +53,82 @@ const getNoteTreeSchema = z.object({
     .string()
     .min(1, 'Note ID is required')
     .describe('ID of the parent note (use "root" for the root note)'),
+  depth: z
+    .number()
+    .int('Depth must be an integer')
+    .min(1, 'Depth must be at least 1')
+    .max(5, 'Depth cannot exceed 5')
+    .default(1)
+    .describe(
+      'How many levels of children to expand (default 1, max 5). Expanded nodes include title/type; ' +
+        'nodes at the boundary include childNoteIds for further drilling.'
+    ),
 });
+
+/** Soft cap on notes fetched per get_note_tree call to bound response size. */
+const MAX_TREE_NOTES = 200;
+
+type NoteLike = Awaited<ReturnType<TriliumClient['getNote']>>;
+
+interface TreeNode {
+  noteId: string;
+  title?: string;
+  type?: string;
+  childCount?: number;
+  childBranchIds?: string[];
+  systemChildrenSkipped?: number;
+  childNoteIds?: string[];
+  children?: TreeNode[];
+  error?: string;
+}
+
+async function buildTree(
+  client: TriliumClient,
+  note: NoteLike,
+  depth: number,
+  includeSystem: boolean,
+  budget: { remaining: number; truncated: boolean }
+): Promise<TreeNode> {
+  const allChildIds = note.childNoteIds ?? [];
+  const visibleIds = includeSystem ? allChildIds : allChildIds.filter((id) => !id.startsWith('_'));
+
+  const node: TreeNode = {
+    noteId: note.noteId,
+    title: note.title,
+    type: note.type,
+    childCount: visibleIds.length,
+    childBranchIds: note.childBranchIds,
+  };
+  const skipped = allChildIds.length - visibleIds.length;
+  if (skipped > 0) {
+    node.systemChildrenSkipped = skipped;
+  }
+
+  if (depth <= 0 || visibleIds.length === 0) {
+    if (visibleIds.length > 0) {
+      node.childNoteIds = visibleIds;
+    }
+    return node;
+  }
+
+  const toFetch = visibleIds.slice(0, Math.max(0, budget.remaining));
+  if (toFetch.length < visibleIds.length) {
+    budget.truncated = true;
+  }
+  budget.remaining -= toFetch.length;
+
+  node.children = await Promise.all(
+    toFetch.map(async (id): Promise<TreeNode> => {
+      try {
+        const child = await client.getNote(id);
+        return await buildTree(client, child, depth - 1, includeSystem, budget);
+      } catch (error) {
+        return { noteId: id, error: error instanceof Error ? error.message : String(error) };
+      }
+    })
+  );
+  return node;
+}
 
 export function registerSearchTools(): Tool[] {
   return [
@@ -60,8 +155,8 @@ export function registerSearchTools(): Tool[] {
 - \`(#year >= 1950 AND #year <= 1960)\` - AND with parentheses for grouping
 
 **Direct note lookup:**
-- \`id:abc123\` - Look up a note directly by its ID
-- Single alphanumeric tokens with digits are auto-detected as note IDs (e.g., \`abc123\`)
+- \`id:abc123\` - Look up a note directly by its ID (any 4-32 char ID, including digit-free ones)
+- Single 12-character alphanumeric tokens containing a digit are auto-detected as note IDs (e.g., \`abc123def456\`); if no note has that ID, the query falls back to a normal search
 
 **Title search:**
 - \`title:meeting\` - Search notes by title containing "meeting"
@@ -81,14 +176,21 @@ export function registerSearchTools(): Tool[] {
 - \`#type = task #priority = high\` - Multiple label conditions (implicit AND)
 - \`meeting or project\` - Notes containing "meeting" OR "project"
 - \`id:abc123def\` - Direct lookup of note by ID
-- \`title:weekly meeting\` - Notes with "weekly meeting" in title`,
+- \`title:weekly meeting\` - Notes with "weekly meeting" in title
+
+**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).`,
       searchNotesSchema,
       { title: 'Search notes', readOnlyHint: true, openWorldHint: false }
     ),
     defineTool(
       'get_note_tree',
-      'Get children of a note for tree navigation. Returns the note with its childNoteIds populated. ' +
-        'Use this tool to explore the note hierarchy before creating or moving notes — start from "root" to see top-level structure, then drill into child notes to find the best placement. ' +
+      'Explore the note hierarchy. Returns the note with its children expanded "depth" levels (default 1) — ' +
+        'each expanded node includes noteId, title, type, childCount, and childBranchIds (branch IDs are what ' +
+        'organize_note reorder/unlink need). Nodes at the depth boundary include childNoteIds so you can drill ' +
+        'further with another call. System notes (IDs starting with "_", e.g. the _hidden subtree under root) are ' +
+        'skipped unless you request a system note directly. At most ~200 notes are fetched per call; the response ' +
+        'is marked truncated when the cap is hit. ' +
+        'Use this tool to explore the hierarchy before creating or moving notes — start from "root" to see top-level structure. ' +
         'When the user asks to create or organize notes, proactively explore the tree and suggest where the note should go.',
       getNoteTreeSchema,
       { title: 'Get note tree', readOnlyHint: true }
@@ -121,9 +223,11 @@ export async function handleSearchTool(
               fastSearch: parsed.fastSearch,
               includeArchivedNotes: parsed.includeArchivedNotes,
               ancestorNoteId: parsed.ancestorNoteId,
+              ancestorDepth: parsed.ancestorDepth,
               orderBy: parsed.orderBy,
               orderDirection: parsed.orderDirection,
               limit: parsed.limit,
+              debug: parsed.debug,
             });
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -138,9 +242,11 @@ export async function handleSearchTool(
         fastSearch: parsed.fastSearch,
         includeArchivedNotes: parsed.includeArchivedNotes,
         ancestorNoteId: parsed.ancestorNoteId,
+        ancestorDepth: parsed.ancestorDepth,
         orderBy: parsed.orderBy,
         orderDirection: parsed.orderDirection,
         limit: parsed.limit,
+        debug: parsed.debug,
       });
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
@@ -149,18 +255,19 @@ export async function handleSearchTool(
 
     case 'get_note_tree': {
       const parsed = getNoteTreeSchema.parse(args);
-      const note = await client.getNote(parsed.noteId);
-      // Return a simplified view focused on tree navigation
-      const treeView = {
-        noteId: note.noteId,
-        title: note.title,
-        type: note.type,
-        childNoteIds: note.childNoteIds,
-        childBranchIds: note.childBranchIds,
-        isExpanded: note.childNoteIds.length > 0,
-      };
+      const includeSystem = parsed.noteId.startsWith('_');
+      const budget = { remaining: MAX_TREE_NOTES, truncated: false };
+      const root = await client.getNote(parsed.noteId);
+      const tree = await buildTree(client, root, parsed.depth, includeSystem, budget);
+      const payload: Record<string, unknown> = { ...tree };
+      if (budget.truncated) {
+        payload.truncated = true;
+        payload.note =
+          `Fetched at most ${MAX_TREE_NOTES} notes; some children are omitted. ` +
+          'Call get_note_tree on a child noteId to continue exploring.';
+      }
       return {
-        content: [{ type: 'text', text: JSON.stringify(treeView, null, 2) }],
+        content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
       };
     }
 

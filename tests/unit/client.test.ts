@@ -314,4 +314,47 @@ describe('TriliumClient', () => {
       );
     });
   });
+
+  describe('exportNote', () => {
+    it('parses the ETAPI error body on failure instead of a generic EXPORT_ERROR', async () => {
+      mockFetch.mockResolvedValue({
+        ok: false,
+        status: 404,
+        json: async () => ({ status: 404, code: 'NOTE_NOT_FOUND', message: 'Note not found' }),
+      });
+
+      try {
+        await client.exportNote('gone');
+        expect.unreachable('exportNote should have thrown');
+      } catch (e) {
+        expect(e).toBeInstanceOf(TriliumClientError);
+        expect((e as TriliumClientError).code).toBe('NOTE_NOT_FOUND');
+        expect((e as TriliumClientError).message).toBe('Note not found');
+      }
+    });
+  });
+
+  describe('importZip', () => {
+    it('POSTs the raw ZIP bytes as application/octet-stream and returns the created note', async () => {
+      const noteWithBranch = { note: { noteId: 'newN' }, branch: { branchId: 'newB' } };
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        json: async () => noteWithBranch,
+      });
+
+      const buf = Buffer.from('PK-fake-zip');
+      const result = await client.importZip('parent1', buf);
+
+      expect(result).toEqual(noteWithBranch);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:37740/etapi/notes/parent1/import',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({ 'Content-Type': 'application/octet-stream' }),
+          body: buf,
+        })
+      );
+    });
+  });
 });

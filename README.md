@@ -407,7 +407,7 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 
 | Tool | Description |
 |------|-------------|
-| `get_note` | Read a note. Returns the body, metadata, and embedded images by default; pass `include_content=false` for metadata-only reads (e.g. tree navigation). |
+| `get_note` | Read a note. Returns a metadata block (with a `contentInfo` size summary), the body, and embedded images by default; bodies over 50k chars are truncated with paging via `content_start`/`content_max_chars`. Pass `include_content=false` for metadata-only reads (e.g. tree navigation). |
 | `get_note_history` | Get recent changes (creations, modifications, deletions) across the tree, with optional subtree filtering. |
 | `create_note` | Create a note with title, content, type, and parent. Supports inline image/file embedding. |
 | `write_note` | Write to a note via `mode`: `"metadata"` (title/type/mime), `"replace"` (overwrite content), `"append"` (concatenate), `"edit"` (search/replace or unified diff). Supports inline image/file embedding in `replace`/`append` modes. |
@@ -417,8 +417,8 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 
 | Tool | Description |
 |------|-------------|
-| `search_notes` | Full-text and attribute search with filters, ordering, and limits. |
-| `get_note_tree` | Get children of a note for tree navigation. |
+| `search_notes` | Full-text and attribute search with filters, subtree scoping (`ancestorNoteId` + `ancestorDepth`), ordering, limits, and query-parse diagnostics (`debug`). |
+| `get_note_tree` | Explore the hierarchy: children expanded `depth` levels (1-5) with titles, types, child counts, and branch IDs. |
 
 ### Organization (1 tool)
 
@@ -431,21 +431,21 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 | Tool | Description |
 |------|-------------|
 | `get_attributes` | Get all attributes of a note (pass `noteId`) or a single attribute by ID (pass `attributeId`). |
-| `set_attribute` | Upsert an attribute on a note. |
+| `set_attribute` | Upsert an attribute on a note (default), or `mode="add"` to always create — enabling multiple same-name labels. |
 | `delete_attribute` | Remove an attribute by ID. |
 
 ### Calendar & Journal (1 tool)
 
 | Tool | Description |
 |------|-------------|
-| `get_special_note` | Get the daily or inbox note via `kind`: `"day"` or `"inbox"` (optional `date`, defaults to today). |
+| `get_special_note` | Get a periodic or inbox note via `kind`: `"day"`, `"week"`, `"month"`, `"year"`, or `"inbox"` (optional `date` in the kind's format, defaults to the current period). |
 
 ### Attachments (4 tools)
 
 | Tool | Description |
 |------|-------------|
 | `get_attachment` | Read an attachment (pass `attachmentId`) or list a note's attachments (pass `noteId`). With `attachmentId`, the body is returned by default — images come back as MCP image blocks. Pass `include_content=false` when you only need metadata (e.g. checking size before pulling a large binary). |
-| `create_attachment` | Create a new attachment (image or file) for a note. |
+| `create_attachment` | Create a new attachment (image or file) for a note. Binary content as base64 or a data URL. |
 | `write_attachment` | Write to an attachment via `mode`: `"metadata"`, `"replace"`, or `"edit"`. |
 | `delete_attachment` | Delete an attachment. |
 
@@ -460,7 +460,7 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 | Tool | Description |
 |------|-------------|
 | `create_revision` | Create a revision snapshot of a note. |
-| `manage_system` | System ops via `action`: `"backup"` (create a DB backup by `backupName`) or `"export"` (export a note subtree as ZIP, returned base64-encoded). |
+| `manage_system` | System ops via `action`: `"backup"` (create a DB backup by `backupName`), `"export"` (export a note subtree as ZIP, returned base64-encoded), `"import"` (import a base64 ZIP under a parent note), or `"app_info"` (Trilium version/diagnostics). |
 
 ### Migrating from v1
 

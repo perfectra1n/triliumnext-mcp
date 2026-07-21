@@ -29,10 +29,13 @@ export function defineTool(
   schema: z.ZodObject<z.ZodRawShape>,
   annotations?: ToolAnnotations
 ): Tool {
-  const jsonSchema = schema.toJSONSchema({ unrepresentable: 'any', reused: 'inline' }) as Record<
-    string,
-    unknown
-  >;
+  // io: 'input' emits input-type semantics: fields with .default() are optional
+  // for callers (and carry a `default` keyword) instead of being marked required.
+  const jsonSchema = schema.toJSONSchema({
+    unrepresentable: 'any',
+    reused: 'inline',
+    io: 'input',
+  }) as Record<string, unknown>;
 
   delete jsonSchema.$schema;
   delete jsonSchema.additionalProperties;

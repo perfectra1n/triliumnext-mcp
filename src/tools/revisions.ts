@@ -3,6 +3,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { required } from './validators.js';
+import { capWithNotice } from './contentLimits.js';
 
 const getRevisionsSchema = z
   .object({
@@ -56,7 +57,7 @@ export function registerRevisionTools(): Tool[] {
       'Get note revisions (historical snapshots). Two modes:\n' +
         '- Pass "noteId" to list all revisions for that note (metadata only — revisionId, title, type, dates, content length).\n' +
         '- Pass "revisionId" to fetch a single revision; the HTML body is included by default. ' +
-        'Pass include_content=false on the revisionId path when you only need the revision\'s metadata.\n\n' +
+        "Pass include_content=false on the revisionId path when you only need the revision's metadata.\n\n" +
         'This is the canonical way to read revision content — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
         '(e.g. via curl, fetch, or shell). ' +
         'Distinct from get_note_history (which is a change log across notes). Revisions are content snapshots of a single note.',
@@ -85,7 +86,12 @@ export async function handleRevisionTool(
   const revisionId = required(parsed.revisionId, 'revisionId');
   if (parsed.include_content) {
     const content = await client.getRevisionContent(revisionId);
-    return { content: [{ type: 'text', text: content }] };
+    const capped = capWithNotice(
+      content,
+      'revision',
+      'Restore the revision in Trilium or read the live note with get_note (which supports paging via content_start).'
+    );
+    return { content: [{ type: 'text', text: capped }] };
   }
 
   const revision = await client.getRevision(revisionId);

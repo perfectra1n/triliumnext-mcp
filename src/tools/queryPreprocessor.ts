@@ -105,7 +105,8 @@ function rewriteOrQueries(query: string, tokens: string[]): string {
 
   // Check if any segment is bare fulltext or title: prefixed (needs rewriting)
   const needsRewrite = segments.some(
-    (seg) => isBareFulltextSegment(seg) || (seg.length >= 1 && seg[0].toLowerCase().startsWith('title:'))
+    (seg) =>
+      isBareFulltextSegment(seg) || (seg.length >= 1 && seg[0].toLowerCase().startsWith('title:'))
   );
   if (!needsRewrite) return query;
 
@@ -143,8 +144,11 @@ export function preprocessSearchQuery(query: string): PreprocessedQuery {
     // Invalid id: value — fall through to regular search
   }
 
-  // Heuristic: single token matching entity ID pattern with at least one digit
-  if (tokens.length === 1 && ENTITY_ID_PATTERN.test(tokens[0]) && /\d/.test(tokens[0])) {
+  // Heuristic: single token that looks like a Trilium-generated note ID —
+  // exactly 12 alphanumeric chars with at least one digit. Shorter/longer
+  // forced IDs (4-32 chars) need the explicit id: prefix so ordinary search
+  // terms like "web3" are not intercepted.
+  if (tokens.length === 1 && /^[a-zA-Z0-9]{12}$/.test(tokens[0]) && /\d/.test(tokens[0])) {
     return { type: 'noteIdLookup', query: tokens[0] };
   }
 

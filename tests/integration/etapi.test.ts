@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { fileTypeFromBuffer } from 'file-type';
-import { TriliumClient } from '../../src/client/trilium.js';
+import { TriliumClient, TriliumClientError } from '../../src/client/trilium.js';
 import { handleNoteTool } from '../../src/tools/notes.js';
 import { handleAttachmentTool } from '../../src/tools/attachments.js';
+import { handleCalendarTool, isoWeekString } from '../../src/tools/calendar.js';
+import { handleSystemTool } from '../../src/tools/system.js';
+import { handleSearchTool } from '../../src/tools/search.js';
+import { handleAttributeTool } from '../../src/tools/attributes.js';
 import { setupIntegrationTests, stopTriliumContainer } from './setup.js';
 
 describe('TriliumNext ETAPI Integration Tests', () => {
@@ -842,9 +846,9 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });
 
       expect(result).not.toBeNull();
-      // Should have text block + image block
-      expect(result!.content.length).toBeGreaterThanOrEqual(2);
-      expect(result!.content[0]).toEqual({
+      // Should have metadata block + body block + image block
+      expect(result!.content.length).toBeGreaterThanOrEqual(3);
+      expect(result!.content[1]).toEqual({
         type: 'text',
         text: expect.stringContaining('Note with an attached image'),
       });
@@ -879,9 +883,9 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });
 
       expect(result).not.toBeNull();
-      // Only text block, no image block
-      expect(result!.content).toHaveLength(1);
-      const text = (result!.content[0] as { type: 'text'; text: string }).text;
+      // Metadata block + body block, no image block
+      expect(result!.content).toHaveLength(2);
+      const text = (result!.content[1] as { type: 'text'; text: string }).text;
       expect(text).toContain('report.pdf');
       expect(text).toContain('application/pdf');
       expect(text).toContain('get_attachment');
@@ -911,8 +915,8 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       });
 
       expect(result).not.toBeNull();
-      expect(result!.content).toHaveLength(1);
-      expect(result!.content[0]).toEqual({
+      expect(result!.content).toHaveLength(2);
+      expect(result!.content[1]).toEqual({
         type: 'text',
         text: '<p>Opt out of images</p>',
       });
@@ -1772,6 +1776,181 @@ This has <angle brackets> and "quotes" & ampersands.
       );
       // Should not be 200 (file is not an image)
       expect(resp.status).not.toBe(200);
+    });
+  });
+
+  describe('v2 tool surface additions', () => {
+    it('get_special_note supports month and year kinds', async () => {
+      const month = await handleCalendarTool(client, 'get_special_note', {
+        kind: 'month',
+        date: '2024-06',
+      });
+      const monthNote = JSON.parse((month?.content[0] as { text: string }).text);
+      expect(monthNote.noteId).toBeDefined();
+
+      const year = await handleCalendarTool(client, 'get_special_note', { kind: 'year', date: '2024' });
+      const yearNote = JSON.parse((year?.content[0] as { text: string }).text);
+      expect(yearNote.noteId).toBeDefined();
+    });
+
+    it('get_special_note kind="week" returns a note or an actionable ETAPI error', async () => {
+      // Week notes may require enabling on the calendar root depending on the
+      // Trilium version; either outcome must be well-formed for the LLM.
+      try {
+        const result = await handleCalendarTool(client, 'get_special_note', {
+          kind: 'week',
+          date: isoWeekString(new Date()),
+        });
+        const note = JSON.parse((result?.content[0] as { text: string }).text);
+        expect(note.noteId).toBeDefined();
+      } catch (e) {
+        expect(e).toBeInstanceOf(TriliumClientError);
+        expect((e as TriliumClientError).message.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('manage_system app_info returns version info', async () => {
+      const result = await handleSystemTool(client, 'manage_system', { action: 'app_info' });
+      const info = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(info.appVersion).toBeDefined();
+    });
+
+    it('manage_system export -> import round-trips a subtree', async () => {
+      const source = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Roundtrip Source',
+        type: 'text',
+        content: '<p>roundtrip body</p>',
+      });
+      const exported = await client.exportNote(source.note.noteId, 'html');
+      expect(exported.byteLength).toBeGreaterThan(0);
+
+      const importParent = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Import Target',
+        type: 'text',
+        content: '',
+      });
+      const result = await handleSystemTool(client, 'manage_system', {
+        action: 'import',
+        noteId: importParent.note.noteId,
+        data: Buffer.from(exported).toString('base64'),
+      });
+      const parsed = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(parsed.note.noteId).toBeDefined();
+
+      const imported = await client.getNote(parsed.note.noteId);
+      expect(imported.title).toContain('Roundtrip');
+    });
+
+    it('get_note truncates oversized content with contentInfo and paging', async () => {
+      const big = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Big Note',
+        type: 'text',
+        content: `<p>${'x'.repeat(60_000)}</p>`,
+      });
+
+      const result = await handleNoteTool(client, 'get_note', { noteId: big.note.noteId });
+      const meta = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(meta.contentInfo.truncated).toBe(true);
+      expect(meta.contentInfo.totalChars).toBeGreaterThan(50_000);
+
+      const page2 = await handleNoteTool(client, 'get_note', {
+        noteId: big.note.noteId,
+        content_start: meta.contentInfo.returnedEnd,
+      });
+      const meta2 = JSON.parse((page2?.content[0] as { text: string }).text);
+      expect(meta2.contentInfo.returnedStart).toBe(meta.contentInfo.returnedEnd);
+      expect(meta2.contentInfo.truncated).toBe(false);
+    });
+
+    it('get_note_tree depth=2 returns nested children with titles', async () => {
+      const parent = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Tree Parent',
+        type: 'text',
+        content: '',
+      });
+      const child = await client.createNote({
+        parentNoteId: parent.note.noteId,
+        title: 'Tree Child',
+        type: 'text',
+        content: '',
+      });
+      await client.createNote({
+        parentNoteId: child.note.noteId,
+        title: 'Tree Grandchild',
+        type: 'text',
+        content: '',
+      });
+
+      const result = await handleSearchTool(client, 'get_note_tree', {
+        noteId: parent.note.noteId,
+        depth: 2,
+      });
+      const tree = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(tree.title).toBe('Tree Parent');
+      expect(tree.children[0].title).toBe('Tree Child');
+      expect(tree.children[0].children[0].title).toBe('Tree Grandchild');
+    });
+
+    it('search_notes ancestorDepth=eq1 restricts to direct children', async () => {
+      const parent = await client.createNote({
+        parentNoteId: 'root',
+        title: 'DepthParent uniqdepthtok',
+        type: 'text',
+        content: '',
+      });
+      const child = await client.createNote({
+        parentNoteId: parent.note.noteId,
+        title: 'DepthChild uniqdepthtok',
+        type: 'text',
+        content: '',
+      });
+      await client.createNote({
+        parentNoteId: child.note.noteId,
+        title: 'DepthGrandchild uniqdepthtok',
+        type: 'text',
+        content: '',
+      });
+
+      const result = await handleSearchTool(client, 'search_notes', {
+        query: 'title:uniqdepthtok',
+        ancestorNoteId: parent.note.noteId,
+        ancestorDepth: 'eq1',
+      });
+      const parsed = JSON.parse((result?.content[0] as { text: string }).text);
+      const titles = parsed.results.map((n: { title: string }) => n.title);
+      expect(titles).toContain('DepthChild uniqdepthtok');
+      expect(titles).not.toContain('DepthGrandchild uniqdepthtok');
+    });
+
+    it('set_attribute mode="add" creates multiple same-name labels', async () => {
+      const note = await client.createNote({
+        parentNoteId: 'root',
+        title: 'Multi Label Note',
+        type: 'text',
+        content: '',
+      });
+      await handleAttributeTool(client, 'set_attribute', {
+        noteId: note.note.noteId,
+        type: 'label',
+        name: 'tag',
+        value: 'first',
+      });
+      await handleAttributeTool(client, 'set_attribute', {
+        noteId: note.note.noteId,
+        type: 'label',
+        name: 'tag',
+        value: 'second',
+        mode: 'add',
+      });
+
+      const refreshed = await client.getNote(note.note.noteId);
+      const tags = refreshed.attributes.filter((a) => a.name === 'tag');
+      expect(tags).toHaveLength(2);
+      expect(tags.map((t) => t.value).sort()).toEqual(['first', 'second']);
     });
   });
 });

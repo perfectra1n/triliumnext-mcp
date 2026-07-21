@@ -115,9 +115,10 @@ describe('MCP Transport Integration Tests', () => {
           arguments: { noteId: createdId },
         });
         const content = response.content as Array<{ type: string; text: string }>;
-        // First (and only) block is the body text — NOT JSON metadata.
-        expect(content[0].type).toBe('text');
-        expect(content[0].text).toContain('SENTINEL_BODY_42');
+        // Block 0 is the metadata JSON (with contentInfo); block 1 is the body.
+        expect(JSON.parse(content[0].text).contentInfo).toBeDefined();
+        expect(content[1].type).toBe('text');
+        expect(content[1].text).toContain('SENTINEL_BODY_42');
       } finally {
         await client
           .callTool({ name: 'delete_note', arguments: { noteId: createdId, action: 'delete' } })
@@ -216,8 +217,8 @@ describe('MCP Transport Integration Tests', () => {
           arguments: { noteId: createdId },
         });
         const content = response.content as Array<{ type: string; text: string }>;
-        expect(content[0].type).toBe('text');
-        expect(content[0].text).toContain('SSE_SENTINEL_BODY');
+        expect(content[1].type).toBe('text');
+        expect(content[1].text).toContain('SSE_SENTINEL_BODY');
       } finally {
         await client
           .callTool({ name: 'delete_note', arguments: { noteId: createdId, action: 'delete' } })
@@ -635,8 +636,8 @@ describe('MCP Transport Integration Tests', () => {
       try {
         const response = await client.callTool({ name: 'get_note', arguments: { noteId } });
         const content = response.content as Array<{ type: string; text: string }>;
-        expect(content[0].type).toBe('text');
-        expect(content[0].text).toContain('SSE_BODY_OK');
+        expect(content[1].type).toBe('text');
+        expect(content[1].text).toContain('SSE_BODY_OK');
       } finally {
         await deleteNote(noteId);
       }
@@ -683,7 +684,7 @@ describe('MCP Transport Integration Tests', () => {
           arguments: { noteId, mode: 'replace', content: '<p>REPLACED</p>' },
         });
         const response = await client.callTool({ name: 'get_note', arguments: { noteId } });
-        const body = (response.content as Array<{ type: string; text: string }>)[0].text;
+        const body = (response.content as Array<{ type: string; text: string }>)[1].text;
         expect(body).toContain('REPLACED');
         expect(body).not.toContain('original');
       } finally {
@@ -699,7 +700,7 @@ describe('MCP Transport Integration Tests', () => {
           arguments: { noteId, mode: 'append', content: '<p>SECOND</p>' },
         });
         const response = await client.callTool({ name: 'get_note', arguments: { noteId } });
-        const body = (response.content as Array<{ type: string; text: string }>)[0].text;
+        const body = (response.content as Array<{ type: string; text: string }>)[1].text;
         expect(body).toContain('FIRST');
         expect(body).toContain('SECOND');
       } finally {
@@ -719,7 +720,7 @@ describe('MCP Transport Integration Tests', () => {
           },
         });
         const response = await client.callTool({ name: 'get_note', arguments: { noteId } });
-        const body = (response.content as Array<{ type: string; text: string }>)[0].text;
+        const body = (response.content as Array<{ type: string; text: string }>)[1].text;
         expect(body).toContain('goodbye world');
         expect(body).not.toContain('hello world');
       } finally {
@@ -821,14 +822,22 @@ describe('MCP Transport Integration Tests', () => {
       expect(typeof note.title).toBe('string');
     });
 
-    it('get_note_tree returns root children with childNoteIds populated', async () => {
+    it('get_note_tree returns root children expanded with titles', async () => {
       const response = await client.callTool({
         name: 'get_note_tree',
         arguments: { noteId: 'root' },
       });
-      const tree = parseJsonResponse<{ noteId: string; childNoteIds: string[] }>(response);
+      const tree = parseJsonResponse<{
+        noteId: string;
+        childCount: number;
+        children?: Array<{ noteId: string; title: string }>;
+      }>(response);
       expect(tree.noteId).toBe('root');
-      expect(Array.isArray(tree.childNoteIds)).toBe(true);
+      expect(typeof tree.childCount).toBe('number');
+      if (tree.childCount > 0) {
+        expect(Array.isArray(tree.children)).toBe(true);
+        expect(typeof tree.children![0].title).toBe('string');
+      }
     });
 
     // /notes/history is not exposed by the test container's ETAPI router
@@ -1018,7 +1027,7 @@ describe('MCP Transport Integration Tests', () => {
           arguments: { noteId },
         });
         const defaultContent = defaultResponse.content as Array<{ type: string; text: string }>;
-        expect(defaultContent[0].text).toContain('STREAMABLE_BODY');
+        expect(defaultContent[1].text).toContain('STREAMABLE_BODY');
 
         const metaResponse = await client.callTool({
           name: 'get_note',
@@ -1060,7 +1069,7 @@ describe('MCP Transport Integration Tests', () => {
         const body = (
           (await client.callTool({ name: 'get_note', arguments: { noteId } }))
             .content as Array<{ type: string; text: string }>
-        )[0].text;
+        )[1].text;
         expect(body).toContain('AFTER');
 
         // Attach an image and read it back as an image block.
