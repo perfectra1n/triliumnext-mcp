@@ -48,6 +48,28 @@ const searchNotesSchema = z.object({
     .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
 });
 
+const fuzzySearchSchema = z.object({
+  query: z
+    .string()
+    .min(1, 'Search query is required')
+    .describe(
+      'Fuzzy search: type whatever you remember — keywords, partial titles, tags, or descriptions. ' +
+        'All terms are matched independently (OR logic). Results are ranked by relevance. ' +
+        'Examples: "体积云 Niagara", "UE5 粒子 教程", "trilium backup tool"'
+    ),
+  limit: searchLimitSchema.optional().default(20).describe('Maximum number of results (default 20)'),
+  threshold: z
+    .number()
+    .int()
+    .min(1)
+    .max(100)
+    .optional()
+    .default(1)
+    .describe('Minimum number of query terms a note must match to be included (default 1)'),
+  ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
+  includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
+});
+
 const getNoteTreeSchema = z.object({
   noteId: z
     .string()
@@ -195,6 +217,14 @@ export function registerSearchTools(): Tool[] {
       getNoteTreeSchema,
       { title: 'Get note tree', readOnlyHint: true }
     ),
+    defineTool(
+      'fuzzy_search_notes',
+      'Fuzzy search: type whatever you remember and find notes that match any of your keywords. ' +
+        'Results are ranked by relevance — notes matching more keywords in their title rank highest. ' +
+        'Unlike search_notes which requires exact AND matches, this uses OR logic so partial recall works.',
+      fuzzySearchSchema,
+      { title: 'Fuzzy search notes', readOnlyHint: true }
+    ),
   ];
 }
 
@@ -268,6 +298,88 @@ export async function handleSearchTool(
       }
       return {
         content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }],
+      };
+    }
+
+    case 'fuzzy_search_notes': {
+      const parsed = fuzzySearchSchema.parse(args);
+
+      // 1. Tokenize: split by whitespace and common punctuation
+      const rawTerms = parsed.query
+        .split(/[\s,，、;；。.．!！?？()（）\[\]【】{}「」『』:：]+/)
+        .map((t) => t.trim())
+        .filter((t) => t.length >= 2);
+
+      // Remove duplicates and lowercase
+      const uniqueTerms = [...new Set(rawTerms.map((t) => t.toLowerCase()))];
+
+      if (uniqueTerms.length === 0) {
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ results: [] }) }],
+        };
+      }
+
+      // 2. Build OR query
+      const orQuery = uniqueTerms
+        .map((t) => {
+          // Quote terms with special chars to prevent Trilium parsing issues
+          if (/[^a-zA-Z0-9\u4e00-\u9fff_-]/.test(t)) return `"${t}"`;
+          return t;
+        })
+        .join(' or ');
+
+      // 3. Preprocess (converts bare fulltext OR to note.content *=* form)
+      const preprocessed = preprocessSearchQuery(orQuery);
+
+      // 4. Search with high recall
+      const searchResult = await client.searchNotes({
+        search: preprocessed.query,
+        includeArchivedNotes: parsed.includeArchivedNotes,
+        ancestorNoteId: parsed.ancestorNoteId,
+        limit: 200,
+      });
+
+      // 5. Client-side scoring
+      type ScoredNote = { note: (typeof searchResult.results)[0]; score: number; matchedTerms: number };
+      const scored: ScoredNote[] = searchResult.results.map((note) => {
+        const lowerTitle = note.title.toLowerCase();
+        let score = 0;
+        let matchedTerms = 0;
+
+        for (const term of uniqueTerms) {
+          // Check title
+          if (lowerTitle.includes(term)) {
+            score += 10;
+            matchedTerms++;
+            // Bonus for exact word match in title
+            const titleWords = lowerTitle.split(/[\s,，、；：()（）\[\]【】/\\_\-]+/);
+            if (titleWords.some((w) => w === term)) {
+              score += 5;
+            }
+          }
+          // Check tag values
+          for (const attr of note.attributes) {
+            if (attr.type === 'label' && attr.name === 'tag' && attr.value.toLowerCase().includes(term)) {
+              score += 3;
+              break;
+            }
+          }
+        }
+
+        return { note, score, matchedTerms };
+      });
+
+      // 6. Filter by threshold and sort
+      const threshold = parsed.threshold ?? 1;
+      const maxResults = parsed.limit ?? 20;
+      const filtered = scored
+        .filter((s) => s.matchedTerms >= threshold)
+        .sort((a, b) => b.score - a.score)
+        .slice(0, maxResults)
+        .map((s) => ({ ...s.note, _score: s.score, _matchedTerms: s.matchedTerms }));
+
+      return {
+        content: [{ type: 'text', text: JSON.stringify({ results: filtered }, null, 2) }],
       };
     }
 
