@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@modelcontextprotocol/sdk':
-        specifier: ^1.30.0
+        specifier: ^1.25.3
         version: 1.30.0(zod@4.4.3)
       diff:
         specifier: ^9.0.0
@@ -18,8 +18,8 @@ importers:
         specifier: ^22.0.0
         version: 22.0.1
       jose:
-        specifier: ^6.2.3
-        version: 6.2.4
+        specifier: ^6.2.5
+        version: 6.2.5
       marked:
         specifier: ^18.0.0
         version: 18.0.7
@@ -1054,9 +1054,6 @@ packages:
 
   jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
-
-  jose@6.2.4:
-    resolution: {integrity: sha512-N8acGzVsQy6M/fjFcxtysNc4Q379TcM5dM/qKkNtsHFji88yANnXTr7BLeP75iPnFwBfQzM/jg2BZ9+HZrHCZA==}
 
   jose@6.2.5:
     resolution: {integrity: sha512-2E5L2yRp03FnwreJLJX8/r7mHiZICCf8kG7fAsTWkSQTDAcc46NIZoQLKy+EJ8sPoJlxyS4OQR5H70LjIZZlIQ==}
@@ -2796,8 +2793,6 @@ snapshots:
       '@isaacs/cliui': 8.0.2
     optionalDependencies:
       '@pkgjs/parseargs': 0.11.0
-
-  jose@6.2.4: {}
 
   jose@6.2.5: {}
 
