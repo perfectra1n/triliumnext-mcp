@@ -1248,4 +1248,36 @@ describe('Total tool surface', () => {
       expect(t.inputSchema.type).toBe('object');
     }
   });
+
+  // An MCP inputSchema describes what the CALLER sends, i.e. the input side of the
+  // schema. Zod's toJSONSchema() defaults to OUTPUT semantics, where a `.default()`
+  // field is always present and therefore lands in `required` — which would advertise
+  // optional parameters to clients as mandatory. defineTool must pass io: 'input'.
+  it('no parameter with a default is advertised as required', () => {
+    const allTools = [
+      ...registerSearchTools(),
+      ...registerNoteTools(),
+      ...registerRevisionTools(),
+      ...registerAttributeTools(),
+      ...registerAttachmentTools(),
+      ...registerCalendarTools(),
+      ...registerOrganizationTools(),
+      ...registerSystemTools(),
+    ];
+    for (const t of allTools) {
+      const required = t.inputSchema.required ?? [];
+      const properties = (t.inputSchema.properties ?? {}) as Record<
+        string,
+        { default?: unknown }
+      >;
+      for (const [name, prop] of Object.entries(properties)) {
+        if (prop?.default !== undefined) {
+          expect(
+            required,
+            `${t.name}.${name} has a default but is listed as required`
+          ).not.toContain(name);
+        }
+      }
+    }
+  });
 });
