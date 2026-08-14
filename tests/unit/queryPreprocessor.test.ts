@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { preprocessSearchQuery } from '../../src/tools/queryPreprocessor.js';
+import {
+  preprocessSearchQuery,
+  tokenize,
+  isBareFulltextSegment,
+  isOrOperator,
+} from '../../src/tools/queryPreprocessor.js';
 
 describe('preprocessSearchQuery', () => {
   describe('passthrough (no transformation needed)', () => {
@@ -232,5 +237,66 @@ describe('preprocessSearchQuery', () => {
       // "title:" alone — no value, falls through
       expect(preprocessSearchQuery('title:')).toEqual({ type: 'search', query: 'title:' });
     });
+  });
+});
+
+// These three helpers are public API because fuzzySearch.ts reuses them — having a
+// single definition of "how do we split a query" and "is this plain fulltext" is the
+// point. Tests below pin the behavior that module now depends on.
+
+describe('tokenize', () => {
+  it('should split on whitespace', () => {
+    expect(tokenize('meeting notes project')).toEqual(['meeting', 'notes', 'project']);
+  });
+
+  it('should keep a quoted phrase as one token', () => {
+    expect(tokenize('"meeting notes" project')).toEqual(['"meeting notes"', 'project']);
+  });
+
+  it('should keep escaped quotes inside a quoted phrase', () => {
+    expect(tokenize('"say \\"hi\\"" x')).toEqual(['"say \\"hi\\""', 'x']);
+  });
+
+  it('should collapse repeated whitespace', () => {
+    expect(tokenize('  a   b  ')).toEqual(['a', 'b']);
+  });
+
+  it('should return nothing for an empty query', () => {
+    expect(tokenize('')).toEqual([]);
+    expect(tokenize('   ')).toEqual([]);
+  });
+});
+
+describe('isOrOperator', () => {
+  it('should match "or" in any casing', () => {
+    expect(isOrOperator('or')).toBe(true);
+    expect(isOrOperator('OR')).toBe(true);
+    expect(isOrOperator('Or')).toBe(true);
+  });
+
+  it('should not match words merely containing "or"', () => {
+    expect(isOrOperator('order')).toBe(false);
+    expect(isOrOperator('"or"')).toBe(false);
+  });
+});
+
+describe('isBareFulltextSegment', () => {
+  it('should accept plain words', () => {
+    expect(isBareFulltextSegment(['meeting', 'notes'])).toBe(true);
+  });
+
+  it.each([[['#project']], [['~relation']], [['note.title']], [['not(#x)']], [['(a']], [['a=b']]])(
+    'should reject structured token %s',
+    (tokens) => {
+      expect(isBareFulltextSegment(tokens)).toBe(false);
+    }
+  );
+
+  it('is a rewriting heuristic, not a validator: a trailing paren slips through', () => {
+    // Documented asymmetry — it inspects token PREFIXES, so ")foo" is caught but
+    // "foo)" is not. Callers using it as a safety gate must add a stricter check
+    // of their own (fuzzySearch.ts does exactly that).
+    expect(isBareFulltextSegment([')foo'])).toBe(false);
+    expect(isBareFulltextSegment(['foo)'])).toBe(true);
   });
 });

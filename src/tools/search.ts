@@ -5,6 +5,14 @@ import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { orderDirectionSchema, searchLimitSchema } from './validators.js';
 import { preprocessSearchQuery } from './queryPreprocessor.js';
+import {
+  buildFuzzyQuery,
+  extractFuzzyTerms,
+  isFuzzyEligible,
+  rankNotes,
+  resolveFuzzyLimit,
+  type FuzzyMode,
+} from './fuzzySearch.js';
 
 const searchNotesSchema = z.object({
   query: z
@@ -46,6 +54,17 @@ const searchNotesSchema = z.object({
     .boolean()
     .optional()
     .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
+  fuzzy: z
+    .enum(['auto', 'off', 'force'])
+    .optional()
+    .default('auto')
+    .describe(
+      'Fallback behavior when the query finds nothing. "auto" (default): if the exact query returns ZERO ' +
+        'results and the query is plain fulltext with 2+ terms, retry it as an OR over the individual terms, ' +
+        'ranked by title/attribute relevance — the response then carries searchMode:"fuzzy" and fuzzyTerms. ' +
+        '"off": never retry; exact Trilium semantics only. "force": go straight to the ranked OR search. ' +
+        'Never applies to attribute (#label), property (note.*), id:/title:-prefixed, or already-OR queries.'
+    ),
 });
 
 const getNoteTreeSchema = z.object({
@@ -178,7 +197,17 @@ export function registerSearchTools(): Tool[] {
 - \`id:abc123def\` - Direct lookup of note by ID
 - \`title:weekly meeting\` - Notes with "weekly meeting" in title
 
-**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).`,
+**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).
+
+**Graceful fallback (\`fuzzy\`):**
+Trilium ANDs fulltext terms, so one wrong term returns nothing. By default (\`fuzzy: "auto"\`),
+a plain-fulltext query with 2+ terms that returns ZERO results is automatically retried as an
+OR over the individual terms, ranked by relevance. The response then adds \`searchMode: "fuzzy"\`,
+\`fuzzyTerms\`, \`totalCandidates\`, and \`termsMatchedInTitleOrAttributes\` — use that last one to
+spot which term is failing and re-query without it. Ranking uses titles and attributes only, so
+a note matching only in its body is still returned but ranks low: scan past the first result.
+Set \`fuzzy: "off"\` for strict Trilium semantics, or \`"force"\` to skip the exact attempt.
+Never applies to \`#label\`, \`note.*\`, \`id:\`/\`title:\`, or already-OR queries.`,
       searchNotesSchema,
       { title: 'Search notes', readOnlyHint: true, openWorldHint: false }
     ),
@@ -196,6 +225,145 @@ export function registerSearchTools(): Tool[] {
       { title: 'Get note tree', readOnlyHint: true }
     ),
   ];
+}
+
+type SearchArgs = z.infer<typeof searchNotesSchema>;
+
+/** Scope and shaping options shared by the exact search and its fuzzy retry. */
+function scopeParams(parsed: SearchArgs) {
+  return {
+    fastSearch: parsed.fastSearch,
+    includeArchivedNotes: parsed.includeArchivedNotes,
+    ancestorNoteId: parsed.ancestorNoteId,
+    ancestorDepth: parsed.ancestorDepth,
+    orderBy: parsed.orderBy,
+    orderDirection: parsed.orderDirection,
+    debug: parsed.debug,
+  };
+}
+
+/**
+ * Explain the rewrite to the caller. This is not decoration: the model needs to know
+ * the results are approximate, that relevance is title-only so the right note may not
+ * be first, and what a zero in the per-term counts actually means.
+ */
+function describeFuzzyRun(args: {
+  terms: string[];
+  returned: number;
+  totalCandidates: number;
+  reranked: boolean;
+  forced: boolean;
+}): string {
+  const { terms, returned, totalCandidates, reranked, forced } = args;
+  const termList = `${terms.length} term(s): ${terms.join(', ')}`;
+  return [
+    // Under fuzzy="force" no exact search was ever run, so claiming one failed
+    // would be a lie the caller has no way to check.
+    forced
+      ? `Ran directly as an OR search over ${termList}, as requested by fuzzy="force".`
+      : `No notes matched all terms. Retried as an OR search over ${termList}.`,
+    reranked
+      ? 'Results are ranked by title and attribute relevance.'
+      : 'Results keep the ordering you requested via orderBy rather than being re-ranked by relevance.',
+    `Showing ${returned} of ${totalCandidates} candidates.`,
+    'Relevance is computed from titles and attributes only — Trilium\'s search response carries no note ' +
+      'content — so a note matching only in its body still appears, ranked low. Scan past the first result.',
+    'In termsMatchedInTitleOrAttributes, a 0 means the term was absent from these results\' titles and ' +
+      'attributes, not that it is absent from the notes.',
+    'Pass fuzzy="off" to disable this fallback.',
+  ].join(' ');
+}
+
+async function runFuzzySearch(
+  client: TriliumClient,
+  parsed: SearchArgs,
+  terms: string[],
+  forced: boolean
+): Promise<Record<string, unknown>> {
+  const { fetchLimit, sliceTo } = resolveFuzzyLimit(parsed.limit);
+  const response = await client.searchNotes({
+    ...scopeParams(parsed),
+    search: buildFuzzyQuery(terms),
+    limit: fetchLimit,
+  });
+
+  const ranked = rankNotes(response.results, terms);
+  // An explicit orderBy is an instruction, not a preference — honor it and take only
+  // the recall win. Ranking is still computed, for the per-term evidence counts.
+  const reranked = !parsed.orderBy;
+  const ordered = reranked ? ranked.map((r) => r.note) : response.results;
+
+  const termsMatchedInTitleOrAttributes = Object.fromEntries(
+    terms.map((term) => [term, ranked.filter((r) => r.matchedTerms.includes(term)).length])
+  );
+
+  return {
+    results: ordered.slice(0, sliceTo),
+    searchMode: 'fuzzy',
+    fuzzyTerms: terms,
+    totalCandidates: response.results.length,
+    termsMatchedInTitleOrAttributes,
+    note: describeFuzzyRun({
+      terms,
+      returned: Math.min(ordered.length, sliceTo),
+      totalCandidates: response.results.length,
+      reranked,
+      forced,
+    }),
+    ...(response.debugInfo ? { debugInfo: response.debugInfo } : {}),
+  };
+}
+
+/**
+ * Run the search, retrying as a ranked OR when the exact query comes back empty.
+ *
+ * Both call sites route through here so the parameter list cannot drift between the
+ * normal path and the noteId-404 path. `allowFuzzy` is false on the latter: a caller
+ * who asked for a specific ID does not want an OR-expansion of that ID.
+ */
+async function runSearchWithFallback(
+  client: TriliumClient,
+  parsed: SearchArgs,
+  effectiveQuery: string,
+  originalQuery: string,
+  allowFuzzy: boolean
+): Promise<Record<string, unknown>> {
+  const mode: FuzzyMode = parsed.fuzzy ?? 'auto';
+  const eligible = allowFuzzy && isFuzzyEligible(originalQuery, mode);
+
+  if (mode === 'force' && eligible) {
+    return runFuzzySearch(client, parsed, extractFuzzyTerms(originalQuery), true);
+  }
+
+  const exact = await client.searchNotes({
+    ...scopeParams(parsed),
+    search: effectiveQuery,
+    limit: parsed.limit,
+  });
+
+  if (mode === 'force') {
+    // Forced, but the query is structured — OR-expanding it would produce something
+    // syntactically different and probably invalid. Say so rather than pretend.
+    return {
+      ...exact,
+      searchMode: 'exact',
+      note:
+        'fuzzy="force" was ignored: this query uses Trilium syntax (attribute, property, ' +
+        'id:/title: prefix, or an existing OR) that must not be OR-expanded. Ran it exactly as written.',
+    };
+  }
+
+  if (!eligible || exact.results.length !== 0) {
+    return exact as unknown as Record<string, unknown>;
+  }
+
+  try {
+    return await runFuzzySearch(client, parsed, extractFuzzyTerms(originalQuery), false);
+  } catch {
+    // Best-effort retry. A failed rewrite must never turn a successful-but-empty
+    // search into a tool error.
+    return exact as unknown as Record<string, unknown>;
+  }
 }
 
 export async function handleSearchTool(
@@ -217,18 +385,15 @@ export async function handleSearchTool(
           };
         } catch (error) {
           if (error instanceof TriliumClientError && error.status === 404) {
-            // Note not found — fall back to regular search
-            const result = await client.searchNotes({
-              search: preprocessed.query,
-              fastSearch: parsed.fastSearch,
-              includeArchivedNotes: parsed.includeArchivedNotes,
-              ancestorNoteId: parsed.ancestorNoteId,
-              ancestorDepth: parsed.ancestorDepth,
-              orderBy: parsed.orderBy,
-              orderDirection: parsed.orderDirection,
-              limit: parsed.limit,
-              debug: parsed.debug,
-            });
+            // Note not found — fall back to regular search, but never fuzzily:
+            // an OR-expansion of a note ID is meaningless.
+            const result = await runSearchWithFallback(
+              client,
+              parsed,
+              preprocessed.query,
+              parsed.query,
+              false
+            );
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
             };
@@ -237,17 +402,13 @@ export async function handleSearchTool(
         }
       }
 
-      const result = await client.searchNotes({
-        search: preprocessed.query,
-        fastSearch: parsed.fastSearch,
-        includeArchivedNotes: parsed.includeArchivedNotes,
-        ancestorNoteId: parsed.ancestorNoteId,
-        ancestorDepth: parsed.ancestorDepth,
-        orderBy: parsed.orderBy,
-        orderDirection: parsed.orderDirection,
-        limit: parsed.limit,
-        debug: parsed.debug,
-      });
+      const result = await runSearchWithFallback(
+        client,
+        parsed,
+        preprocessed.query,
+        parsed.query,
+        true
+      );
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };

@@ -417,8 +417,51 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 
 | Tool | Description |
 |------|-------------|
-| `search_notes` | Full-text and attribute search with filters, subtree scoping (`ancestorNoteId` + `ancestorDepth`), ordering, limits, and query-parse diagnostics (`debug`). |
+| `search_notes` | Full-text and attribute search with filters, subtree scoping (`ancestorNoteId` + `ancestorDepth`), ordering, limits, and query-parse diagnostics (`debug`). Plain-fulltext queries that return zero results are automatically retried as a relevance-ranked OR over the individual terms — see [Graceful fuzzy fallback](#graceful-fuzzy-fallback) below. |
 | `get_note_tree` | Explore the hierarchy: children expanded `depth` levels (1-5) with titles, types, child counts, and branch IDs. |
+
+#### Graceful fuzzy fallback
+
+Trilium ANDs fulltext terms, so `体积云 Niagara 教程` returns **nothing** if any single term is
+wrong — and zero results tell the caller nothing about which term was the bad one. `search_notes`
+therefore retries such queries automatically.
+
+`fuzzy` controls this:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Run the query as written. If it returns **zero** results and the query is eligible, retry it as an OR over the individual terms, ranked by relevance. |
+| `off` | Never retry. Strict Trilium semantics, byte-identical to the pre-fallback response. |
+| `force` | Skip the exact attempt and go straight to the ranked OR search. |
+
+A query is **eligible** only if it is plain fulltext with two or more terms. Attribute filters
+(`#project`), property expressions (`note.title *=* x`), `id:`/`title:` prefixes, and queries that
+already contain `or` are never retried — OR-expanding them would change what was asked, not widen it.
+Terms are capped at 8, since each becomes an unindexed substring scan.
+
+When the fallback fires, the response gains sibling fields alongside the usual `results` (the note
+objects themselves are never modified):
+
+```jsonc
+{
+  "results": [ /* ...unmodified notes, most relevant first... */ ],
+  "searchMode": "fuzzy",
+  "fuzzyTerms": ["体积云", "Niagara", "教程"],
+  "totalCandidates": 12,
+  "termsMatchedInTitleOrAttributes": { "体积云": 12, "Niagara": 0, "教程": 9 },
+  "note": "..."
+}
+```
+
+`termsMatchedInTitleOrAttributes` is the "which term was wrong?" signal — a `0` means that term
+appeared in no returned note's title or attributes, so it is the one to drop and re-query without.
+
+**Ranking is title- and attribute-only.** Trilium's ETAPI search response carries no note content,
+so scoring content would cost one extra HTTP request per candidate. A note that matched only in its
+body is therefore still returned — never filtered out — but scores zero and ranks last. Check
+`totalCandidates` against `results.length` to see whether you are looking at a truncated view.
+If `orderBy` is set it is honored: the OR query still widens recall, but results keep your ordering
+rather than being re-ranked.
 
 ### Organization (1 tool)
 
@@ -478,7 +521,7 @@ The tool surface was consolidated in a breaking release. The mapping from the ol
 | `undelete_note` | `delete_note` with `action="undelete"` |
 | `get_note_attachments` | `get_attachment` with `noteId` (list form) |
 | `get_note_history` | `get_note_history` (unchanged) |
-| `search_notes` | `search_notes` (unchanged) |
+| `search_notes` | `search_notes` (unchanged; gained an optional `fuzzy` fallback) |
 | `get_note_tree` | `get_note_tree` (unchanged) |
 | `move_note` | `organize_note` with `action="move"` |
 | `clone_note` | `organize_note` with `action="clone"` |

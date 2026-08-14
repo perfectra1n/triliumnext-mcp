@@ -720,6 +720,257 @@ describe('Search tools', () => {
 });
 
 // ============================================================================
+// Search — graceful fuzzy fallback
+// ============================================================================
+
+describe('search_notes fuzzy fallback', () => {
+  function searchNote(title: string, extra: Record<string, unknown> = {}) {
+    return {
+      noteId: `id_${title.replace(/\W+/g, '_')}`,
+      title,
+      type: 'text',
+      mime: 'text/html',
+      isProtected: false,
+      attributes: [],
+      parentNoteIds: ['root'],
+      childNoteIds: [],
+      parentBranchIds: ['b1'],
+      childBranchIds: [],
+      dateCreated: '2026-01-01 00:00:00.000+0000',
+      dateModified: '2026-01-01 00:00:00.000+0000',
+      utcDateCreated: '2026-01-01T00:00:00.000Z',
+      utcDateModified: '2026-01-01T00:00:00.000Z',
+      ...extra,
+    };
+  }
+
+  const mockSearch = (client: TriliumClient) => client.searchNotes as ReturnType<typeof vi.fn>;
+  const callArgs = (client: TriliumClient, n: number) => mockSearch(client).mock.calls[n][0];
+  const parse = (result: { content: Array<{ type: 'text'; text: string }> } | null) =>
+    JSON.parse((result?.content[0] as { text: string }).text);
+  const rawText = (result: { content: Array<{ type: 'text'; text: string }> } | null) =>
+    (result?.content[0] as { text: string }).text;
+
+  it('does not retry when the exact search found something', async () => {
+    const client = createMockClient();
+    const response = { results: [searchNote('Niagara guide')] };
+    mockSearch(client).mockResolvedValue(response);
+
+    const result = await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' });
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+    // Byte-identical to the pre-feature response shape.
+    expect(rawText(result)).toBe(JSON.stringify(response, null, 2));
+  });
+
+  it('retries a zero-result multi-term query as a ranked OR search', async () => {
+    const client = createMockClient();
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [searchNote('Niagara 教程')] });
+
+    const parsed = parse(await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' }));
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(2);
+    expect(callArgs(client, 1).search).toContain(' OR ');
+    expect(parsed.searchMode).toBe('fuzzy');
+    expect(parsed.fuzzyTerms).toEqual(['niagara', '教程']);
+    expect(parsed.results).toHaveLength(1);
+  });
+
+  it('never retries when fuzzy is off', async () => {
+    const client = createMockClient();
+    const response = { results: [] };
+    mockSearch(client).mockResolvedValue(response);
+
+    const result = await handleSearchTool(client, 'search_notes', {
+      query: 'niagara 教程',
+      fuzzy: 'off',
+    });
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+    expect(rawText(result)).toBe(JSON.stringify(response, null, 2));
+    expect(parse(result)).not.toHaveProperty('searchMode');
+  });
+
+  it('never retries an attribute query', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [] });
+    await handleSearchTool(client, 'search_notes', { query: '#project' });
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('never retries a single-term query', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [] });
+    await handleSearchTool(client, 'search_notes', { query: 'meeting' });
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('goes straight to the OR search when forced', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [searchNote('Meeting notes')] });
+
+    const parsed = parse(
+      await handleSearchTool(client, 'search_notes', { query: 'meeting', fuzzy: 'force' })
+    );
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+    expect(callArgs(client, 0).search).toContain('note.content *=*');
+    expect(parsed.searchMode).toBe('fuzzy');
+  });
+
+  it('does not claim an exact search failed when it was never run', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [searchNote('Meeting notes')] });
+
+    const forced = parse(
+      await handleSearchTool(client, 'search_notes', { query: 'meeting', fuzzy: 'force' })
+    );
+    expect(forced.note).not.toContain('No notes matched');
+
+    const client2 = createMockClient();
+    mockSearch(client2)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [searchNote('Niagara 教程')] });
+    const auto = parse(await handleSearchTool(client2, 'search_notes', { query: 'niagara 教程' }));
+    expect(auto.note).toContain('No notes matched');
+  });
+
+  it('reports exact mode when force is used on an ineligible query', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [] });
+
+    const parsed = parse(
+      await handleSearchTool(client, 'search_notes', { query: '#project', fuzzy: 'force' })
+    );
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+    expect(parsed.searchMode).toBe('exact');
+    expect(parsed.note).toBeTruthy();
+  });
+
+  it('falls back to the exact response when the retry itself fails', async () => {
+    const client = createMockClient();
+    const exact = { results: [] };
+    mockSearch(client)
+      .mockResolvedValueOnce(exact)
+      .mockRejectedValueOnce(new Error('trilium exploded'));
+
+    const result = await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' });
+
+    expect(rawText(result)).toBe(JSON.stringify(exact, null, 2));
+  });
+
+  it('orders fuzzy results by relevance without touching the note objects', async () => {
+    const client = createMockClient();
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({
+        results: [searchNote('Unrelated note'), searchNote('Niagara 教程 deep dive')],
+      });
+
+    const parsed = parse(await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' }));
+
+    expect(parsed.results[0].title).toBe('Niagara 教程 deep dive');
+    expect(parsed.results[0]).not.toHaveProperty('_score');
+    expect(parsed.results[0]).not.toHaveProperty('_matchedTerms');
+  });
+
+  it('honors the caller limit while over-fetching candidates to rank', async () => {
+    const client = createMockClient();
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({
+        results: ['a', 'b', 'c', 'd', 'e'].map((t) => searchNote(`Niagara ${t}`)),
+      });
+
+    const parsed = parse(
+      await handleSearchTool(client, 'search_notes', { query: 'niagara 教程', limit: 2 })
+    );
+
+    expect(parsed.results).toHaveLength(2);
+    expect(parsed.totalCandidates).toBe(5);
+    expect(callArgs(client, 1).limit).toBeGreaterThan(2);
+  });
+
+  it('carries scope filters through to the retry', async () => {
+    const client = createMockClient();
+    mockSearch(client).mockResolvedValue({ results: [] });
+
+    await handleSearchTool(client, 'search_notes', {
+      query: 'niagara 教程',
+      ancestorNoteId: 'abc123',
+      includeArchivedNotes: true,
+      fastSearch: true,
+    });
+
+    expect(callArgs(client, 1)).toMatchObject({
+      ancestorNoteId: 'abc123',
+      includeArchivedNotes: true,
+      fastSearch: true,
+    });
+  });
+
+  it('preserves an explicit orderBy instead of re-ranking', async () => {
+    const client = createMockClient();
+    const ordered = [searchNote('Unrelated note'), searchNote('Niagara 教程 deep dive')];
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: ordered });
+
+    const parsed = parse(
+      await handleSearchTool(client, 'search_notes', {
+        query: 'niagara 教程',
+        orderBy: 'dateModified',
+      })
+    );
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(2);
+    expect(parsed.results.map((n: { title: string }) => n.title)).toEqual([
+      'Unrelated note',
+      'Niagara 教程 deep dive',
+    ]);
+  });
+
+  it('never fuzzes the noteId-lookup 404 fallback path', async () => {
+    const client = createMockClient();
+    (client.getNote as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new TriliumClientError(404, 'NOTE_NOT_FOUND', 'not found')
+    );
+    mockSearch(client).mockResolvedValue({ results: [] });
+
+    await handleSearchTool(client, 'search_notes', { query: 'id:abc123' });
+
+    expect(client.searchNotes).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports which terms had title or attribute evidence', async () => {
+    const client = createMockClient();
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [searchNote('Niagara guide')] });
+
+    const parsed = parse(await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' }));
+
+    expect(parsed.termsMatchedInTitleOrAttributes).toEqual({ niagara: 1, 教程: 0 });
+  });
+
+  it('preserves debugInfo from the retry', async () => {
+    const client = createMockClient();
+    mockSearch(client)
+      .mockResolvedValueOnce({ results: [] })
+      .mockResolvedValueOnce({ results: [], debugInfo: { parsed: 'yes' } });
+
+    const parsed = parse(await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' }));
+
+    expect(parsed.debugInfo).toEqual({ parsed: 'yes' });
+    expect(parsed.results).toEqual([]);
+    expect(parsed.searchMode).toBe('fuzzy');
+  });
+});
+
+// ============================================================================
 // Organization
 // ============================================================================
 

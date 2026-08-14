@@ -12,6 +12,12 @@ import { setupIntegrationTests, stopTriliumContainer } from './setup.js';
 describe('TriliumNext ETAPI Integration Tests', () => {
   let client: TriliumClient;
 
+  /** Run search_notes through the MCP handler and parse its JSON payload. */
+  async function runSearch(args: Record<string, unknown>) {
+    const result = await handleSearchTool(client, 'search_notes', args);
+    return JSON.parse((result?.content[0] as { text: string }).text);
+  }
+
   beforeAll(async () => {
     client = await setupIntegrationTests();
   }, 120000); // 2 minute timeout for container startup
@@ -263,6 +269,79 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       expect(result.results).toBeDefined();
       // Note: Trilium's ordering may not always be deterministic for similar titles
+    });
+
+    // These exercise the fuzzy fallback against a real Trilium, because the
+    // behavior it depends on (how `note.content *=*` OR queries and fastSearch
+    // actually interact) is not knowable from the ETAPI spec alone.
+    describe('fuzzy fallback', () => {
+      let fuzzyNoteId: string;
+
+      beforeAll(async () => {
+        const created = await client.createNote({
+          parentNoteId: 'root',
+          title: 'Volumetric Niagara Tutorial',
+          type: 'text',
+          content: '<p>Body text mentioning zephyrquux for content-only matching.</p>',
+        });
+        fuzzyNoteId = created.note.noteId;
+      });
+
+      it('AND semantics return nothing when one term is wrong', async () => {
+        const result = await client.searchNotes({
+          search: 'Volumetric Niagara nonexistentterm',
+        });
+        expect(result.results.some((n) => n.noteId === fuzzyNoteId)).toBe(false);
+      });
+
+      it('the OR rewrite finds the note the AND query missed', async () => {
+        const parsed = await runSearch({ query: 'Volumetric Niagara nonexistentterm' });
+
+        expect(parsed.searchMode).toBe('fuzzy');
+        expect(parsed.results.some((n: { noteId: string }) => n.noteId === fuzzyNoteId)).toBe(true);
+        // The bogus term should be visibly the odd one out.
+        expect(parsed.termsMatchedInTitleOrAttributes.nonexistentterm).toBe(0);
+      });
+
+      it('ranks the title match first', async () => {
+        const parsed = await runSearch({ query: 'Volumetric Niagara nonexistentterm' });
+        expect(parsed.results[0].noteId).toBe(fuzzyNoteId);
+      });
+
+      it('surfaces a content-only match rather than dropping it', async () => {
+        const parsed = await runSearch({ query: 'zephyrquux nonexistentterm' });
+
+        expect(parsed.searchMode).toBe('fuzzy');
+        expect(parsed.results.some((n: { noteId: string }) => n.noteId === fuzzyNoteId)).toBe(true);
+        // Nothing matched in the title or attributes — this note is here purely
+        // because Trilium matched its body, which is exactly what must not be filtered.
+        expect(parsed.termsMatchedInTitleOrAttributes.zephyrquux).toBe(0);
+      });
+
+      it('still works under fastSearch, via the title arms', async () => {
+        const parsed = await runSearch({
+          query: 'Volumetric Niagara nonexistentterm',
+          fastSearch: true,
+        });
+
+        expect(parsed.searchMode).toBe('fuzzy');
+        expect(parsed.results.some((n: { noteId: string }) => n.noteId === fuzzyNoteId)).toBe(true);
+      });
+
+      it('does not fuzz an attribute query', async () => {
+        const parsed = await runSearch({ query: '#nonexistentLabelXyz' });
+        expect(parsed.searchMode).toBeUndefined();
+        expect(parsed.results).toEqual([]);
+      });
+
+      it('returns the legacy shape when fuzzy is off', async () => {
+        const parsed = await runSearch({
+          query: 'Volumetric Niagara nonexistentterm',
+          fuzzy: 'off',
+        });
+        expect(parsed.searchMode).toBeUndefined();
+        expect(parsed.results).toEqual([]);
+      });
     });
 
     it('get_note_tree - should get children of root', async () => {
