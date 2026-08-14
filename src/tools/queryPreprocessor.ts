@@ -16,8 +16,12 @@ export interface PreprocessedQuery {
 
 /**
  * Tokenize a query string, keeping quoted phrases as single tokens.
+ *
+ * The escape grammar is `\\` and `\"` inside a quoted phrase; anything emitting
+ * quoted terms back into a Trilium query must escape to match (see
+ * `quoteTerm` in fuzzySearch.ts).
  */
-function tokenize(query: string): string[] {
+export function tokenize(query: string): string[] {
   const tokens: string[] = [];
   const regex = /"(?:[^"\\]|\\.)*"|\S+/g;
   let match;
@@ -30,15 +34,20 @@ function tokenize(query: string): string[] {
 /**
  * Check if a token is an OR operator (case-insensitive).
  */
-function isOrOperator(token: string): boolean {
+export function isOrOperator(token: string): boolean {
   return token.toLowerCase() === 'or';
 }
 
 /**
  * Check if a list of tokens represents a bare fulltext segment
  * (no attribute syntax, no property expressions, no comparison operators).
+ *
+ * This is a heuristic tuned for query *rewriting*, not a validator. It is
+ * deliberately asymmetric — it checks `startsWith(')')`, so it catches `)foo`
+ * but not `foo)`. Callers using it as a safety gate must add their own stricter
+ * check rather than assume it is exhaustive.
  */
-function isBareFulltextSegment(tokens: string[]): boolean {
+export function isBareFulltextSegment(tokens: string[]): boolean {
   return tokens.every((token) => {
     if (token.startsWith('#') || token.startsWith('~')) return false;
     if (token.startsWith('note.')) return false;
