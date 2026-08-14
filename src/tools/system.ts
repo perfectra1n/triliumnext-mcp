@@ -9,31 +9,53 @@ const createRevisionSchema = z.object({
     .string()
     .min(1, 'Note ID is required')
     .describe('ID of the note to create a revision for'),
-  format: exportFormatSchema.optional().describe('Format of the revision content (default: html)'),
+  format: exportFormatSchema
+    .default('html')
+    .describe(
+      'Format hint forwarded to the ETAPI revision endpoint (default: html). The revision always ' +
+        "snapshots the note's current stored content."
+    ),
 });
 
 const manageSystemSchema = z
   .object({
     action: z
-      .enum(['backup', 'export'])
+      .enum(['backup', 'export', 'import', 'app_info'])
       .describe(
         'System action to perform. ' +
           '"backup" — create a full database backup (fields: backupName). ' +
-          '"export" — export a note and its subtree as a ZIP archive, returned base64-encoded (fields: noteId, format?).'
+          '"export" — export a note and its subtree as a ZIP archive, returned base64-encoded (fields: noteId, format?). ' +
+          '"import" — import a ZIP archive (e.g. from a previous export) under a parent note (fields: noteId, data). ' +
+          '"app_info" — return Trilium instance info (version, database version) for diagnostics (no fields).'
       ),
     backupName: backupNameSchema
       .optional()
-      .describe('Required for action="backup": identifier for the backup file (alphanumeric, hyphens, underscores).'),
+      .describe(
+        'Required for action="backup": identifier for the backup file (alphanumeric, hyphens, underscores).'
+      ),
     noteId: z
       .string()
       .optional()
-      .describe('Required for action="export": note to export (use "root" to export the entire database).'),
+      .describe(
+        'Required for action="export": note to export (use "root" to export the entire database). ' +
+          'Required for action="import": parent note to import the ZIP under.'
+      ),
     format: exportFormatSchema
+      .default('html')
+      .describe(
+        'Optional for action="export": markdown is recommended for LLM processing (default: html).'
+      ),
+    data: z
+      .string()
+      .regex(/^[A-Za-z0-9+/=\s]+$/, 'data must be base64-encoded')
       .optional()
-      .describe('Optional for action="export": markdown is recommended for LLM processing (default: html).'),
+      .describe(
+        'Required for action="import": the ZIP archive as base64. Intended for small archives — ' +
+          'base64 you can emit inline is the practical size limit.'
+      ),
   })
   .check((ctx) => {
-    const { action, backupName, noteId } = ctx.value;
+    const { action, backupName, noteId, data } = ctx.value;
     if (action === 'backup') {
       if (!backupName) {
         ctx.issues.push({
@@ -50,6 +72,23 @@ const manageSystemSchema = z
           input: ctx.value,
           message: 'action="export" requires "noteId"',
           path: ['noteId'],
+        });
+      }
+    } else if (action === 'import') {
+      if (!noteId) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="import" requires "noteId" (the parent note to import under)',
+          path: ['noteId'],
+        });
+      }
+      if (!data) {
+        ctx.issues.push({
+          code: 'custom',
+          input: ctx.value,
+          message: 'action="import" requires "data" (base64-encoded ZIP archive)',
+          path: ['data'],
         });
       }
     }
@@ -72,14 +111,18 @@ export function registerSystemTools(): Tool[] {
     ),
     defineTool(
       'manage_system',
-      'Trilium system operations. Two actions via "action":\n' +
+      'Trilium system operations. Four actions via "action":\n' +
         '- "backup": create a full database backup file (backup-{backupName}.db) in Trilium\'s data directory. ' +
         'Use before major operations for safety.\n' +
         '- "export": export a note and its subtree as a ZIP archive, returned base64-encoded. ' +
-        'Use "root" as noteId to export the entire database. Format "markdown" is recommended for LLM processing.',
+        'Use "root" as noteId to export the entire database. Format "markdown" is recommended for LLM processing.\n' +
+        '- "import": import a ZIP archive (typically from a previous export) under a parent note. ' +
+        'Pass the archive base64-encoded in "data". Returns the created note. Intended for small archives.\n' +
+        '- "app_info": return Trilium instance info (app version, database version, clipper protocol version) — ' +
+        'useful for diagnostics and version-dependent behavior.',
       manageSystemSchema,
       {
-        title: 'Backup or export',
+        title: 'Backup, export, import, or app info',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
@@ -121,6 +164,39 @@ export async function handleSystemTool(
             {
               type: 'text',
               text: `Backup created: backup-${backupName}.db. The backup is stored in Trilium's data directory.`,
+            },
+          ],
+        };
+      }
+
+      if (parsed.action === 'app_info') {
+        const info = await client.getAppInfo();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(info, null, 2) }],
+        };
+      }
+
+      if (parsed.action === 'import') {
+        const noteId = required(parsed.noteId, 'noteId');
+        const data = required(parsed.data, 'data');
+        const zipBuffer = Buffer.from(data.replace(/\s/g, ''), 'base64');
+        const result = await client.importZip(noteId, zipBuffer);
+        const url = await client.getNoteUrl(result.note.noteId);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify(
+                {
+                  action: 'import',
+                  parentNoteId: noteId,
+                  note: result.note,
+                  branch: result.branch,
+                  url,
+                },
+                null,
+                2
+              ),
             },
           ],
         };

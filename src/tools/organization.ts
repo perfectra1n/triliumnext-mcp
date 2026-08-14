@@ -19,11 +19,15 @@ const organizeNoteSchema = z
     newParentNoteId: z
       .string()
       .optional()
-      .describe('Destination parent for "move". Use search_notes/get_note_tree to pick the right parent.'),
+      .describe(
+        'Destination parent for "move". Use search_notes/get_note_tree to pick the right parent.'
+      ),
     parentNoteId: z
       .string()
       .optional()
-      .describe('Parent note ID. Required for "clone" (destination) and "reorder" (owner of the ordering).'),
+      .describe(
+        'Parent note ID. Required for "clone" (destination) and "reorder" (owner of the ordering).'
+      ),
     prefix: z
       .string()
       .optional()
@@ -93,6 +97,7 @@ export function registerOrganizationTools(): Tool[] {
         '- "reorder": change display order of notes under a parent by updating branch positions\n' +
         '- "unlink": remove a specific parent-child branch without deleting the note (unless it\'s the last branch)\n\n' +
         'IMPORTANT: Before "move" or "clone", use search_notes and get_note_tree to explore the hierarchy and suggest the right destination. ' +
+        'Branch IDs (for "reorder"/"unlink") come from get_note (parentBranchIds/childBranchIds) or get_note_tree (childBranchIds on each node). ' +
         'WARNING: "unlink" on the last branch of a note deletes the note itself. ' +
         'For "move" and "clone", the response includes a "url" field linking to the note at its new location — give it to the user when you are done.',
       organizeNoteSchema,
@@ -133,7 +138,11 @@ export async function handleOrganizationTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ success: true, action: 'move', branch: newBranch, url }, null, 2),
+            text: JSON.stringify(
+              { success: true, action: 'move', branch: newBranch, url },
+              null,
+              2
+            ),
           },
         ],
       };

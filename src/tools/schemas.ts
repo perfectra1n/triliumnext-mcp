@@ -29,11 +29,8 @@ export function defineTool(
   schema: z.ZodObject<z.ZodRawShape>,
   annotations?: ToolAnnotations
 ): Tool {
-  // `io: 'input'` is required, not cosmetic. Zod's toJSONSchema() defaults to OUTPUT
-  // semantics, under which a `.default()` field is always present and therefore lands
-  // in `required`. An MCP inputSchema describes what the caller SENDS, so it must be
-  // the input side — otherwise every defaulted parameter is advertised to clients as
-  // mandatory, and the `default` keyword is omitted entirely.
+  // io: 'input' emits input-type semantics: fields with .default() are optional
+  // for callers (and carry a `default` keyword) instead of being marked required.
   const jsonSchema = schema.toJSONSchema({
     unrepresentable: 'any',
     reused: 'inline',

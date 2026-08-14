@@ -49,9 +49,7 @@ export class TriliumClient {
     // Remove trailing slash if present
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.token = token;
-    this.webBaseUrl = (webBaseUrl ?? baseUrl)
-      .replace(/\/etapi\/*$/i, '')
-      .replace(/\/+$/, '');
+    this.webBaseUrl = (webBaseUrl ?? baseUrl).replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
   }
 
   /** The user-facing Trilium web-UI base URL used for note links. */
@@ -355,26 +353,20 @@ export class TriliumClient {
     await this.request<undefined>('PUT', `/backup/${backupName}`);
   }
 
-  // ==================== Export ====================
+  // ==================== Export / Import ====================
 
   async exportNote(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<ArrayBuffer> {
-    const url = `${this.baseUrl}/notes/${noteId}/export?format=${format}`;
-    const response = await fetch(url, {
-      method: 'GET',
-      headers: {
-        Authorization: this.token,
-      },
+    return this.request<ArrayBuffer>('GET', `/notes/${noteId}/export`, {
+      query: { format },
+      responseType: 'arraybuffer',
     });
+  }
 
-    if (!response.ok) {
-      throw new TriliumClientError(
-        response.status,
-        'EXPORT_ERROR',
-        `Failed to export note: ${response.statusText}`
-      );
-    }
-
-    return response.arrayBuffer();
+  async importZip(noteId: EntityId, data: Buffer): Promise<NoteWithBranch> {
+    return this.request<NoteWithBranch>('POST', `/notes/${noteId}/import`, {
+      body: data,
+      contentType: 'application/octet-stream',
+    });
   }
 
   // ==================== Attachments ====================

@@ -4,6 +4,7 @@ import type { TriliumClient } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { positionSchema, required } from './validators.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
+import { capWithNotice } from './contentLimits.js';
 
 export const IMAGE_MIME_TYPES = new Set([
   'image/png',
@@ -41,6 +42,16 @@ export function base64ToBuffer(base64: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
+/**
+ * Parse a data URL (data:mime;base64,content) and extract the MIME type and base64 content.
+ * Returns null if the string is not a data URL.
+ */
+export function parseDataUrl(data: string): { mime: string; base64: string } | null {
+  const match = data.match(/^data:([^;]+);base64,(.+)$/s);
+  if (!match) return null;
+  return { mime: match[1], base64: match[2] };
+}
+
 // ============================================================================
 // Schemas
 // ============================================================================
@@ -59,7 +70,13 @@ const createAttachmentSchema = z.object({
     .min(1, 'MIME type is required')
     .describe('MIME type of the attachment (e.g., "image/png", "application/pdf")'),
   title: z.string().min(1, 'Title is required').describe('Title/filename of the attachment'),
-  content: z.string().describe('Content of the attachment (base64-encoded for binary files)'),
+  content: z
+    .string()
+    .describe(
+      'Content of the attachment. For binary MIME types: base64 or a data URL ' +
+        "(data:image/png;base64,...) — a data URL's MIME type overrides the mime field. " +
+        'For text MIME types: the raw string.'
+    ),
   position: positionSchema.optional().describe('Position for ordering (10, 20, 30...)'),
 });
 
@@ -68,7 +85,9 @@ const getAttachmentSchema = z
     attachmentId: z
       .string()
       .optional()
-      .describe('If provided, returns the single attachment with this ID (body included by default — pass include_content=false to skip the body).'),
+      .describe(
+        'If provided, returns the single attachment with this ID (body included by default — pass include_content=false to skip the body).'
+      ),
     noteId: z
       .string()
       .optional()
@@ -118,7 +137,7 @@ const writeAttachmentSchema = z
       .describe(
         'Write mode. ' +
           '"metadata" — update role/mime/title/position only. ' +
-          '"replace" — overwrite attachment content (base64 for binary MIME types). ' +
+          '"replace" — overwrite attachment content (base64 or a data URL for binary MIME types). ' +
           '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to existing text content.'
       ),
     role: z.string().optional().describe('New role (metadata mode only).'),
@@ -129,7 +148,7 @@ const writeAttachmentSchema = z
       .string()
       .optional()
       .describe(
-        'New content for "replace" mode. For binary MIME types, provide base64-encoded data.'
+        'New content for "replace" mode. For binary MIME types, provide base64-encoded data or a data URL (data:...;base64,...).'
       ),
     changes: z
       .array(searchReplaceBlockSchema)
@@ -145,12 +164,14 @@ const writeAttachmentSchema = z
   .check((ctx) => {
     const { mode, role, mime, title, position, content, changes, patch } = ctx.value;
     if (mode === 'metadata') {
-      const hasMeta = role !== undefined || mime !== undefined || title !== undefined || position !== undefined;
+      const hasMeta =
+        role !== undefined || mime !== undefined || title !== undefined || position !== undefined;
       if (!hasMeta) {
         ctx.issues.push({
           code: 'custom',
           input: ctx.value,
-          message: 'mode="metadata" requires at least one of "role", "mime", "title", or "position"',
+          message:
+            'mode="metadata" requires at least one of "role", "mime", "title", or "position"',
           path: [],
         });
       }
@@ -215,7 +236,7 @@ export function registerAttachmentTools(): Tool[] {
   return [
     defineTool(
       'get_attachment',
-      'Read an attachment or list a note\'s attachments. Two modes:\n' +
+      "Read an attachment or list a note's attachments. Two modes:\n" +
         '- Pass "noteId" to list all attachments for that note (metadata only — title, mime, size, attachmentId).\n' +
         '- Pass "attachmentId" to fetch one attachment. By default this returns the body: images come back as MCP image blocks, ' +
         'text attachments as raw strings, other binary as base64-wrapped text.\n\n' +
@@ -227,7 +248,8 @@ export function registerAttachmentTools(): Tool[] {
     defineTool(
       'create_attachment',
       'Create a new attachment on a note. Returns the created attachment metadata. ' +
-        'For binary MIME types (images, PDFs, most file types), provide content as base64-encoded data. ' +
+        'For binary MIME types (images, PDFs, most file types), provide content as base64-encoded data ' +
+        "or a data URL (data:image/png;base64,...) — a data URL's MIME type overrides the mime field. " +
         'For text MIME types (text/*, application/json, application/javascript), provide content as a raw string.',
       createAttachmentSchema,
       {
@@ -276,34 +298,40 @@ export async function handleAttachmentTool(
   args: unknown
 ): Promise<{
   content: Array<
-    | { type: 'text'; text: string }
-    | { type: 'image'; data: string; mimeType: string }
+    { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
   >;
 } | null> {
   switch (name) {
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
-      if (isBinaryMimeType(parsed.mime)) {
+      // A data URL's MIME type overrides the explicit mime field (same
+      // convention as the images/files params on create_note/write_note).
+      const dataUrl = parseDataUrl(parsed.content);
+      const mime = dataUrl ? dataUrl.mime : parsed.mime;
+      if (isBinaryMimeType(mime)) {
         const result = await client.createAttachment({
           ownerId: parsed.ownerId,
           role: parsed.role,
-          mime: parsed.mime,
+          mime,
           title: parsed.title,
           content: '',
           position: parsed.position,
         });
-        const binaryContent = base64ToBuffer(parsed.content);
+        const binaryContent = base64ToBuffer(dataUrl ? dataUrl.base64 : parsed.content);
         await client.updateAttachmentContentBinary(result.attachmentId, binaryContent);
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       }
+      const textContent = dataUrl
+        ? Buffer.from(dataUrl.base64, 'base64').toString('utf8')
+        : parsed.content;
       const result = await client.createAttachment({
         ownerId: parsed.ownerId,
         role: parsed.role,
-        mime: parsed.mime,
+        mime,
         title: parsed.title,
-        content: parsed.content,
+        content: textContent,
         position: parsed.position,
       });
       return {
@@ -343,8 +371,13 @@ export async function handleAttachmentTool(
       }
 
       const content = await client.getAttachmentContent(attachmentId);
+      const capped = capWithNotice(
+        content,
+        'attachment',
+        'Use write_attachment edit mode with targeted search/replace blocks to modify it without reading the whole body.'
+      );
       return {
-        content: [{ type: 'text', text: content }],
+        content: [{ type: 'text', text: capped }],
       };
     }
 
@@ -366,11 +399,15 @@ export async function handleAttachmentTool(
       if (parsed.mode === 'replace') {
         const content = required(parsed.content, 'content');
         const attachment = await client.getAttachment(parsed.attachmentId);
+        const dataUrl = parseDataUrl(content);
         if (isBinaryMimeType(attachment.mime)) {
-          const binaryContent = base64ToBuffer(content);
+          const binaryContent = base64ToBuffer(dataUrl ? dataUrl.base64 : content);
           await client.updateAttachmentContentBinary(parsed.attachmentId, binaryContent);
         } else {
-          await client.updateAttachmentContent(parsed.attachmentId, content);
+          const textContent = dataUrl
+            ? Buffer.from(dataUrl.base64, 'base64').toString('utf8')
+            : content;
+          await client.updateAttachmentContent(parsed.attachmentId, textContent);
         }
         return {
           content: [
