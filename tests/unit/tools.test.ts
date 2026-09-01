@@ -1,4 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { createServer as createHttpServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { configureContentInput } from '../../src/tools/contentInput.js';
 import { registerNoteTools, handleNoteTool } from '../../src/tools/notes.js';
 import { registerSearchTools, handleSearchTool } from '../../src/tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from '../../src/tools/organization.js';
@@ -1930,5 +1935,294 @@ describe('Total tool surface', () => {
       const props = tool!.inputSchema.properties as Record<string, { default?: unknown }>;
       expect(props[param].default, `${toolName}.${param}`).toBe(expected);
     }
+  });
+});
+
+// ============================================================================
+// Content input normalization in handlers (file paths / URLs / optional mime)
+// ============================================================================
+
+describe('content input normalization in handlers', () => {
+  const PNG_BYTES = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89,
+    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
+    0xae, 0x42, 0x60, 0x82,
+  ]);
+
+  const cleanups: Array<() => Promise<void>> = [];
+  afterEach(async () => {
+    while (cleanups.length) await cleanups.pop()!();
+    // Restore the module-level default policy so other suites are unaffected.
+    configureContentInput({
+      allowLocalFileRead: true,
+      localFileRoots: [],
+      urlGuard: { allowlist: [], allowPrivate: false },
+      maxBytes: 50 * 1024 * 1024,
+      fetchTimeoutMs: 30_000,
+    });
+  });
+
+  beforeEach(() => {
+    client = createMockClient({
+      createNote: vi.fn().mockResolvedValue({
+        note: { noteId: 'n1' },
+        branch: { parentNoteId: 'root' },
+      }),
+      createAttachment: vi
+        .fn()
+        .mockImplementation((args: { title: string }) =>
+          Promise.resolve({ attachmentId: 'a1', title: args.title })
+        ),
+    });
+    configureContentInput({
+      allowLocalFileRead: true,
+      localFileRoots: [],
+      urlGuard: { allowlist: [], allowPrivate: true },
+      maxBytes: 50 * 1024 * 1024,
+      fetchTimeoutMs: 5000,
+    });
+  });
+
+  let client: TriliumClient;
+
+  async function makePng(name = 'shot.png'): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'trilium-mcp-handler-'));
+    cleanups.push(() => rm(dir, { recursive: true, force: true }));
+    const path = join(dir, name);
+    await writeFile(path, PNG_BYTES);
+    return path;
+  }
+
+  describe('create_attachment', () => {
+    it('accepts a file path with no mime and no title — everything is inferred', async () => {
+      const path = await makePng();
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'image',
+        content: path,
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ mime: 'image/png', title: 'shot.png' })
+      );
+      const sent = (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(PNG_BYTES)).toBe(true);
+    });
+
+    it('keeps an explicit title over the path basename', async () => {
+      const path = await makePng();
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'image',
+        title: 'Cover image',
+        content: path,
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Cover image' })
+      );
+    });
+
+    it('fails with PATH_NOT_FOUND when a path-shaped binary input does not exist', async () => {
+      await expect(
+        handleAttachmentTool(client, 'create_attachment', {
+          ownerId: 'n1',
+          role: 'image',
+          mime: 'image/png',
+          title: 'x.png',
+          content: '/nonexistent/dir/shot.png',
+        })
+      ).rejects.toMatchObject({ code: 'PATH_NOT_FOUND' });
+    });
+
+    it('resolves a text mime from the title extension when mime is omitted', async () => {
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'file',
+        title: 'readme.txt',
+        content: 'plain notes here',
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ mime: 'text/plain', content: 'plain notes here' })
+      );
+      expect(client.updateAttachmentContentBinary).not.toHaveBeenCalled();
+    });
+
+    it('errors with UNDETECTABLE_MIME for prose with no mime and no useful extension', async () => {
+      await expect(
+        handleAttachmentTool(client, 'create_attachment', {
+          ownerId: 'n1',
+          role: 'file',
+          title: 'notes',
+          content: 'some prose that could be anything',
+        })
+      ).rejects.toMatchObject({ code: 'UNDETECTABLE_MIME' });
+    });
+
+    it('requires a title when none can be derived from the source', async () => {
+      await expect(
+        handleAttachmentTool(client, 'create_attachment', {
+          ownerId: 'n1',
+          role: 'image',
+          content: PNG_BYTES.toString('base64'),
+        })
+      ).rejects.toThrow(/title/i);
+    });
+
+    it('fetches content from a URL', async () => {
+      const { origin } = await new Promise<{ origin: string }>((resolve) => {
+        const server = createHttpServer((req, res) => {
+          res.writeHead(200);
+          res.end(PNG_BYTES);
+        });
+        server.listen(0, '127.0.0.1', () => {
+          const { port } = server.address() as { port: number };
+          cleanups.push(() => new Promise((r) => server.close(() => r())));
+          resolve({ origin: `http://127.0.0.1:${port}` });
+        });
+      });
+      await handleAttachmentTool(client, 'create_attachment', {
+        ownerId: 'n1',
+        role: 'image',
+        content: `${origin}/remote.png`,
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ mime: 'image/png', title: 'remote.png' })
+      );
+      const sent = (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(PNG_BYTES)).toBe(true);
+    });
+
+    it('no longer requires mime or title in the tool schema', () => {
+      const tools = registerAttachmentTools();
+      const create = tools.find((t) => t.name === 'create_attachment')!;
+      const required = (create.inputSchema as { required?: string[] }).required ?? [];
+      expect(required).not.toContain('mime');
+      expect(required).not.toContain('title');
+      expect(required).toContain('content');
+    });
+  });
+
+  describe('write_attachment replace', () => {
+    it('accepts a file path, keeping the stored mime', async () => {
+      const path = await makePng();
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'image/png',
+        title: 'old.png',
+      });
+      await handleAttachmentTool(client, 'write_attachment', {
+        attachmentId: 'a1',
+        mode: 'replace',
+        content: path,
+      });
+      const sent = (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(PNG_BYTES)).toBe(true);
+    });
+  });
+
+  describe('create_note images[] / files[]', () => {
+    it('accepts an image entry that is just a path — mime and filename inferred', async () => {
+      const path = await makePng('diagram.png');
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'With image',
+        type: 'text',
+        content: '<p>hello</p>',
+        images: [{ data: path }],
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ role: 'image', mime: 'image/png', title: 'diagram.png' })
+      );
+      const sent = (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(PNG_BYTES)).toBe(true);
+      expect(result).not.toBeNull();
+    });
+
+    it('still accepts the legacy base64 + mime + filename entry shape', async () => {
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Legacy',
+        type: 'text',
+        content: '<p><img src="image:0"></p>',
+        images: [{ data: PNG_BYTES.toString('base64'), mime: 'image/png', filename: 'x.png' }],
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ mime: 'image/png', title: 'x.png' })
+      );
+    });
+
+    it('defaults a filename when the entry has neither filename nor a source name', async () => {
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Unnamed',
+        type: 'text',
+        content: '<p>hi</p>',
+        images: [{ data: PNG_BYTES.toString('base64'), mime: 'image/png' }],
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'image-0.png' })
+      );
+    });
+
+    it('reads a text file entry from a path into a one-step attachment', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'trilium-mcp-handler-'));
+      cleanups.push(() => rm(dir, { recursive: true, force: true }));
+      const path = join(dir, 'data.csv');
+      await writeFile(path, 'a,b\n1,2\n');
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'With file',
+        type: 'text',
+        content: '<p>hi</p>',
+        files: [{ data: path }],
+      });
+      expect(client.createAttachment).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'file',
+          mime: 'text/csv',
+          title: 'data.csv',
+          content: 'a,b\n1,2\n',
+        })
+      );
+      expect(client.updateAttachmentContentBinary).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('create_note binary content', () => {
+    it('uploads exact bytes and is immune to markdown conversion mangling', async () => {
+      const payload = Buffer.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a, 0x2a]);
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'A PDF',
+        type: 'file',
+        mime: 'application/pdf',
+        content: payload.toString('base64'),
+        format: 'markdown',
+      });
+      const sent = (client.updateNoteContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(payload)).toBe(true);
+    });
+
+    it('accepts a file path as binary note content', async () => {
+      const path = await makePng();
+      await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'A PNG note',
+        type: 'image',
+        mime: 'image/png',
+        content: path,
+      });
+      const sent = (client.updateNoteContentBinary as ReturnType<typeof vi.fn>).mock
+        .calls[0][1] as Buffer;
+      expect(sent.equals(PNG_BYTES)).toBe(true);
+    });
   });
 });

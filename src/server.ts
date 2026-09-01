@@ -8,10 +8,12 @@ import {
   formatTriliumError,
   formatZodError,
   formatDiffError,
+  formatContentInputError,
   formatUnknownError,
   formatErrorForMCP,
 } from './errors/index.js';
 import { DiffApplicationError } from './tools/diff.js';
+import { configureContentInput, ContentNormalizationError } from './tools/contentInput.js';
 import type { Config } from './config.js';
 import { deriveWebBaseUrl } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
@@ -62,14 +64,14 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   // Tool order matters: some clients pre-load only the first N tools. Put
   // read-heavy categories first so navigation/search are always available.
   const allTools = [
-    ...registerSearchTools(),       // search_notes, get_note_tree
-    ...registerNoteTools(),          // get_note, get_note_history, create_note, write_note, delete_note
-    ...registerRevisionTools(),      // get_revisions
-    ...registerAttributeTools(),     // get_attributes, set_attribute, delete_attribute
-    ...registerAttachmentTools(),    // get_attachment, create_attachment, write_attachment, delete_attachment
-    ...registerCalendarTools(),      // get_special_note
-    ...registerOrganizationTools(),  // organize_note
-    ...registerSystemTools(),        // create_revision, manage_system
+    ...registerSearchTools(), // search_notes, get_note_tree
+    ...registerNoteTools(), // get_note, get_note_history, create_note, write_note, delete_note
+    ...registerRevisionTools(), // get_revisions
+    ...registerAttributeTools(), // get_attributes, set_attribute, delete_attribute
+    ...registerAttachmentTools(), // get_attachment, create_attachment, write_attachment, delete_attachment
+    ...registerCalendarTools(), // get_special_note
+    ...registerOrganizationTools(), // organize_note
+    ...registerSystemTools(), // create_revision, manage_system
   ];
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
@@ -108,13 +110,17 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     const t0 = performance.now();
-    logger.debug('tool_call_args', { session: sessionId, principal, tool: name, args: redactArgs(args) });
+    logger.debug('tool_call_args', {
+      session: sessionId,
+      principal,
+      tool: name,
+      args: redactArgs(args),
+    });
 
     try {
       let result: {
         content: Array<
-          | { type: 'text'; text: string }
-          | { type: 'image'; data: string; mimeType: string }
+          { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
         >;
       } | null = await handleNoteTool(client, name, args);
       if (result !== null) {
@@ -185,6 +191,9 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       } else if (error instanceof DiffApplicationError) {
         structured = formatDiffError(error);
         recordToolCall(name, t0, { ok: false, error: 'diff' });
+      } else if (error instanceof ContentNormalizationError) {
+        structured = formatContentInputError(error);
+        recordToolCall(name, t0, { ok: false, error: 'content_input', code: error.code });
       } else {
         structured = formatUnknownError(error);
         recordToolCall(name, t0, {
@@ -217,6 +226,16 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
 }
 
 export async function createServer(config: Config, logger: Logger): Promise<void> {
+  // Content-input policy is process-wide: both transports share it, and tool
+  // handlers pick it up via the contentInput module rather than a threaded arg.
+  configureContentInput({
+    allowLocalFileRead: config.allowLocalFileRead,
+    localFileRoots: config.localFileRoots,
+    urlGuard: { allowlist: config.contentUrlAllowlist, allowPrivate: config.allowPrivateUrls },
+    maxBytes: config.maxContentFetchBytes,
+    fetchTimeoutMs: 30_000,
+  });
+
   if (config.transport === 'stdio') {
     await startStdio(config, logger);
   } else {

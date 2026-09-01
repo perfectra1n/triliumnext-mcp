@@ -5,9 +5,11 @@ import {
   formatTriliumError,
   formatZodError,
   formatUnknownError,
+  formatContentInputError,
   formatErrorForMCP,
   type StructuredError,
 } from '../../src/errors/index.js';
+import { ContentNormalizationError } from '../../src/tools/contentInput.js';
 
 describe('Error Formatting', () => {
   describe('formatTriliumError', () => {
@@ -252,5 +254,27 @@ describe('Error Formatting', () => {
       expect(text).toContain('field1');
       expect(text).toContain('field2');
     });
+  });
+});
+
+describe('formatContentInputError', () => {
+  it('carries the code and suggestion through to the structured error', () => {
+    const err = new ContentNormalizationError(
+      'PATH_NOT_FOUND',
+      'The input looks like a file path but no such file exists: /tmp/nope.png',
+      'Check the path.'
+    );
+    const structured = formatContentInputError(err);
+    expect(structured.message).toContain('/tmp/nope.png');
+    expect(structured.code).toBe('PATH_NOT_FOUND');
+    expect(structured.suggestion).toBe('Check the path.');
+  });
+
+  it('renders through formatErrorForMCP with a Suggestion block', () => {
+    const err = new ContentNormalizationError('URL_BLOCKED', 'URL rejected.', 'Use a public URL.');
+    const mcp = formatErrorForMCP(formatContentInputError(err));
+    expect(mcp.isError).toBe(true);
+    expect(mcp.content[0].text).toContain('**Code**: URL_BLOCKED');
+    expect(mcp.content[0].text).toContain('**Suggestion**: Use a public URL.');
   });
 });

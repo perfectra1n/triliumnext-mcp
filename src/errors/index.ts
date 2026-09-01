@@ -1,6 +1,7 @@
 import { ZodError, type ZodIssue } from 'zod';
 import { TriliumClientError } from '../client/trilium.js';
 import { DiffApplicationError } from '../tools/diff.js';
+import { ContentNormalizationError } from '../tools/contentInput.js';
 
 /**
  * Structured error information for MCP responses
@@ -155,6 +156,18 @@ export function formatDiffError(error: DiffApplicationError): StructuredError {
     message: error.message,
     code: 'DIFF_APPLICATION_FAILED',
     suggestion: 'Fetch the current content and retry with updated diffs.',
+  };
+}
+
+/**
+ * Format a ContentNormalizationError (file path / URL / base64 content input
+ * resolution failure) into a structured error with actionable guidance.
+ */
+export function formatContentInputError(error: ContentNormalizationError): StructuredError {
+  return {
+    message: error.message,
+    code: error.code,
+    suggestion: error.suggestion,
   };
 }
 

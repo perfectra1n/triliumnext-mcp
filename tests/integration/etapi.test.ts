@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
+import { tmpdir, homedir } from 'node:os';
+import { join, basename } from 'node:path';
+import type { AddressInfo } from 'node:net';
 import { fileTypeFromBuffer } from 'file-type';
+import { configureContentInput } from '../../src/tools/contentInput.js';
 import { TriliumClient, TriliumClientError } from '../../src/client/trilium.js';
 import { handleNoteTool } from '../../src/tools/notes.js';
 import { handleAttachmentTool } from '../../src/tools/attachments.js';
@@ -2030,6 +2036,152 @@ This has <angle brackets> and "quotes" & ampersands.
       const tags = refreshed.attributes.filter((a) => a.name === 'tag');
       expect(tags).toHaveLength(2);
       expect(tags.map((t) => t.value).sort()).toEqual(['first', 'second']);
+    });
+  });
+
+  // ==========================================================================
+  // Content input normalization: file paths, URLs, optional mime/filename.
+  // The example payload shapes here are quoted in README.md ("Providing file
+  // content") — keep them in sync (docs examples must be test-validated).
+  // ==========================================================================
+  describe('Content input normalization (paths, URLs, optional mime)', () => {
+    const pngBase64 =
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const pngBytes = Buffer.from(pngBase64, 'base64');
+
+    let tempDir: string;
+    let fixtureServer: HttpServer;
+    let fixtureOrigin: string;
+
+    beforeAll(async () => {
+      tempDir = await mkdtemp(join(tmpdir(), 'trilium-mcp-int-'));
+      // The fixture server lives on 127.0.0.1, which the default policy blocks
+      // (SSRF guard). Open private URLs for this suite only.
+      configureContentInput({
+        allowLocalFileRead: true,
+        localFileRoots: [],
+        urlGuard: { allowlist: [], allowPrivate: true },
+        maxBytes: 50 * 1024 * 1024,
+        fetchTimeoutMs: 10_000,
+      });
+      fixtureOrigin = await new Promise<string>((resolve) => {
+        fixtureServer = createHttpServer((req, res) => {
+          res.writeHead(200);
+          res.end(pngBytes);
+        });
+        fixtureServer.listen(0, '127.0.0.1', () => {
+          const { port } = fixtureServer.address() as AddressInfo;
+          resolve(`http://127.0.0.1:${port}`);
+        });
+      });
+    });
+
+    afterAll(async () => {
+      await rm(tempDir, { recursive: true, force: true });
+      await new Promise<void>((r) => fixtureServer.close(() => r()));
+      configureContentInput({
+        allowLocalFileRead: true,
+        localFileRoots: [],
+        urlGuard: { allowlist: [], allowPrivate: false },
+        maxBytes: 50 * 1024 * 1024,
+        fetchTimeoutMs: 30_000,
+      });
+    });
+
+    it('create_note with an image given only as a file path round-trips byte-identically', async () => {
+      const imagePath = join(tempDir, 'from-disk.png');
+      await writeFile(imagePath, pngBytes);
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Image From Disk',
+        type: 'text',
+        content: '<p>Look:</p><img src="image:0">',
+        images: [{ data: imagePath }],
+      });
+      const noteId = JSON.parse(result!.content[0].text as string).note.noteId;
+
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].mime).toBe('image/png');
+      expect(attachments[0].title).toBe('from-disk.png');
+
+      const content = await client.getNoteContent(noteId);
+      expect(content).toContain('/image/from-disk.png');
+      expect(content).not.toContain('image:0');
+
+      // Byte-identical round trip: what Trilium stores must sniff as a real PNG.
+      const stored = await client.getAttachmentContentAsBase64(attachments[0].attachmentId);
+      expect(Buffer.from(stored, 'base64').equals(pngBytes)).toBe(true);
+    });
+
+    it('create_attachment from a ~/ path derives mime and title', async () => {
+      const homeTempDir = await mkdtemp(join(homedir(), '.trilium-mcp-int-'));
+      try {
+        await writeFile(join(homeTempDir, 'tilde.png'), pngBytes);
+        const note = await client.createNote({
+          parentNoteId: 'root',
+          title: 'Tilde Path Owner',
+          type: 'text',
+          content: '<p>owner</p>',
+        });
+        const tildePath = `~/${basename(homeTempDir)}/tilde.png`;
+
+        const result = await handleAttachmentTool(client, 'create_attachment', {
+          ownerId: note.note.noteId,
+          role: 'image',
+          content: tildePath,
+        });
+        const created = JSON.parse(result!.content[0].text as string);
+        expect(created.mime).toBe('image/png');
+        expect(created.title).toBe('tilde.png');
+
+        const stored = await client.getAttachmentContentAsBase64(created.attachmentId);
+        expect(Buffer.from(stored, 'base64').equals(pngBytes)).toBe(true);
+      } finally {
+        await rm(homeTempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('create_note with an image fetched from a URL', async () => {
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'Image From URL',
+        type: 'text',
+        content: '<p>Remote:</p>',
+        images: [{ data: `${fixtureOrigin}/remote-pixel.png` }],
+      });
+      const noteId = JSON.parse(result!.content[0].text as string).note.noteId;
+
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].mime).toBe('image/png');
+      expect(attachments[0].title).toBe('remote-pixel.png');
+
+      const stored = await client.getAttachmentContentAsBase64(attachments[0].attachmentId);
+      expect(Buffer.from(stored, 'base64').equals(pngBytes)).toBe(true);
+    });
+
+    it('create_note files[] reads a text file from a path into a text attachment', async () => {
+      const csvPath = join(tempDir, 'stats.csv');
+      await writeFile(csvPath, 'name,count\nalpha,1\n');
+
+      const result = await handleNoteTool(client, 'create_note', {
+        parentNoteId: 'root',
+        title: 'CSV From Disk',
+        type: 'text',
+        content: '<p>Data: <a href="file:0">stats</a></p>',
+        files: [{ data: csvPath }],
+      });
+      const noteId = JSON.parse(result!.content[0].text as string).note.noteId;
+
+      const attachments = await client.getNoteAttachments(noteId);
+      expect(attachments).toHaveLength(1);
+      expect(attachments[0].mime).toBe('text/csv');
+      expect(attachments[0].title).toBe('stats.csv');
+
+      const stored = await client.getAttachmentContent(attachments[0].attachmentId);
+      expect(stored).toBe('name,count\nalpha,1\n');
     });
   });
 });

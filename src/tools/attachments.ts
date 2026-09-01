@@ -5,52 +5,19 @@ import { defineTool } from './schemas.js';
 import { positionSchema, required } from './validators.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 import { capWithNotice } from './contentLimits.js';
+import {
+  IMAGE_MIME_TYPES,
+  isImageMimeType,
+  isBinaryMimeType,
+  parseDataUrl,
+  resolveContentInput,
+  ContentNormalizationError,
+  CONTENT_SOURCE_GUIDANCE,
+} from './contentInput.js';
 
-export const IMAGE_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/jpg',
-  'image/gif',
-  'image/webp',
-  'image/svg+xml',
-]);
-
-export function isImageMimeType(mime: string): boolean {
-  return IMAGE_MIME_TYPES.has(mime.toLowerCase());
-}
-
-/**
- * MIME types that TriliumNext treats as text (string) content.
- * Mirrors TriliumNext's isStringNote() logic in services/utils.ts.
- */
-const TEXT_MIME_EXACT = new Set([
-  'application/javascript',
-  'application/x-javascript',
-  'application/json',
-  'application/x-sql',
-  'image/svg+xml',
-]);
-
-export function isBinaryMimeType(mime: string): boolean {
-  const lower = mime.toLowerCase();
-  if (lower.startsWith('text/')) return false;
-  if (TEXT_MIME_EXACT.has(lower)) return false;
-  return true;
-}
-
-export function base64ToBuffer(base64: string): Buffer {
-  return Buffer.from(base64, 'base64');
-}
-
-/**
- * Parse a data URL (data:mime;base64,content) and extract the MIME type and base64 content.
- * Returns null if the string is not a data URL.
- */
-export function parseDataUrl(data: string): { mime: string; base64: string } | null {
-  const match = data.match(/^data:([^;]+);base64,(.+)$/s);
-  if (!match) return null;
-  return { mime: match[1], base64: match[2] };
-}
+// The MIME helpers moved to contentInput.ts (which this module depends on);
+// re-export them so existing importers keep working.
+export { IMAGE_MIME_TYPES, isImageMimeType, isBinaryMimeType, parseDataUrl };
 
 // ============================================================================
 // Schemas
@@ -67,16 +34,21 @@ const createAttachmentSchema = z.object({
     .describe('Role of the attachment (e.g., "file", "image")'),
   mime: z
     .string()
-    .min(1, 'MIME type is required')
-    .describe('MIME type of the attachment (e.g., "image/png", "application/pdf")'),
-  title: z.string().min(1, 'Title is required').describe('Title/filename of the attachment'),
-  content: z
-    .string()
+    .min(1)
+    .optional()
     .describe(
-      'Content of the attachment. For binary MIME types: base64 or a data URL ' +
-        "(data:image/png;base64,...) — a data URL's MIME type overrides the mime field. " +
-        'For text MIME types: the raw string.'
+      'Optional MIME type (e.g., "image/png", "application/pdf") — auto-detected from a data URL, ' +
+        'magic bytes, or file extension. Set only to override detection.'
     ),
+  title: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'Title/filename of the attachment. Optional when content is a file path or URL ' +
+        '(defaults to its basename); required for inline content.'
+    ),
+  content: z.string().describe(`Content of the attachment. ${CONTENT_SOURCE_GUIDANCE}`),
   position: positionSchema.optional().describe('Position for ordering (10, 20, 30...)'),
 });
 
@@ -137,7 +109,7 @@ const writeAttachmentSchema = z
       .describe(
         'Write mode. ' +
           '"metadata" — update role/mime/title/position only. ' +
-          '"replace" — overwrite attachment content (base64 or a data URL for binary MIME types). ' +
+          '"replace" — overwrite attachment content (accepts a file path, http(s) URL, data URL, base64, or raw text). ' +
           '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to existing text content.'
       ),
     role: z.string().optional().describe('New role (metadata mode only).'),
@@ -147,9 +119,7 @@ const writeAttachmentSchema = z
     content: z
       .string()
       .optional()
-      .describe(
-        'New content for "replace" mode. For binary MIME types, provide base64-encoded data or a data URL (data:...;base64,...).'
-      ),
+      .describe(`New content for "replace" mode. ${CONTENT_SOURCE_GUIDANCE}`),
     changes: z
       .array(searchReplaceBlockSchema)
       .optional()
@@ -248,9 +218,10 @@ export function registerAttachmentTools(): Tool[] {
     defineTool(
       'create_attachment',
       'Create a new attachment on a note. Returns the created attachment metadata. ' +
-        'For binary MIME types (images, PDFs, most file types), provide content as base64-encoded data ' +
-        "or a data URL (data:image/png;base64,...) — a data URL's MIME type overrides the mime field. " +
-        'For text MIME types (text/*, application/json, application/javascript), provide content as a raw string.',
+        `${CONTENT_SOURCE_GUIDANCE} ` +
+        'mime and title are optional — auto-detected/derived from the source ' +
+        '(magic bytes, data-URL header, or file extension); a path or URL basename becomes the title. ' +
+        'Simplest call: {ownerId, role: "image", content: "/tmp/screenshot.png"}.',
       createAttachmentSchema,
       {
         title: 'Create attachment',
@@ -263,7 +234,8 @@ export function registerAttachmentTools(): Tool[] {
       'write_attachment',
       'Update an attachment. Three modes via "mode":\n' +
         '- "metadata": update role/mime/title/position (no content change)\n' +
-        '- "replace": overwrite the attachment body (base64 for binary MIME types)\n' +
+        '- "replace": overwrite the attachment body — accepts a local file path, http(s) URL, ' +
+        'data URL, base64 (binary types), or raw text (text types); the stored mime is kept\n' +
         '- "edit": apply "changes" (search/replace blocks) or "patch" (unified diff) to existing text content\n\n' +
         '"edit" mode only works for text content — it fetches existing content, applies the diff, and verifies the result.',
       writeAttachmentSchema,
@@ -304,34 +276,38 @@ export async function handleAttachmentTool(
   switch (name) {
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
-      // A data URL's MIME type overrides the explicit mime field (same
-      // convention as the images/files params on create_note/write_note).
-      const dataUrl = parseDataUrl(parsed.content);
-      const mime = dataUrl ? dataUrl.mime : parsed.mime;
-      if (isBinaryMimeType(mime)) {
+      const resolved = await resolveContentInput(parsed.content, {
+        mime: parsed.mime,
+        filename: parsed.title,
+      });
+      const title = parsed.title ?? resolved.sourceName;
+      if (!title) {
+        throw new ContentNormalizationError(
+          'UNDETECTABLE_MIME',
+          'A title is required when the content source has no filename (inline base64 or raw text).',
+          'Provide a title (e.g. "screenshot.png"), or pass a file path or URL whose basename can serve as one.'
+        );
+      }
+      if (resolved.isBinary) {
         const result = await client.createAttachment({
           ownerId: parsed.ownerId,
           role: parsed.role,
-          mime,
-          title: parsed.title,
+          mime: resolved.mime,
+          title,
           content: '',
           position: parsed.position,
         });
-        const binaryContent = base64ToBuffer(dataUrl ? dataUrl.base64 : parsed.content);
-        await client.updateAttachmentContentBinary(result.attachmentId, binaryContent);
+        await client.updateAttachmentContentBinary(result.attachmentId, resolved.buffer);
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
       }
-      const textContent = dataUrl
-        ? Buffer.from(dataUrl.base64, 'base64').toString('utf8')
-        : parsed.content;
       const result = await client.createAttachment({
         ownerId: parsed.ownerId,
         role: parsed.role,
-        mime,
-        title: parsed.title,
-        content: textContent,
+        mime: resolved.mime,
+        title,
+        content: resolved.buffer.toString('utf8'),
         position: parsed.position,
       });
       return {
@@ -399,15 +375,19 @@ export async function handleAttachmentTool(
       if (parsed.mode === 'replace') {
         const content = required(parsed.content, 'content');
         const attachment = await client.getAttachment(parsed.attachmentId);
-        const dataUrl = parseDataUrl(content);
+        // The stored mime is the hint: replace never silently re-types the
+        // attachment (metadata mode does that).
+        const resolved = await resolveContentInput(content, {
+          mime: attachment.mime,
+          filename: attachment.title,
+        });
         if (isBinaryMimeType(attachment.mime)) {
-          const binaryContent = base64ToBuffer(dataUrl ? dataUrl.base64 : content);
-          await client.updateAttachmentContentBinary(parsed.attachmentId, binaryContent);
+          await client.updateAttachmentContentBinary(parsed.attachmentId, resolved.buffer);
         } else {
-          const textContent = dataUrl
-            ? Buffer.from(dataUrl.base64, 'base64').toString('utf8')
-            : content;
-          await client.updateAttachmentContent(parsed.attachmentId, textContent);
+          await client.updateAttachmentContent(
+            parsed.attachmentId,
+            resolved.buffer.toString('utf8')
+          );
         }
         return {
           content: [

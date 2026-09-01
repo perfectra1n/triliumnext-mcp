@@ -509,3 +509,92 @@ describe('normalizeServerUrl', () => {
     expect(normalizeServerUrl('http://localhost/trilium')).toBe('http://localhost/trilium/etapi');
   });
 });
+
+describe('content input policy config', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of [
+      'TRILIUM_URL',
+      'TRILIUM_TOKEN',
+      'TRILIUM_TRANSPORT',
+      'TRILIUM_MULTI_TENANT',
+      'TRILIUM_GATEWAY_AUTH',
+      'TRILIUM_GATEWAY_TOKENS',
+      'TRILIUM_ALLOW_LOCAL_FILE_READ',
+      'TRILIUM_LOCAL_FILE_ROOTS',
+      'TRILIUM_CONTENT_URL_ALLOWLIST',
+      'TRILIUM_MAX_CONTENT_FETCH_BYTES',
+    ]) {
+      delete process.env[key];
+    }
+    process.env.TRILIUM_TOKEN = 'test-token';
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('defaults: local reads allowed on stdio, no roots, no URL allowlist, 50 MB cap', () => {
+    const config = loadConfig([]);
+    expect(config!.allowLocalFileRead).toBe(true);
+    expect(config!.localFileRoots).toEqual([]);
+    expect(config!.contentUrlAllowlist).toEqual([]);
+    expect(config!.maxContentFetchBytes).toBe(50 * 1024 * 1024);
+  });
+
+  it('defaults local reads OFF for the http transport', () => {
+    const config = loadConfig(['--transport', 'http']);
+    expect(config!.allowLocalFileRead).toBe(false);
+  });
+
+  it('--allow-local-file-read overrides the http default', () => {
+    const config = loadConfig(['--transport', 'http', '--allow-local-file-read']);
+    expect(config!.allowLocalFileRead).toBe(true);
+  });
+
+  it('--no-local-file-read overrides the stdio default', () => {
+    const config = loadConfig(['--no-local-file-read']);
+    expect(config!.allowLocalFileRead).toBe(false);
+  });
+
+  it('TRILIUM_ALLOW_LOCAL_FILE_READ env var is honored', () => {
+    process.env.TRILIUM_ALLOW_LOCAL_FILE_READ = 'false';
+    const config = loadConfig([]);
+    expect(config!.allowLocalFileRead).toBe(false);
+  });
+
+  it('--local-file-roots parses a CSV list', () => {
+    const config = loadConfig(['--local-file-roots', '/tmp, /home/user/uploads']);
+    expect(config!.localFileRoots).toEqual(['/tmp', '/home/user/uploads']);
+  });
+
+  it('TRILIUM_LOCAL_FILE_ROOTS env var is honored', () => {
+    process.env.TRILIUM_LOCAL_FILE_ROOTS = '/srv/data';
+    const config = loadConfig([]);
+    expect(config!.localFileRoots).toEqual(['/srv/data']);
+  });
+
+  it('--content-url-allowlist parses a CSV list', () => {
+    const config = loadConfig(['--content-url-allowlist', 'example.com,cdn.example.org']);
+    expect(config!.contentUrlAllowlist).toEqual(['example.com', 'cdn.example.org']);
+  });
+
+  it('TRILIUM_CONTENT_URL_ALLOWLIST env var is honored', () => {
+    process.env.TRILIUM_CONTENT_URL_ALLOWLIST = 'files.example.net';
+    const config = loadConfig([]);
+    expect(config!.contentUrlAllowlist).toEqual(['files.example.net']);
+  });
+
+  it('--max-content-fetch-bytes accepts suffixed sizes', () => {
+    const config = loadConfig(['--max-content-fetch-bytes', '10mb']);
+    expect(config!.maxContentFetchBytes).toBe(10 * 1024 * 1024);
+  });
+
+  it('TRILIUM_MAX_CONTENT_FETCH_BYTES env var is honored', () => {
+    process.env.TRILIUM_MAX_CONTENT_FETCH_BYTES = '1mb';
+    const config = loadConfig([]);
+    expect(config!.maxContentFetchBytes).toBe(1024 * 1024);
+  });
+});
