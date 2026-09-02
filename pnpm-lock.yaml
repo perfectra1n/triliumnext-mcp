@@ -10,7 +10,7 @@ importers:
     dependencies:
       '@modelcontextprotocol/sdk':
         specifier: ^1.25.3
-        version: 1.30.0(zod@4.4.3)
+        version: 1.30.0(zod@4.5.4)
       diff:
         specifier: ^9.0.0
         version: 9.0.0
@@ -27,8 +27,8 @@ importers:
         specifier: ^7.2.2
         version: 7.2.4
       zod:
-        specifier: ^4.3.5
-        version: 4.4.3
+        specifier: ^4.5.4
+        version: 4.5.4
     devDependencies:
       '@eslint/js':
         specifier: ^10.0.0
@@ -58,7 +58,7 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
       typescript-eslint:
-        specifier: ^8.68.0
+        specifier: ^8.53.1
         version: 8.68.0(eslint@10.9.1)(typescript@5.9.3)
       vitest:
         specifier: ^4.0.17
@@ -1769,8 +1769,8 @@ packages:
     peerDependencies:
       zod: ^3.25.28 || ^4
 
-  zod@4.4.3:
-    resolution: {integrity: sha512-ytENFjIJFl2UwYglde2jchW2Hwm4GJFLDiSXWdTrJQBIN9Fcyp7n4DhxJEiWNAJMV1/BqWfW/kkg71UDcHJyTQ==}
+  zod@4.5.4:
+    resolution: {integrity: sha512-sC95tT5iHHH9gtpj6A81kh+NEaRAUFN+qlUPDUbRfOMvNf5QCBqsb3WgvnpVtK5Y+4UfA6KqufotuTvMGiTlsA==}
 
 snapshots:
 
@@ -1888,7 +1888,7 @@ snapshots:
 
   '@mixmark-io/domino@2.2.0': {}
 
-  '@modelcontextprotocol/sdk@1.30.0(zod@4.4.3)':
+  '@modelcontextprotocol/sdk@1.30.0(zod@4.5.4)':
     dependencies:
       '@hono/node-server': 2.0.12(hono@4.12.32)
       ajv: 8.20.0
@@ -1905,8 +1905,8 @@ snapshots:
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
-      zod: 4.4.3
-      zod-to-json-schema: 3.25.2(zod@4.4.3)
+      zod: 4.5.4
+      zod-to-json-schema: 3.25.2(zod@4.5.4)
     transitivePeerDependencies:
       - supports-color
 
@@ -3492,8 +3492,8 @@ snapshots:
       compress-commons: 6.0.2
       readable-stream: 4.7.0
 
-  zod-to-json-schema@3.25.2(zod@4.4.3):
+  zod-to-json-schema@3.25.2(zod@4.5.4):
     dependencies:
-      zod: 4.4.3
+      zod: 4.5.4
 
-  zod@4.4.3: {}
+  zod@4.5.4: {}
