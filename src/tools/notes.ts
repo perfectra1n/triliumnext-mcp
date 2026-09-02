@@ -12,45 +12,38 @@ import {
 } from './validators.js';
 import { marked } from 'marked';
 import TurndownService from 'turndown';
-import { isImageMimeType, isBinaryMimeType, base64ToBuffer, parseDataUrl } from './attachments.js';
+import {
+  isImageMimeType,
+  isBinaryMimeType,
+  resolveContentInput,
+  CONTENT_SOURCE_GUIDANCE,
+} from './contentInput.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 import { CONTENT_CHAR_CAP } from './contentLimits.js';
 
-/**
- * Resolve the data field: if it's a data URL, extract base64 + mime (overriding explicit mime).
- * If it's raw base64, return as-is with the explicit mime.
- */
-function resolveAttachmentData(entry: { data: string; mime: string }): {
-  data: string;
-  mime: string;
-} {
-  const parsed = parseDataUrl(entry.data);
-  if (parsed) {
-    return { data: parsed.base64, mime: parsed.mime };
-  }
-  return { data: entry.data, mime: entry.mime };
-}
-
 const imageEntrySchema = z.object({
-  data: z
-    .string()
-    .describe(
-      'Image data as base64 string or data URL (data:image/png;base64,...). ' +
-        'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
-    ),
+  data: z.string().describe(`The image. ${CONTENT_SOURCE_GUIDANCE}`),
   mime: z
     .string()
+    .optional()
     .describe(
-      'MIME type of the image (e.g., "image/png", "image/jpeg"). Ignored if data is a data URL.'
+      'Optional MIME type (e.g., "image/png") — auto-detected from the source; set only to override.'
     ),
-  filename: z.string().describe('Filename for the image attachment (e.g., "screenshot.png")'),
+  filename: z
+    .string()
+    .optional()
+    .describe(
+      'Optional filename for the image attachment (e.g., "screenshot.png"). ' +
+        'Defaults to the path/URL basename, else image-N.'
+    ),
 });
 
 const imagesFieldSchema = z
   .array(imageEntrySchema)
   .optional()
   .describe(
-    'Optional array of images to embed in the note. The data field accepts raw base64 or a data URL (data:image/png;base64,...). ' +
+    'Optional array of images to embed in the note. The data field accepts a local file path, an http(s) URL, ' +
+      'a data URL, or raw base64 — auto-detected; mime and filename are optional. ' +
       'Reference images in your content using placeholder URLs: in markdown use ![alt](image:0), ![alt](image:1), etc. ' +
       'In HTML use <img src="image:0"> (double quotes required). The number is the zero-based index into THIS array — ' +
       'placeholders do NOT reference attachments uploaded in earlier calls. Images and placeholders must be provided together in the same call. ' +
@@ -63,24 +56,43 @@ const imagesFieldSchema = z
  * Placeholders use the format src="image:N" where N is the zero-based index.
  * Images not referenced by a placeholder are appended at the end of the content.
  */
+/** Extensions for default attachment names, keyed by resolved MIME. */
+const MIME_EXTENSION: Record<string, string> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/svg+xml': 'svg',
+  'application/pdf': 'pdf',
+};
+
+function defaultAttachmentName(prefix: string, index: number, mime: string): string {
+  const ext = MIME_EXTENSION[mime.toLowerCase()];
+  return ext ? `${prefix}-${index}.${ext}` : `${prefix}-${index}`;
+}
+
 async function processImages(
   client: TriliumClient,
   ownerId: string,
   htmlContent: string,
-  images: Array<{ data: string; mime: string; filename: string }>
+  images: Array<{ data: string; mime?: string; filename?: string }>
 ): Promise<string> {
   const attachments = await Promise.all(
-    images.map(async (img) => {
-      const resolved = resolveAttachmentData(img);
+    images.map(async (img, i) => {
+      const resolved = await resolveContentInput(img.data, {
+        mime: img.mime,
+        filename: img.filename,
+      });
+      const title =
+        img.filename ?? resolved.sourceName ?? defaultAttachmentName('image', i, resolved.mime);
       const attachment = await client.createAttachment({
         ownerId,
         role: 'image',
         mime: resolved.mime,
-        title: img.filename,
+        title,
         content: '',
       });
-      const binaryContent = base64ToBuffer(resolved.data);
-      await client.updateAttachmentContentBinary(attachment.attachmentId, binaryContent);
+      await client.updateAttachmentContentBinary(attachment.attachmentId, resolved.buffer);
       return attachment;
     })
   );
@@ -110,25 +122,29 @@ async function processImages(
 }
 
 const fileEntrySchema = z.object({
-  data: z
-    .string()
-    .describe(
-      'File data as base64 string or data URL (data:application/pdf;base64,...). ' +
-        'When using a data URL, the MIME type is extracted automatically and overrides the mime field.'
-    ),
+  data: z.string().describe(`The file. ${CONTENT_SOURCE_GUIDANCE}`),
   mime: z
     .string()
+    .optional()
     .describe(
-      'MIME type of the file (e.g., "application/pdf", "text/csv"). Ignored if data is a data URL.'
+      'Optional MIME type (e.g., "application/pdf", "text/csv") — auto-detected from the source; ' +
+        'set only to override.'
     ),
-  filename: z.string().describe('Filename for the file attachment (e.g., "report.pdf")'),
+  filename: z
+    .string()
+    .optional()
+    .describe(
+      'Optional filename for the file attachment (e.g., "report.pdf"). ' +
+        'Defaults to the path/URL basename, else file-N.'
+    ),
 });
 
 const filesFieldSchema = z
   .array(fileEntrySchema)
   .optional()
   .describe(
-    'Optional array of files to attach and embed as download links in the note. The data field accepts raw base64 or a data URL. ' +
+    'Optional array of files to attach and embed as download links in the note. The data field accepts a local file path, ' +
+      'an http(s) URL, a data URL, raw base64 (binary types), or raw text (text types) — auto-detected; mime and filename are optional. ' +
       'Reference files in your content using placeholder URLs: in markdown use [label](file:0), [label](file:1), etc. ' +
       'In HTML use <a href="file:0">label</a> (double quotes required). The number is the zero-based index into THIS array — ' +
       'placeholders do NOT reference attachments uploaded in earlier calls. Files and placeholders must be provided together in the same call. ' +
@@ -143,29 +159,33 @@ async function processFiles(
   client: TriliumClient,
   ownerId: string,
   htmlContent: string,
-  files: Array<{ data: string; mime: string; filename: string }>
+  files: Array<{ data: string; mime?: string; filename?: string }>
 ): Promise<string> {
   const attachments = await Promise.all(
-    files.map(async (file) => {
-      const resolved = resolveAttachmentData(file);
-      if (isBinaryMimeType(resolved.mime)) {
+    files.map(async (file, i) => {
+      const resolved = await resolveContentInput(file.data, {
+        mime: file.mime,
+        filename: file.filename,
+      });
+      const title =
+        file.filename ?? resolved.sourceName ?? defaultAttachmentName('file', i, resolved.mime);
+      if (resolved.isBinary) {
         const attachment = await client.createAttachment({
           ownerId,
           role: 'file',
           mime: resolved.mime,
-          title: file.filename,
+          title,
           content: '',
         });
-        const binaryContent = base64ToBuffer(resolved.data);
-        await client.updateAttachmentContentBinary(attachment.attachmentId, binaryContent);
+        await client.updateAttachmentContentBinary(attachment.attachmentId, resolved.buffer);
         return attachment;
       }
       return client.createAttachment({
         ownerId,
         role: 'file',
         mime: resolved.mime,
-        title: file.filename,
-        content: resolved.data,
+        title,
+        content: resolved.buffer.toString('utf8'),
       });
     })
   );
@@ -266,6 +286,8 @@ const createNoteSchema = z.object({
     .describe(
       'Content of the note. For text notes: provide HTML (default) or markdown (if format is "markdown"). ' +
         'For code notes: provide raw code. ' +
+        'For binary notes (file/image types with a binary mime): provide base64, a data URL, ' +
+        'a local file path, or an http(s) URL — auto-detected. ' +
         'For code blocks in HTML, use <pre><code class="language-X">...</code></pre> structure ' +
         '(e.g., language-mermaid, language-javascript). The class must be on the <code> element, not <pre>. ' +
         INTERNAL_LINK_GUIDANCE
@@ -607,8 +629,18 @@ export async function handleNoteTool(
   switch (name) {
     case 'create_note': {
       const parsed = createNoteSchema.parse(args);
-      let content = await convertContent(parsed.content, parsed.format);
       const isBinary = parsed.mime ? isBinaryMimeType(parsed.mime) : false;
+      // Binary content is normalized BEFORE any format conversion — running
+      // markdown conversion on a base64 string would corrupt it.
+      const binaryContent = isBinary
+        ? (
+            await resolveContentInput(parsed.content, {
+              mime: parsed.mime,
+              filename: parsed.title,
+            })
+          ).buffer
+        : null;
+      let content = isBinary ? '' : await convertContent(parsed.content, parsed.format);
       const hasAttachments =
         (parsed.images && parsed.images.length > 0) || (parsed.files && parsed.files.length > 0);
       if (!isBinary && !hasAttachments) {
@@ -629,8 +661,7 @@ export async function handleNoteTool(
         utcDateCreated: parsed.utcDateCreated,
       });
 
-      if (isBinary && content) {
-        const binaryContent = base64ToBuffer(content);
+      if (binaryContent && binaryContent.length > 0) {
         await client.updateNoteContentBinary(result.note.noteId, binaryContent);
       }
 
@@ -642,7 +673,11 @@ export async function handleNoteTool(
           content = await processFiles(client, result.note.noteId, content, parsed.files);
         }
         assertPlaceholdersResolved(content);
-        await client.updateNoteContent(result.note.noteId, content);
+        // For a binary note the body IS the binary blob — writing the
+        // placeholder HTML would overwrite it.
+        if (!isBinary) {
+          await client.updateNoteContent(result.note.noteId, content);
+        }
       }
 
       const url = await client.getNoteUrl(result.note.noteId, result.branch.parentNoteId);

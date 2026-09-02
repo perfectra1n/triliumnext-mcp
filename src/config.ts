@@ -91,6 +91,29 @@ export interface Config {
    */
   maxPostBytes: number;
   /**
+   * Permit tool inputs that name local file paths (attachment/image content).
+   * Defaults to true for stdio (the operator's own machine) and false for the
+   * http transport, where an LLM-supplied path would read the SERVER's
+   * filesystem on behalf of an arbitrary client.
+   */
+  allowLocalFileRead: boolean;
+  /**
+   * When non-empty, restrict content file reads to these directories
+   * (realpath-checked, so symlinks cannot escape). Empty = unrestricted.
+   */
+  localFileRoots: string[];
+  /**
+   * Hostname allowlist for http(s) CONTENT fetches (attachment/image inputs).
+   * Separate from `urlAllowlist`, which governs client-supplied Trilium hosts.
+   * Empty means any public host (private IPs still blocked unless
+   * `allowPrivateUrls`).
+   */
+  contentUrlAllowlist: string[];
+  /**
+   * Maximum bytes for a single content file read or URL download.
+   */
+  maxContentFetchBytes: number;
+  /**
    * If true, expose a Prometheus-compatible `GET /metrics` endpoint on the SSE
    * gateway. Opt-in; ignored when `transport=stdio` (no HTTP listener).
    */
@@ -153,6 +176,10 @@ interface ConfigFile {
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
   maxPostBytes?: number;
+  allowLocalFileRead?: boolean;
+  localFileRoots?: string[];
+  contentUrlAllowlist?: string[];
+  maxContentFetchBytes?: number;
   metrics?: boolean;
   metricsAuth?: MetricsAuthMode;
   metricsTokens?: string[];
@@ -180,6 +207,10 @@ interface CliArgs {
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
   maxPostBytes?: number;
+  allowLocalFileRead?: boolean;
+  localFileRoots?: string[];
+  contentUrlAllowlist?: string[];
+  maxContentFetchBytes?: number;
   metrics?: boolean;
   metricsAuth?: string;
   metricsTokens?: string[];
@@ -250,6 +281,27 @@ function parseCliArgs(args: string[]): CliArgs {
         if (nextArg) {
           const parsed = parseSize(nextArg);
           if (parsed !== undefined) result.maxPostBytes = parsed;
+        }
+        i++;
+        break;
+      case '--allow-local-file-read':
+        result.allowLocalFileRead = true;
+        break;
+      case '--no-local-file-read':
+        result.allowLocalFileRead = false;
+        break;
+      case '--local-file-roots':
+        result.localFileRoots = splitCsv(nextArg);
+        i++;
+        break;
+      case '--content-url-allowlist':
+        result.contentUrlAllowlist = splitCsv(nextArg);
+        i++;
+        break;
+      case '--max-content-fetch-bytes':
+        if (nextArg) {
+          const parsed = parseSize(nextArg);
+          if (parsed !== undefined) result.maxContentFetchBytes = parsed;
         }
         i++;
         break;
@@ -386,6 +438,19 @@ Multi-tenant HTTP options (require --transport http):
                                      transport. Accepts raw bytes or suffixed values
                                      (e.g. 500mb, 1gb). Default: 500mb.
 
+Content input (file paths / URLs in attachment and image tool inputs):
+  --allow-local-file-read            Permit tool inputs that name local file paths.
+                                     Default: on for stdio, off for --transport http.
+  --no-local-file-read               Disable local file path inputs.
+  --local-file-roots <dirs>          Comma-separated directories content may be read from.
+                                     Empty (default) = unrestricted when reads are allowed.
+  --content-url-allowlist <hosts>    Comma-separated hostnames permitted for http(s) content
+                                     fetches. Empty = any public host (private IPs still
+                                     blocked unless --allow-private-urls).
+  --max-content-fetch-bytes <size>   Max size of a content file read or URL download.
+                                     Accepts raw bytes or suffixed values (e.g. 50mb).
+                                     Default: 50mb.
+
 Metrics (require --transport http):
   --metrics                          Expose Prometheus-compatible GET /metrics on the SSE
                                      gateway. Opt-in; off by default.
@@ -428,6 +493,10 @@ Environment Variables:
   TRILIUM_URL_ALLOWLIST              Comma-separated allowed hostnames for client URLs
   TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
   TRILIUM_MAX_POST_BYTES             Max SSE POST body size (raw bytes or e.g. 500mb, 1gb)
+  TRILIUM_ALLOW_LOCAL_FILE_READ      "true"/"false" to permit local file path content inputs
+  TRILIUM_LOCAL_FILE_ROOTS           Comma-separated directories content may be read from
+  TRILIUM_CONTENT_URL_ALLOWLIST      Comma-separated hostnames for http(s) content fetches
+  TRILIUM_MAX_CONTENT_FETCH_BYTES    Max content file read / URL download size (e.g. 50mb)
   TRILIUM_METRICS                    "true" to expose GET /metrics (HTTP transport only)
   TRILIUM_METRICS_AUTH               gateway | bearer | none (default: gateway)
   TRILIUM_METRICS_TOKENS             Comma-separated scrape tokens (for TRILIUM_METRICS_AUTH=bearer)
@@ -481,6 +550,7 @@ function parseBoolean(value: string | undefined): boolean | undefined {
 }
 
 const DEFAULT_MAX_POST_BYTES = 500 * 1024 * 1024;
+const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * 1024 * 1024;
 
 /** Accepts a raw byte count or a suffixed value like "500mb", "10MiB", "2g". */
 function parseSize(value: string | undefined): number | undefined {
@@ -516,10 +586,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   // Empty string env vars are treated as unset. Docker compose overrides
   // frequently resolve unset vars to "", and we want those to behave like
   // "not configured" rather than "explicitly empty".
-  const rawUrl =
-    cli.url ?? emptyToUndefined(process.env.TRILIUM_URL) ?? file.url;
-  const rawToken =
-    cli.token ?? emptyToUndefined(process.env.TRILIUM_TOKEN) ?? file.token ?? '';
+  const rawUrl = cli.url ?? emptyToUndefined(process.env.TRILIUM_URL) ?? file.url;
+  const rawToken = cli.token ?? emptyToUndefined(process.env.TRILIUM_TOKEN) ?? file.token ?? '';
 
   const rawPublicUrl =
     cli.publicUrl ?? emptyToUndefined(process.env.TRILIUM_PUBLIC_URL) ?? file.publicUrl;
@@ -535,14 +603,13 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     3000;
 
   const multiTenant =
-    cli.multiTenant ??
-    parseBoolean(process.env.TRILIUM_MULTI_TENANT) ??
-    file.multiTenant ??
-    false;
+    cli.multiTenant ?? parseBoolean(process.env.TRILIUM_MULTI_TENANT) ?? file.multiTenant ?? false;
 
   const gatewayTokens =
     cli.gatewayTokens ??
-    (process.env.TRILIUM_GATEWAY_TOKENS ? splitCsv(process.env.TRILIUM_GATEWAY_TOKENS) : undefined) ??
+    (process.env.TRILIUM_GATEWAY_TOKENS
+      ? splitCsv(process.env.TRILIUM_GATEWAY_TOKENS)
+      : undefined) ??
     file.gatewayTokens ??
     [];
 
@@ -574,12 +641,45 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.maxPostBytes ??
     DEFAULT_MAX_POST_BYTES;
 
+  // Local file reads default ON for stdio (the operator's own machine) and OFF
+  // for the http transport, where an LLM-supplied path reads the SERVER's
+  // filesystem on behalf of an arbitrary client.
+  const allowLocalFileRead =
+    cli.allowLocalFileRead ??
+    parseBoolean(process.env.TRILIUM_ALLOW_LOCAL_FILE_READ) ??
+    file.allowLocalFileRead ??
+    transport === 'stdio';
+
+  const localFileRoots =
+    cli.localFileRoots ??
+    (process.env.TRILIUM_LOCAL_FILE_ROOTS
+      ? splitCsv(process.env.TRILIUM_LOCAL_FILE_ROOTS)
+      : undefined) ??
+    file.localFileRoots ??
+    [];
+
+  const contentUrlAllowlist =
+    cli.contentUrlAllowlist ??
+    (process.env.TRILIUM_CONTENT_URL_ALLOWLIST
+      ? splitCsv(process.env.TRILIUM_CONTENT_URL_ALLOWLIST)
+      : undefined) ??
+    file.contentUrlAllowlist ??
+    [];
+
+  const maxContentFetchBytes =
+    cli.maxContentFetchBytes ??
+    parseSize(process.env.TRILIUM_MAX_CONTENT_FETCH_BYTES) ??
+    file.maxContentFetchBytes ??
+    DEFAULT_MAX_CONTENT_FETCH_BYTES;
+
   const metricsEnabledRaw =
     cli.metrics ?? parseBoolean(process.env.TRILIUM_METRICS) ?? file.metrics ?? false;
 
   const metricsTokens =
     cli.metricsTokens ??
-    (process.env.TRILIUM_METRICS_TOKENS ? splitCsv(process.env.TRILIUM_METRICS_TOKENS) : undefined) ??
+    (process.env.TRILIUM_METRICS_TOKENS
+      ? splitCsv(process.env.TRILIUM_METRICS_TOKENS)
+      : undefined) ??
     file.metricsTokens ??
     [];
 
@@ -596,10 +696,7 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     [];
 
   const rateLimitRps =
-    cli.rateLimitRps ??
-    parseNumber(process.env.TRILIUM_RATE_LIMIT_RPS) ??
-    file.rateLimitRps ??
-    0;
+    cli.rateLimitRps ?? parseNumber(process.env.TRILIUM_RATE_LIMIT_RPS) ?? file.rateLimitRps ?? 0;
 
   const rateLimitBurst =
     cli.rateLimitBurst ??
@@ -614,16 +711,10 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     [];
 
   const jwtJwksUrl =
-    cli.jwtJwksUrl ??
-    emptyToUndefined(process.env.TRILIUM_JWT_JWKS_URL) ??
-    file.jwtJwksUrl ??
-    null;
+    cli.jwtJwksUrl ?? emptyToUndefined(process.env.TRILIUM_JWT_JWKS_URL) ?? file.jwtJwksUrl ?? null;
 
   const jwtIssuer =
-    cli.jwtIssuer ??
-    emptyToUndefined(process.env.TRILIUM_JWT_ISSUER) ??
-    file.jwtIssuer ??
-    null;
+    cli.jwtIssuer ?? emptyToUndefined(process.env.TRILIUM_JWT_ISSUER) ?? file.jwtIssuer ?? null;
 
   const jwtAudience =
     cli.jwtAudience ??
@@ -678,7 +769,9 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   // (would accept nothing / confuse operators); fail loudly.
   if (gatewayAuth === 'bearer' && gatewayTokens.length === 0) {
     console.error('Error: --gateway-auth bearer requires at least one --gateway-token.');
-    console.error('Either provide a token or pass --gateway-auth none (NOT recommended for multi-tenant).');
+    console.error(
+      'Either provide a token or pass --gateway-auth none (NOT recommended for multi-tenant).'
+    );
     process.exit(1);
   }
 
@@ -700,7 +793,9 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   }
   if (metricsEnabled && metricsAuth === 'bearer' && metricsTokens.length === 0) {
     console.error('Error: --metrics-auth bearer requires at least one --metrics-token.');
-    console.error('Either provide a scrape token or use --metrics-auth gateway or --metrics-auth none.');
+    console.error(
+      'Either provide a scrape token or use --metrics-auth gateway or --metrics-auth none.'
+    );
     process.exit(1);
   }
   if (metricsEnabled && metricsAuth === 'gateway' && gatewayAuth === 'none') {
@@ -745,6 +840,10 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     urlAllowlist,
     allowPrivateUrls,
     maxPostBytes,
+    allowLocalFileRead,
+    localFileRoots,
+    contentUrlAllowlist,
+    maxContentFetchBytes,
     metricsEnabled,
     metricsAuth,
     metricsTokens,

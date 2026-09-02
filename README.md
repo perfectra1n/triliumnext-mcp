@@ -84,6 +84,12 @@ Options:
 - `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `500mb`). See [Request body size limits](#request-body-size-limits).
 - `-h, --help` — Show help message
 
+Content input options (see [Providing file content](#providing-file-content-paths-urls-base64)):
+- `--allow-local-file-read` / `--no-local-file-read` — permit tool inputs that name local file paths (default: on for stdio, off for `--transport http`)
+- `--local-file-roots <dirs>` — comma-separated directories content may be read from (default: unrestricted when reads are allowed)
+- `--content-url-allowlist <hosts>` — comma-separated hostnames permitted for http(s) content fetches (default: any public host)
+- `--max-content-fetch-bytes <size>` — max content file read / URL download size (default: `50mb`)
+
 Multi-tenant HTTP options (see [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) below):
 - `--multi-tenant` — each SSE client supplies its own Trilium URL + token
 - `--gateway-auth <mode>` — `none` or `bearer` (default: `bearer` when multi-tenant)
@@ -100,6 +106,12 @@ export TRILIUM_PUBLIC_URL=https://trilium.example.com  # optional; web URL for n
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
 export TRILIUM_MAX_POST_BYTES=500mb  # SSE POST body cap; see "Request body size limits"
+
+# Content input (file paths / URLs in attachment and image tool inputs):
+export TRILIUM_ALLOW_LOCAL_FILE_READ=true   # default: true for stdio, false for http
+export TRILIUM_LOCAL_FILE_ROOTS=/srv/uploads
+export TRILIUM_CONTENT_URL_ALLOWLIST=example.com
+export TRILIUM_MAX_CONTENT_FETCH_BYTES=50mb
 
 # Multi-tenant (see section below):
 export TRILIUM_MULTI_TENANT=true
@@ -550,6 +562,42 @@ The tool surface was consolidated in a breaking release. The mapping from the ol
 ## Embedding Images and Files
 
 When creating or updating notes, you can embed images and files directly in a single tool call using the `images` and `files` parameters.
+
+### Providing file content (paths, URLs, base64)
+
+Every content-carrying input — `create_attachment.content`, `write_attachment` replace `content`, the `data` field of `images[]`/`files[]` entries, and binary note `content` — accepts **any** of these forms, auto-detected:
+
+| Form | Example | Notes |
+|---|---|---|
+| Local file path | `/tmp/screenshots/from-disk.png`, `~/docs/report.pdf` | The big win: the model never re-encodes bytes it already has on disk. Stdio transport only by default. |
+| `file://` path | `file:///tmp/shot.png` | Forces path interpretation (no fallthrough). |
+| http(s) URL | `https://example.com/logo.png` | The server fetches it (SSRF-guarded, 50 MB cap). |
+| Data URL | `data:image/png;base64,iVBORw0KGgo...` | Its MIME type wins over everything. |
+| Inline base64 / raw text | `iVBORw0KGgo...` / `plain notes here` | Today's behavior, unchanged. |
+
+`mime`, `filename`, and `create_attachment.title` are now **optional**: the MIME type is resolved from the data-URL header, then an explicit `mime`, then magic-byte sniffing, then the file extension; a path/URL basename becomes the default filename/title. The simplest possible calls:
+
+```json
+{ "tool": "create_attachment", "arguments": { "ownerId": "abc123", "role": "image", "content": "/tmp/screenshots/from-disk.png" } }
+```
+
+```json
+{ "tool": "create_note", "arguments": { "parentNoteId": "root", "title": "Image From Disk", "type": "text", "content": "<p>Look:</p><img src=\"image:0\">", "images": [{ "data": "/tmp/screenshots/from-disk.png" }] } }
+```
+
+```json
+{ "files": [{ "data": "/tmp/exports/stats.csv" }] }
+```
+
+(These shapes are exercised verbatim by `tests/integration/etapi.test.ts` › "Content input normalization".)
+
+Detection is verification-gated, so existing inline content can never be misread: a string only counts as a path when it is ≤ 1024 characters **and** names an existing regular file (JPEG base64 starts with `/9j/` but never survives both checks), and prose is never silently decoded as base64 — an undetectable inline input with no `mime` returns an actionable error instead of a guess.
+
+Security knobs (see [CLI Arguments](#cli-arguments)):
+
+- Local path reads are **enabled for stdio** (the server runs on your own machine) and **disabled for `--transport http`**, where a path would read the *server's* filesystem on behalf of a remote client. Override with `--allow-local-file-read` / `--no-local-file-read`, and optionally sandbox with `--local-file-roots /srv/uploads`.
+- URL fetches pass the same SSRF guard as multi-tenant Trilium URLs (private/loopback/metadata IPs blocked unless `--allow-private-urls`), re-checked on every redirect hop, with a `--max-content-fetch-bytes` cap (default 50 MB).
+- Trilium applies its own image compression settings server-side; the MCP always uploads the original bytes untouched.
 
 ### Image Embedding
 

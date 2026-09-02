@@ -353,3 +353,19 @@ describe('createLogger — env-driven defaults', () => {
     }
   });
 });
+
+describe('redactArgs: content-input fields', () => {
+  it('never logs attachment/image content, whatever form it arrived in', () => {
+    const out = redactArgs({
+      ownerId: 'n1',
+      content: '/tmp/secret-report.png',
+      images: [{ data: 'iVBORw0KGgo...', mime: 'image/png' }],
+      files: [{ data: '~/docs/x.csv' }],
+    }) as Record<string, unknown>;
+    expect(out.content).toBe('<string len=22>');
+    expect(out.images).toBe('<array len=1>');
+    expect(out.files).toBe('<array len=1>');
+    expect(JSON.stringify(out)).not.toContain('iVBORw0KGgo');
+    expect(JSON.stringify(out)).not.toContain('secret-report');
+  });
+});
