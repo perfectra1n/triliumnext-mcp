@@ -18,8 +18,8 @@ importers:
         specifier: ^22.0.0
         version: 22.0.2
       jose:
-        specifier: ^6.2.3
-        version: 6.2.10
+        specifier: ^6.2.12
+        version: 6.2.12
       marked:
         specifier: ^18.0.0
         version: 18.0.11
@@ -46,7 +46,7 @@ importers:
         specifier: ^5.0.6
         version: 5.0.6
       eslint:
-        specifier: ^10.10.0
+        specifier: ^10.0.0
         version: 10.10.0
       prettier:
         specifier: ^3.8.1
@@ -1081,8 +1081,8 @@ packages:
   jackspeak@3.4.3:
     resolution: {integrity: sha512-OGlZQpz2yfahA/Rd1Y8Cd9SIEsqvXkLVoSw/cgwhnhFMDbsQFeZYoJJ7bIZBS9BcamUW96asq/npPWugM+RQBw==}
 
-  jose@6.2.10:
-    resolution: {integrity: sha512-iiW7J9qRFlGxvCOIBDBDxFePQSn7ZMAnrYGhrrOo6siO/MIqwfyilLR27pkfDgUk+raLuzADS8A3S/KLBisc0g==}
+  jose@6.2.12:
+    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
 
   json-schema-traverse@0.4.1:
     resolution: {integrity: sha512-xbbCH5dCYU5T8LcEhhuh7HJ88HXuW3qsI3Y0zOZFKfZEHcpWiHU/Jxzk629Brsab/mMiHQti9wMP+845RPe3Vg==}
@@ -1948,7 +1948,7 @@ snapshots:
       express: 5.2.1
       express-rate-limit: 8.6.1(express@5.2.1)
       hono: 4.12.32
-      jose: 6.2.10
+      jose: 6.2.12
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.1
       raw-body: 3.0.2
@@ -2859,7 +2859,7 @@ snapshots:
     optionalDependencies:
       '@pkgjs/parseargs': 0.11.0
 
-  jose@6.2.10: {}
+  jose@6.2.12: {}
 
   json-schema-traverse@0.4.1: {}
 
