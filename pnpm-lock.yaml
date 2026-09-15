@@ -15,13 +15,13 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       file-type:
-        specifier: ^22.0.0
-        version: 22.0.2
+        specifier: ^22.1.0
+        version: 22.1.0
       jose:
         specifier: ^6.2.3
         version: 6.2.12
       marked:
-        specifier: ^18.0.12
+        specifier: ^18.0.0
         version: 18.0.12
       turndown:
         specifier: ^7.2.2
@@ -924,8 +924,8 @@ packages:
   file-entry-cache@11.1.5:
     resolution: {integrity: sha512-+PFTHITI08JIGhnNpGNI8T8inUpgZfk3GNEqfT9R2zZV2iFXg3CvqzSl/uEhs7TSGujYRELEANyDvS8Fj7+S7Q==}
 
-  file-type@22.0.2:
-    resolution: {integrity: sha512-0H8TsCUGBLx+V5adH3EY52hTAcyLKbV1D4gq5cIOJ6DnQAHeV9Z2Hhuc5CoBX4YmvB2oL+JIC84z0qO7JsCoNw==}
+  file-type@22.1.0:
+    resolution: {integrity: sha512-fbvf9u6jnHWr1EP6V8R99E9iLMhNLXgZkUzWBiPpJ5/89UJ/Atuxjn5YXR+XaZWo2hc2/8mGfTez+NDAgOcpLA==}
     engines: {node: '>=22'}
 
   finalhandler@2.1.1:
@@ -2707,7 +2707,7 @@ snapshots:
     dependencies:
       flat-cache: 6.1.23
 
-  file-type@22.0.2:
+  file-type@22.1.0:
     dependencies:
       '@tokenizer/inflate': 0.4.1
       strtok3: 10.3.5
