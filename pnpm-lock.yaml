@@ -15,8 +15,8 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       file-type:
-        specifier: ^22.0.0
-        version: 22.1.0
+        specifier: ^22.1.1
+        version: 22.1.1
       jose:
         specifier: ^6.2.3
         version: 6.2.12
@@ -49,7 +49,7 @@ importers:
         specifier: ^10.0.0
         version: 10.10.0
       prettier:
-        specifier: ^3.9.7
+        specifier: ^3.8.1
         version: 3.9.7
       testcontainers:
         specifier: ^12.0.0
@@ -924,8 +924,8 @@ packages:
   file-entry-cache@11.1.5:
     resolution: {integrity: sha512-+PFTHITI08JIGhnNpGNI8T8inUpgZfk3GNEqfT9R2zZV2iFXg3CvqzSl/uEhs7TSGujYRELEANyDvS8Fj7+S7Q==}
 
-  file-type@22.1.0:
-    resolution: {integrity: sha512-fbvf9u6jnHWr1EP6V8R99E9iLMhNLXgZkUzWBiPpJ5/89UJ/Atuxjn5YXR+XaZWo2hc2/8mGfTez+NDAgOcpLA==}
+  file-type@22.1.1:
+    resolution: {integrity: sha512-sEB0oStmeLGtpmSAD88RDNuLsvhv4iC3u0lE25CUvfCULvj49xoQ3l3K525Vn+ZzsZ6DOLajQCV6RmhwwhqiJg==}
     engines: {node: '>=22'}
 
   finalhandler@2.1.1:
@@ -2707,7 +2707,7 @@ snapshots:
     dependencies:
       flat-cache: 6.1.23
 
-  file-type@22.1.0:
+  file-type@22.1.1:
     dependencies:
       '@tokenizer/inflate': 0.4.1
       strtok3: 10.3.5
