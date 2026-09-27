@@ -21,7 +21,7 @@ importers:
         specifier: ^6.2.3
         version: 6.2.12
       marked:
-        specifier: ^18.0.14
+        specifier: ^18.0.0
         version: 18.0.14
       turndown:
         specifier: ^7.2.2
@@ -49,8 +49,8 @@ importers:
         specifier: ^10.0.0
         version: 10.11.0
       prettier:
-        specifier: ^3.8.1
-        version: 3.9.8
+        specifier: ^3.9.9
+        version: 3.9.9
       testcontainers:
         specifier: ^12.0.0
         version: 12.1.0
@@ -1346,8 +1346,8 @@ packages:
     resolution: {integrity: sha512-vkcDPrRZo1QZLbn5RLGPpg/WmIQ65qoWWhcGKf/b5eplkkarX0m9z8ppCat4mlOqUsWpyNuYgO3VRyrYHSzX5g==}
     engines: {node: '>= 0.8.0'}
 
-  prettier@3.9.8:
-    resolution: {integrity: sha512-WRFq3Wn3WId7LLROfMLdH7xaFr2jR62wU8nLO6rQUOLOxNZUviyJQs1M0iIhLexSFy+L+w0ch66wtoO2jRjG0A==}
+  prettier@3.9.9:
+    resolution: {integrity: sha512-Z/CJHIkdujO/OtN7nXUii0Rf3VT5SRuhjBA82Xvu2XhBUgX3nhP67T0LHceBdQLex7OOFGTox+Q5Yg8Jk2Qivg==}
     engines: {node: '>=14'}
     hasBin: true
 
@@ -3054,7 +3054,7 @@ snapshots:
 
   prelude-ls@1.2.1: {}
 
-  prettier@3.9.8: {}
+  prettier@3.9.9: {}
 
   process-nextick-args@2.0.1: {}
 
