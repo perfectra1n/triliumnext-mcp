@@ -25,9 +25,7 @@ export class CorsPolicy {
 
   constructor(origins: string[]) {
     this.wildcard = origins.includes('*');
-    this.exactOrigins = new Set(
-      origins.filter((o) => o !== '*').map((o) => o.toLowerCase())
-    );
+    this.exactOrigins = new Set(origins.filter((o) => o !== '*').map((o) => o.toLowerCase()));
   }
 
   get enabled(): boolean {
@@ -50,10 +48,7 @@ export class CorsPolicy {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader(
-      'Access-Control-Expose-Headers',
-      'MCP-Session-Id'
-    );
+    res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-Id');
   }
 
   /**

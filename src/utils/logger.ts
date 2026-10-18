@@ -112,7 +112,11 @@ export function createLogger(opts: CreateLoggerOptions = {}): Logger {
     target.write(line + '\n');
   };
 
-  const emit = (lvl: Exclude<LogLevel, 'silent'>, event: string, fields?: Record<string, unknown>): void => {
+  const emit = (
+    lvl: Exclude<LogLevel, 'silent'>,
+    event: string,
+    fields?: Record<string, unknown>
+  ): void => {
     if (threshold < LEVEL_ORDER[lvl]) return;
     const ts = new Date().toISOString();
     if (format === 'json') {

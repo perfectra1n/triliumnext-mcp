@@ -62,11 +62,11 @@ const STRUCTURED_SYNTAX_RE = /[#~()=<>*]/;
  * CJK Unified, CJK Compatibility Ideographs, halfwidth Katakana, Hangul, and
  * CJK Ext-B and beyond.
  */
-const CJK_RE =
-  /[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ가-힯]|[\u{20000}-\u{2fa1f}]/u;
+const CJK_RE = /[぀-ヿ㐀-䶿一-鿿豈-﫿ｦ-ﾟ가-힯]|[\u{20000}-\u{2fa1f}]/u;
 
 /** Punctuation stripped from the edges of a bare token, ASCII and CJK alike. */
-const EDGE_PUNCTUATION_RE = /^[\s,.;:!?'"、。！？，；：「」『』（）]+|[\s,.;:!?'"、。！？，；：「」『』（）]+$/gu;
+const EDGE_PUNCTUATION_RE =
+  /^[\s,.;:!?'"、。！？，；：「」『』（）]+|[\s,.;:!?'"、。！？，；：「」『』（）]+$/gu;
 
 /**
  * Normalize for comparison only. NFKC folds full-width forms onto their ASCII
@@ -244,7 +244,10 @@ export function rankNotes(notes: Note[], terms: string[]): RankedNote[] {
     }
 
     if (startsWithTerm) score += 3;
-    if (title.length > 0 && (title === normalizedQuery || normalizedTerms.some((t) => t.norm === title))) {
+    if (
+      title.length > 0 &&
+      (title === normalizedQuery || normalizedTerms.some((t) => t.norm === title))
+    ) {
       score += 5;
     }
 

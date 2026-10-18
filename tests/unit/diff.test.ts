@@ -25,50 +25,37 @@ describe('Diff Module', () => {
     });
 
     it('should handle deletion (empty new_string)', () => {
-      const result = applySearchReplace('Hello World', [
-        { old_string: ' World', new_string: '' },
-      ]);
+      const result = applySearchReplace('Hello World', [{ old_string: ' World', new_string: '' }]);
       expect(result).toBe('Hello');
     });
 
     it('should handle insertion at beginning (empty old_string)', () => {
-      const result = applySearchReplace('World', [
-        { old_string: '', new_string: 'Hello ' },
-      ]);
+      const result = applySearchReplace('World', [{ old_string: '', new_string: 'Hello ' }]);
       expect(result).toBe('Hello World');
     });
 
     it('should throw DiffApplicationError when search string not found', () => {
       expect(() =>
-        applySearchReplace('<p>Hello</p>', [
-          { old_string: 'nonexistent', new_string: 'x' },
-        ])
+        applySearchReplace('<p>Hello</p>', [{ old_string: 'nonexistent', new_string: 'x' }])
       ).toThrow(DiffApplicationError);
       expect(() =>
-        applySearchReplace('<p>Hello</p>', [
-          { old_string: 'nonexistent', new_string: 'x' },
-        ])
+        applySearchReplace('<p>Hello</p>', [{ old_string: 'nonexistent', new_string: 'x' }])
       ).toThrow('could not find');
     });
 
     it('should throw DiffApplicationError when search string is ambiguous (multiple matches)', () => {
       expect(() =>
-        applySearchReplace('<p>Hello Hello</p>', [
-          { old_string: 'Hello', new_string: 'x' },
-        ])
+        applySearchReplace('<p>Hello Hello</p>', [{ old_string: 'Hello', new_string: 'x' }])
       ).toThrow(DiffApplicationError);
       expect(() =>
-        applySearchReplace('<p>Hello Hello</p>', [
-          { old_string: 'Hello', new_string: 'x' },
-        ])
+        applySearchReplace('<p>Hello Hello</p>', [{ old_string: 'Hello', new_string: 'x' }])
       ).toThrow('ambiguous');
     });
 
     it('should handle special characters (HTML tags, entities, regex metacharacters)', () => {
-      const result = applySearchReplace(
-        '<p class="test">Price: $10.00 (USD)</p>',
-        [{ old_string: '$10.00 (USD)', new_string: '$20.00 (EUR)' }]
-      );
+      const result = applySearchReplace('<p class="test">Price: $10.00 (USD)</p>', [
+        { old_string: '$10.00 (USD)', new_string: '$20.00 (EUR)' },
+      ]);
       expect(result).toBe('<p class="test">Price: $20.00 (EUR)</p>');
     });
 
@@ -90,9 +77,7 @@ describe('Diff Module', () => {
 
     it('should handle large content efficiently', () => {
       const large = 'x'.repeat(100000) + 'FIND_ME' + 'x'.repeat(100000);
-      const result = applySearchReplace(large, [
-        { old_string: 'FIND_ME', new_string: 'REPLACED' },
-      ]);
+      const result = applySearchReplace(large, [{ old_string: 'FIND_ME', new_string: 'REPLACED' }]);
       expect(result).toContain('REPLACED');
       expect(result).not.toContain('FIND_ME');
       expect(result.length).toBe(200008);
@@ -102,8 +87,7 @@ describe('Diff Module', () => {
   describe('applyUnifiedDiff', () => {
     it('should apply a single-hunk patch', () => {
       const content = 'line1\nline2\nline3\n';
-      const patch =
-        '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
+      const patch = '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
       const result = applyUnifiedDiff(content, patch);
       expect(result).toBe('line1\nline2_modified\nline3\n');
     });
@@ -118,26 +102,21 @@ describe('Diff Module', () => {
 
     it('should throw DiffApplicationError when patch fails to apply', () => {
       const content = 'completely different content\n';
-      const patch =
-        '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
+      const patch = '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
       expect(() => applyUnifiedDiff(content, patch)).toThrow(DiffApplicationError);
-      expect(() => applyUnifiedDiff(content, patch)).toThrow(
-        'patch could not be applied'
-      );
+      expect(() => applyUnifiedDiff(content, patch)).toThrow('patch could not be applied');
     });
 
     it('should apply additions-only patch', () => {
       const content = 'line1\nline3\n';
-      const patch =
-        '--- a\n+++ b\n@@ -1,2 +1,3 @@\n line1\n+line2\n line3\n';
+      const patch = '--- a\n+++ b\n@@ -1,2 +1,3 @@\n line1\n+line2\n line3\n';
       const result = applyUnifiedDiff(content, patch);
       expect(result).toBe('line1\nline2\nline3\n');
     });
 
     it('should apply deletions-only patch', () => {
       const content = 'line1\nline2\nline3\n';
-      const patch =
-        '--- a\n+++ b\n@@ -1,3 +1,2 @@\n line1\n-line2\n line3\n';
+      const patch = '--- a\n+++ b\n@@ -1,3 +1,2 @@\n line1\n-line2\n line3\n';
       const result = applyUnifiedDiff(content, patch);
       expect(result).toBe('line1\nline3\n');
     });
@@ -166,8 +145,7 @@ describe('Diff Module', () => {
 
     it('should delegate to applyUnifiedDiff for patch mode', async () => {
       const content = 'line1\nline2\nline3\n';
-      const patch =
-        '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
+      const patch = '--- a\n+++ b\n@@ -1,3 +1,3 @@\n line1\n-line2\n+line2_modified\n line3\n';
       const result = await resolveContent(content, { patch });
       expect(result).toBe('line1\nline2_modified\nline3\n');
     });
@@ -239,18 +217,14 @@ describe('Diff Module', () => {
 
     it('should skip verification for empty new_string (deletions)', () => {
       expect(() =>
-        verifySearchReplaceResults('<p>World</p>', [
-          { old_string: 'Hello ', new_string: '' },
-        ])
+        verifySearchReplaceResults('<p>World</p>', [{ old_string: 'Hello ', new_string: '' }])
       ).not.toThrow();
     });
 
     it('should truncate long missing strings in error message', () => {
       const longString = 'x'.repeat(300);
       try {
-        verifySearchReplaceResults('unchanged', [
-          { old_string: 'a', new_string: longString },
-        ]);
+        verifySearchReplaceResults('unchanged', [{ old_string: 'a', new_string: longString }]);
         expect.fail('should have thrown');
       } catch (e) {
         expect((e as Error).message).toContain('x'.repeat(200) + '...');

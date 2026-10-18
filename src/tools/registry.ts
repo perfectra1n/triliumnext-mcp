@@ -113,10 +113,7 @@ export interface SearchToolsOptions {
  * - Parameter name match: 15 pts each
  * - Parameter description match: 10 pts each
  */
-export function searchTools(
-  query: string,
-  options: SearchToolsOptions = {}
-): SearchToolsResponse {
+export function searchTools(query: string, options: SearchToolsOptions = {}): SearchToolsResponse {
   const { category, include_schemas = false, limit = 10 } = options;
   const tools = getToolRegistry();
 
@@ -167,8 +164,7 @@ export function searchTools(
 
       // Check parameter names and descriptions
       const properties = tool.inputSchema?.properties as
-        | Record<string, { description?: string }>
-        | undefined;
+        Record<string, { description?: string }> | undefined;
       if (properties) {
         for (const [paramName, paramDef] of Object.entries(properties)) {
           if (paramName.toLowerCase().includes(keyword)) {

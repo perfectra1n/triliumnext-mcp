@@ -352,7 +352,8 @@ describe('MCP Transport Integration Tests', () => {
       testNoteId = noteParsed.note.noteId;
 
       // 1x1 PNG pixel in base64
-      const pngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+      const pngBase64 =
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
 
       // Create an image attachment
       const attachResponse = await client.callTool({
@@ -374,7 +375,11 @@ describe('MCP Transport Integration Tests', () => {
         arguments: { attachmentId: attachment.attachmentId, include_content: true },
       });
 
-      const content = contentResponse.content as Array<{ type: string; data?: string; mimeType?: string }>;
+      const content = contentResponse.content as Array<{
+        type: string;
+        data?: string;
+        mimeType?: string;
+      }>;
       expect(content[0].type).toBe('image');
       expect(content[0].data).toBe(pngBase64);
       expect(content[0].mimeType).toBe('image/png');
@@ -429,7 +434,11 @@ describe('MCP Transport Integration Tests', () => {
         arguments: { attachmentId: attachment.attachmentId, include_content: true },
       });
 
-      const content = contentResponse.content as Array<{ type: string; data?: string; mimeType?: string }>;
+      const content = contentResponse.content as Array<{
+        type: string;
+        data?: string;
+        mimeType?: string;
+      }>;
       expect(content[0].type).toBe('image');
       expect(content[0].mimeType).toBe('image/jpeg');
 
@@ -1019,8 +1028,7 @@ describe('MCP Transport Integration Tests', () => {
           content: '<p>STREAMABLE_BODY</p>',
         },
       });
-      const noteId = parseJsonResponse<{ note: { noteId: string } }>(createResponse).note
-        .noteId;
+      const noteId = parseJsonResponse<{ note: { noteId: string } }>(createResponse).note.noteId;
       try {
         const defaultResponse = await client.callTool({
           name: 'get_note',
@@ -1067,8 +1075,10 @@ describe('MCP Transport Integration Tests', () => {
           },
         });
         const body = (
-          (await client.callTool({ name: 'get_note', arguments: { noteId } }))
-            .content as Array<{ type: string; text: string }>
+          (await client.callTool({ name: 'get_note', arguments: { noteId } })).content as Array<{
+            type: string;
+            text: string;
+          }>
         )[1].text;
         expect(body).toContain('AFTER');
 

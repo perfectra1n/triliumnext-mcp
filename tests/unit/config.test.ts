@@ -178,7 +178,13 @@ describe('loadConfig', () => {
 
   describe('multi-tenant mode', () => {
     it('skips required-token check when --multi-tenant is set', () => {
-      const config = loadConfig(['--transport', 'http', '--multi-tenant', '--gateway-token', 'abc']);
+      const config = loadConfig([
+        '--transport',
+        'http',
+        '--multi-tenant',
+        '--gateway-token',
+        'abc',
+      ]);
       expect(config).not.toBeNull();
       expect(config!.multiTenant).toBe(true);
       expect(config!.triliumToken).toBeNull();
@@ -186,7 +192,13 @@ describe('loadConfig', () => {
     });
 
     it('defaults gateway-auth to bearer when multi-tenant is on', () => {
-      const config = loadConfig(['--transport', 'http', '--multi-tenant', '--gateway-token', 'abc']);
+      const config = loadConfig([
+        '--transport',
+        'http',
+        '--multi-tenant',
+        '--gateway-token',
+        'abc',
+      ]);
       expect(config!.gatewayAuth).toBe('bearer');
       expect(config!.gatewayTokens).toEqual(['abc']);
     });
@@ -198,9 +210,9 @@ describe('loadConfig', () => {
     });
 
     it('exits when --multi-tenant is used with stdio transport', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() => loadConfig(['--multi-tenant', '--gateway-token', 'abc'])).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -209,9 +221,9 @@ describe('loadConfig', () => {
     });
 
     it('exits when --gateway-auth bearer has no tokens', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() =>
         loadConfig(['--transport', 'http', '--multi-tenant', '--gateway-auth', 'bearer'])
@@ -223,20 +235,26 @@ describe('loadConfig', () => {
 
     it('accepts multiple --gateway-token flags', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'tok1',
-        '--gateway-token', 'tok2',
+        '--gateway-token',
+        'tok1',
+        '--gateway-token',
+        'tok2',
       ]);
       expect(config!.gatewayTokens).toEqual(['tok1', 'tok2']);
     });
 
     it('parses --trilium-url-allowlist', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'tok',
-        '--trilium-url-allowlist', 'a.example.com,b.example.com',
+        '--gateway-token',
+        'tok',
+        '--trilium-url-allowlist',
+        'a.example.com,b.example.com',
       ]);
       expect(config!.urlAllowlist).toEqual(['a.example.com', 'b.example.com']);
     });
@@ -256,9 +274,9 @@ describe('loadConfig', () => {
     });
 
     it('single-tenant still requires a token', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() => loadConfig([])).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -267,16 +285,19 @@ describe('loadConfig', () => {
     });
 
     it('rejects --url passed alongside --multi-tenant', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() =>
         loadConfig([
-          '--transport', 'http',
+          '--transport',
+          'http',
           '--multi-tenant',
-          '--gateway-token', 'abc',
-          '--url', 'http://trilium.example.com',
+          '--gateway-token',
+          'abc',
+          '--url',
+          'http://trilium.example.com',
         ])
       ).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -285,16 +306,19 @@ describe('loadConfig', () => {
     });
 
     it('rejects --token passed alongside --multi-tenant', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() =>
         loadConfig([
-          '--transport', 'http',
+          '--transport',
+          'http',
           '--multi-tenant',
-          '--gateway-token', 'abc',
-          '--token', 'default-etapi-token',
+          '--gateway-token',
+          'abc',
+          '--token',
+          'default-etapi-token',
         ])
       ).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -307,9 +331,9 @@ describe('loadConfig', () => {
       process.env.TRILIUM_MULTI_TENANT = 'true';
       process.env.TRILIUM_GATEWAY_TOKENS = 'abc';
       process.env.TRILIUM_URL = 'http://trilium.example.com';
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() => loadConfig([])).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -319,9 +343,11 @@ describe('loadConfig', () => {
 
     it('multi-tenant config has null triliumUrl and triliumToken', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'abc',
+        '--gateway-token',
+        'abc',
       ]);
       expect(config!.triliumUrl).toBeNull();
       expect(config!.triliumToken).toBeNull();
@@ -337,9 +363,11 @@ describe('loadConfig', () => {
 
     it('requires auth by default when enabled (mode=gateway, not none)', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'gw-secret',
+        '--gateway-token',
+        'gw-secret',
         '--metrics',
       ]);
       expect(config!.metricsEnabled).toBe(true);
@@ -355,9 +383,13 @@ describe('loadConfig', () => {
       expect(config!.metricsEnabled).toBe(false);
       // Operator should be told why their flag was ignored.
       expect(errSpy).toHaveBeenCalled();
-      const warned = errSpy.mock.calls.flat().some((arg) =>
-        typeof arg === 'string' && arg.includes('--metrics has no effect with --transport stdio')
-      );
+      const warned = errSpy.mock.calls
+        .flat()
+        .some(
+          (arg) =>
+            typeof arg === 'string' &&
+            arg.includes('--metrics has no effect with --transport stdio')
+        );
       expect(warned).toBe(true);
       errSpy.mockRestore();
     });
@@ -373,17 +405,20 @@ describe('loadConfig', () => {
     });
 
     it('exits when --metrics-auth bearer has no scrape tokens', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       expect(() =>
         loadConfig([
-          '--transport', 'http',
+          '--transport',
+          'http',
           '--multi-tenant',
-          '--gateway-token', 'gw',
+          '--gateway-token',
+          'gw',
           '--metrics',
-          '--metrics-auth', 'bearer',
+          '--metrics-auth',
+          'bearer',
         ])
       ).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
@@ -396,29 +431,32 @@ describe('loadConfig', () => {
       process.env.TRILIUM_TOKEN = 't';
       // Single-tenant defaults to gateway-auth=none. Requesting metrics-auth=gateway
       // would be silently equivalent to 'none' — surface that explicitly.
-      const config = loadConfig([
-        '--transport', 'http',
-        '--metrics',
-        '--metrics-auth', 'gateway',
-      ]);
+      const config = loadConfig(['--transport', 'http', '--metrics', '--metrics-auth', 'gateway']);
       expect(config!.gatewayAuth).toBe('none');
       expect(config!.metricsAuth).toBe('none');
-      const warned = errSpy.mock.calls.flat().some((arg) =>
-        typeof arg === 'string' && arg.includes('Falling back to --metrics-auth=none')
-      );
+      const warned = errSpy.mock.calls
+        .flat()
+        .some(
+          (arg) => typeof arg === 'string' && arg.includes('Falling back to --metrics-auth=none')
+        );
       expect(warned).toBe(true);
       errSpy.mockRestore();
     });
 
     it('accepts repeated --metrics-token flags', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'gw',
+        '--gateway-token',
+        'gw',
         '--metrics',
-        '--metrics-auth', 'bearer',
-        '--metrics-token', 'scrape-1',
-        '--metrics-token', 'scrape-2',
+        '--metrics-auth',
+        'bearer',
+        '--metrics-token',
+        'scrape-1',
+        '--metrics-token',
+        'scrape-2',
       ]);
       expect(config!.metricsAuth).toBe('bearer');
       expect(config!.metricsTokens).toEqual(['scrape-1', 'scrape-2']);
@@ -446,19 +484,22 @@ describe('loadConfig', () => {
 
     it('rejects unknown metrics-auth values, falling back to default (gateway)', () => {
       const config = loadConfig([
-        '--transport', 'http',
+        '--transport',
+        'http',
         '--multi-tenant',
-        '--gateway-token', 'gw',
+        '--gateway-token',
+        'gw',
         '--metrics',
-        '--metrics-auth', 'wat',
+        '--metrics-auth',
+        'wat',
       ]);
       expect(config!.metricsAuth).toBe('gateway');
     });
 
     it('exits in bearer mode even when --metrics-auth comes from env', () => {
-      const exitSpy = vi
-        .spyOn(process, 'exit')
-        .mockImplementation(() => { throw new Error('exit'); });
+      const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+        throw new Error('exit');
+      });
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
       process.env.TRILIUM_TRANSPORT = 'http';
       process.env.TRILIUM_MULTI_TENANT = 'true';

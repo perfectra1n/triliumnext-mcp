@@ -119,7 +119,12 @@ export class Histogram extends Metric<HistogramEntry> {
   /** Bucket upper bounds in seconds. `+Inf` is implicit. */
   readonly buckets: readonly number[];
 
-  constructor(name: string, help: string, labelNames: readonly string[], buckets: readonly number[]) {
+  constructor(
+    name: string,
+    help: string,
+    labelNames: readonly string[],
+    buckets: readonly number[]
+  ) {
     super(name, help, labelNames);
     // Strictly increasing, finite, positive.
     for (let i = 1; i < buckets.length; i++) {
@@ -166,7 +171,9 @@ export class Histogram extends Metric<HistogramEntry> {
     for (const entry of this.series.values()) {
       for (let i = 0; i < this.buckets.length; i++) {
         const bucketLabels: LabelMap = { ...entry.labels, le: formatNumber(this.buckets[i]) };
-        lines.push(`${this.name}_bucket${formatLabels(bucketLabels)} ${entry.value.bucketCounts[i]}`);
+        lines.push(
+          `${this.name}_bucket${formatLabels(bucketLabels)} ${entry.value.bucketCounts[i]}`
+        );
       }
       const infLabels: LabelMap = { ...entry.labels, le: '+Inf' };
       lines.push(`${this.name}_bucket${formatLabels(infLabels)} ${entry.value.count}`);
@@ -278,7 +285,9 @@ export function createMetrics(version: string, opts: CreateMetricsOptions = {}):
   const registry = new Registry();
 
   const buildInfo = registry.register(
-    new Gauge('triliumnext_mcp_build_info', 'Build information; constant 1, version in label.', ['version'])
+    new Gauge('triliumnext_mcp_build_info', 'Build information; constant 1, version in label.', [
+      'version',
+    ])
   );
   buildInfo.set({ version }, 1);
 
@@ -300,11 +309,11 @@ export function createMetrics(version: string, opts: CreateMetricsOptions = {}):
   );
 
   const toolCallsTotal = registry.register(
-    new Counter(
-      'triliumnext_mcp_tool_calls_total',
-      'Total MCP tool invocations.',
-      ['tool', 'ok', 'error']
-    )
+    new Counter('triliumnext_mcp_tool_calls_total', 'Total MCP tool invocations.', [
+      'tool',
+      'ok',
+      'error',
+    ])
   );
 
   const toolCallDuration = registry.register(
@@ -352,7 +361,10 @@ export function createMetrics(version: string, opts: CreateMetricsOptions = {}):
   );
 
   const processResidentMemoryBytes = registry.register(
-    new Gauge('triliumnext_mcp_process_resident_memory_bytes', 'Resident set size of the Node process in bytes.')
+    new Gauge(
+      'triliumnext_mcp_process_resident_memory_bytes',
+      'Resident set size of the Node process in bytes.'
+    )
   );
 
   const collectProcess = (): void => {

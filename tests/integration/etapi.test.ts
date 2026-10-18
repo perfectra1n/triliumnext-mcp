@@ -808,7 +808,8 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         role: 'image',
         mime: 'image/png',
         title: 'test-image.png',
-        content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        content:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
       });
 
       expect(attachment.role).toBe('image');
@@ -990,7 +991,8 @@ describe('TriliumNext ETAPI Integration Tests', () => {
         role: 'image',
         mime: 'image/png',
         title: 'ignored.png',
-        content: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+        content:
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
       });
 
       const result = await handleNoteTool(client, 'get_note', {
@@ -1594,11 +1596,13 @@ This has <angle brackets> and "quotes" & ampersands.
         title: 'Data URL Image Test',
         type: 'text',
         content: '<img src="image:0">',
-        images: [{
-          data: dataUrl,
-          mime: 'text/plain',  // should be overridden by data URL
-          filename: 'from-data-url.png',
-        }],
+        images: [
+          {
+            data: dataUrl,
+            mime: 'text/plain', // should be overridden by data URL
+            filename: 'from-data-url.png',
+          },
+        ],
       });
 
       const text = result!.content[0].text;
@@ -1607,7 +1611,7 @@ This has <angle brackets> and "quotes" & ampersands.
       // Verify the attachment was created with the correct mime from the data URL
       const attachments = await client.getNoteAttachments(noteId);
       expect(attachments.length).toBe(1);
-      expect(attachments[0].mime).toBe('image/png');  // from data URL, not 'text/plain'
+      expect(attachments[0].mime).toBe('image/png'); // from data URL, not 'text/plain'
       expect(attachments[0].title).toBe('from-data-url.png');
 
       // Verify content was resolved
@@ -1625,11 +1629,13 @@ This has <angle brackets> and "quotes" & ampersands.
         title: 'Data URL File Test',
         type: 'text',
         content: '<a href="file:0">CSV Data</a>',
-        files: [{
-          data: dataUrl,
-          mime: 'application/octet-stream',  // should be overridden
-          filename: 'data.csv',
-        }],
+        files: [
+          {
+            data: dataUrl,
+            mime: 'application/octet-stream', // should be overridden
+            filename: 'data.csv',
+          },
+        ],
       });
 
       const text = result!.content[0].text;
@@ -1637,7 +1643,7 @@ This has <angle brackets> and "quotes" & ampersands.
 
       const attachments = await client.getNoteAttachments(noteId);
       expect(attachments.length).toBe(1);
-      expect(attachments[0].mime).toBe('text/csv');  // from data URL
+      expect(attachments[0].mime).toBe('text/csv'); // from data URL
       expect(attachments[0].title).toBe('data.csv');
     });
 
@@ -1650,11 +1656,13 @@ This has <angle brackets> and "quotes" & ampersands.
         title: 'Raw Base64 Test',
         type: 'text',
         content: '<img src="image:0">',
-        images: [{
-          data: pngBase64,  // raw base64, not a data URL
-          mime: 'image/png',
-          filename: 'raw.png',
-        }],
+        images: [
+          {
+            data: pngBase64, // raw base64, not a data URL
+            mime: 'image/png',
+            filename: 'raw.png',
+          },
+        ],
       });
 
       const text = result!.content[0].text;
@@ -1799,9 +1807,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const baseUrl = (client as any).baseUrl.replace('/etapi', '');
-      const resp = await fetch(
-        `${baseUrl}/api/attachments/${attachment.attachmentId}/open`
-      );
+      const resp = await fetch(`${baseUrl}/api/attachments/${attachment.attachmentId}/open`);
       expect(resp.status).toBe(200);
       expect(resp.headers.get('content-type')).toBe('image/png');
     });
@@ -1817,9 +1823,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const baseUrl = (client as any).baseUrl.replace('/etapi', '');
-      const resp = await fetch(
-        `${baseUrl}/api/attachments/${attachment.attachmentId}/open`
-      );
+      const resp = await fetch(`${baseUrl}/api/attachments/${attachment.attachmentId}/open`);
       expect(resp.status).toBe(200);
       expect(resp.headers.get('content-type')).toBe('application/pdf');
     });
@@ -1835,9 +1839,7 @@ This has <angle brackets> and "quotes" & ampersands.
       });
 
       const baseUrl = (client as any).baseUrl.replace('/etapi', '');
-      const resp = await fetch(
-        `${baseUrl}/api/attachments/${attachment.attachmentId}/download`
-      );
+      const resp = await fetch(`${baseUrl}/api/attachments/${attachment.attachmentId}/download`);
       expect(resp.status).toBe(200);
       expect(resp.headers.get('content-type')).toBe('application/pdf');
       const contentDisposition = resp.headers.get('content-disposition') || '';
@@ -1873,7 +1875,10 @@ This has <angle brackets> and "quotes" & ampersands.
       const monthNote = JSON.parse((month?.content[0] as { text: string }).text);
       expect(monthNote.noteId).toBeDefined();
 
-      const year = await handleCalendarTool(client, 'get_special_note', { kind: 'year', date: '2024' });
+      const year = await handleCalendarTool(client, 'get_special_note', {
+        kind: 'year',
+        date: '2024',
+      });
       const yearNote = JSON.parse((year?.content[0] as { text: string }).text);
       expect(yearNote.noteId).toBeDefined();
     });

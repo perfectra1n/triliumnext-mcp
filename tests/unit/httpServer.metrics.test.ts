@@ -137,17 +137,13 @@ describe('/metrics — HTTP server integration', () => {
   });
 
   it('with auth=none, is open (use only when firewalled — verified for completeness)', async () => {
-    const s = await track(
-      startTestServer({ metricsEnabled: true, metricsAuth: 'none' })
-    );
+    const s = await track(startTestServer({ metricsEnabled: true, metricsAuth: 'none' }));
     const res = await fetch(s.url('/metrics'));
     expect(res.status).toBe(200);
   });
 
   it('the metrics endpoint records its own access in http_requests_total', async () => {
-    const s = await track(
-      startTestServer({ metricsEnabled: true, metricsAuth: 'none' })
-    );
+    const s = await track(startTestServer({ metricsEnabled: true, metricsAuth: 'none' }));
     // The access counter is bumped on res `finish`/`close`, which happens
     // AFTER the body is rendered. So a request's own bump never appears in
     // its own response — only in subsequent responses. Make 3 requests; the

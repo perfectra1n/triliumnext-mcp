@@ -46,7 +46,9 @@ async function startTriliumBox(): Promise<{
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: '{}',
-  }).catch(() => {/* may already be initialized */});
+  }).catch(() => {
+    /* may already be initialized */
+  });
   await sleep(1000);
 
   return { container, etapiUrl: `${baseUrl}/etapi`, baseUrl };
@@ -209,8 +211,10 @@ describe('Multi-tenant SSE', () => {
         'X-Trilium-Url': triliumB.etapiUrl,
         'X-Trilium-Token': 'tenant-B-token',
       });
-      clientA = a.client; transportA = a.transport;
-      clientB = b.client; transportB = b.transport;
+      clientA = a.client;
+      transportA = a.transport;
+      clientB = b.client;
+      transportB = b.transport;
 
       const createA = await clientA.callTool({
         name: 'create_note',

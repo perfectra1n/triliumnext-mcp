@@ -1,10 +1,5 @@
 import type { IncomingMessage } from 'node:http';
-import {
-  jwtVerify,
-  createRemoteJWKSet,
-  type JWTVerifyOptions,
-  type JWTVerifyGetKey,
-} from 'jose';
+import { jwtVerify, createRemoteJWKSet, type JWTVerifyOptions, type JWTVerifyGetKey } from 'jose';
 import { extractBearerToken } from './auth.js';
 
 export interface JwtAuthOptions {
@@ -29,7 +24,17 @@ export interface JwtAuthResult {
   reason?: 'no_token' | 'verify_failed' | 'no_principal';
 }
 
-const DEFAULT_ALGS = ['HS256', 'HS384', 'HS512', 'RS256', 'RS384', 'RS512', 'ES256', 'ES384', 'EdDSA'];
+const DEFAULT_ALGS = [
+  'HS256',
+  'HS384',
+  'HS512',
+  'RS256',
+  'RS384',
+  'RS512',
+  'ES256',
+  'ES384',
+  'EdDSA',
+];
 
 /**
  * JWT-based gateway auth. Supports HS256 shared secrets and asymmetric

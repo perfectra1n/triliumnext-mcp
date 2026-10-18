@@ -8,7 +8,11 @@ import { registerNoteTools, handleNoteTool } from '../../src/tools/notes.js';
 import { registerSearchTools, handleSearchTool } from '../../src/tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from '../../src/tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
-import { registerCalendarTools, handleCalendarTool, isoWeekString } from '../../src/tools/calendar.js';
+import {
+  registerCalendarTools,
+  handleCalendarTool,
+  isoWeekString,
+} from '../../src/tools/calendar.js';
 import { registerSystemTools, handleSystemTool } from '../../src/tools/system.js';
 import {
   registerAttachmentTools,
@@ -237,7 +241,10 @@ describe('Note tools', () => {
 
       expect(client.getNote).toHaveBeenCalledWith('n1');
       expect(client.getNoteContent).toHaveBeenCalledWith('n1');
-      expect(result?.content[1]).toMatchObject({ type: 'text', text: expect.stringContaining('body') });
+      expect(result?.content[1]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('body'),
+      });
     });
 
     it('returns a metadata block (with contentInfo) before the content block', async () => {
@@ -297,7 +304,11 @@ describe('Note tools', () => {
       const result = await handleNoteTool(client, 'get_note', { noteId: 'n1' });
 
       const meta = JSON.parse((result?.content[0] as { text: string }).text);
-      expect(meta.contentInfo).toMatchObject({ totalChars: 60_000, returnedEnd: 50_000, truncated: true });
+      expect(meta.contentInfo).toMatchObject({
+        totalChars: 60_000,
+        returnedEnd: 50_000,
+        truncated: true,
+      });
     });
 
     it('returns metadata only when include_content=false', async () => {
@@ -324,7 +335,10 @@ describe('Note tools', () => {
       });
 
       expect(client.getNoteContent).toHaveBeenCalledWith('n1');
-      expect(result?.content[1]).toMatchObject({ type: 'text', text: expect.stringContaining('body') });
+      expect(result?.content[1]).toMatchObject({
+        type: 'text',
+        text: expect.stringContaining('body'),
+      });
     });
 
     it('converts HTML to markdown when format="markdown" + include_content=true', async () => {
@@ -363,7 +377,10 @@ describe('Note tools', () => {
     });
 
     it('mode="metadata" calls updateNote with patch', async () => {
-      (client.updateNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'n1', title: 'New' });
+      (client.updateNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+        noteId: 'n1',
+        title: 'New',
+      });
 
       await handleNoteTool(client, 'write_note', {
         noteId: 'n1',
@@ -636,7 +653,8 @@ describe('Search tools', () => {
       const client = createMockClient();
       (client.getNote as ReturnType<typeof vi.fn>).mockImplementation((id: string) => {
         const n = notes[id];
-        if (!n) return Promise.reject(new TriliumClientError(404, 'NOTE_NOT_FOUND', `${id} not found`));
+        if (!n)
+          return Promise.reject(new TriliumClientError(404, 'NOTE_NOT_FOUND', `${id} not found`));
         return Promise.resolve({
           noteId: id,
           title: n.title,
@@ -719,7 +737,9 @@ describe('Search tools', () => {
 
     it('rejects depth outside 1-5', async () => {
       const client = treeMock({ root: { title: 'Root' } });
-      await expect(handleSearchTool(client, 'get_note_tree', { noteId: 'root', depth: 9 })).rejects.toThrow();
+      await expect(
+        handleSearchTool(client, 'get_note_tree', { noteId: 'root', depth: 9 })
+      ).rejects.toThrow();
     });
   });
 });
@@ -1186,7 +1206,10 @@ describe('Attribute tools', () => {
         value: 'new',
       });
 
-      expect(client.updateAttribute).toHaveBeenCalledWith('a1', { value: 'new', position: undefined });
+      expect(client.updateAttribute).toHaveBeenCalledWith('a1', {
+        value: 'new',
+        position: undefined,
+      });
       expect(client.createAttribute).not.toHaveBeenCalled();
     });
 
@@ -1195,7 +1218,9 @@ describe('Attribute tools', () => {
         noteId: 'n1',
         attributes: [],
       });
-      (client.createAttribute as ReturnType<typeof vi.fn>).mockResolvedValue({ attributeId: 'aNew' });
+      (client.createAttribute as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attributeId: 'aNew',
+      });
 
       await handleAttributeTool(client, 'set_attribute', {
         noteId: 'n1',
@@ -1506,7 +1531,9 @@ describe('Attachment tools', () => {
 
   describe('create_attachment', () => {
     it('creates text attachment in one step', async () => {
-      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'at1' });
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'at1',
+      });
       await handleAttachmentTool(client, 'create_attachment', {
         ownerId: 'n1',
         role: 'file',
@@ -1519,7 +1546,9 @@ describe('Attachment tools', () => {
     });
 
     it('creates binary attachment in two steps', async () => {
-      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'at1' });
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'at1',
+      });
       await handleAttachmentTool(client, 'create_attachment', {
         ownerId: 'n1',
         role: 'image',
@@ -1635,7 +1664,9 @@ describe('Attachment tools', () => {
         attachmentId: 'a1',
         mime: 'text/plain',
       });
-      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockResolvedValue('x'.repeat(60_000));
+      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'x'.repeat(60_000)
+      );
       const result = await handleAttachmentTool(client, 'get_attachment', {
         attachmentId: 'a1',
         include_content: true,
@@ -1648,7 +1679,9 @@ describe('Attachment tools', () => {
 
   describe('write_attachment', () => {
     it('mode="metadata" updates attributes', async () => {
-      (client.updateAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({ attachmentId: 'a1' });
+      (client.updateAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+      });
       await handleAttachmentTool(client, 'write_attachment', {
         attachmentId: 'a1',
         mode: 'metadata',
@@ -1697,7 +1730,9 @@ describe('Attachment tools', () => {
 
     it('mode="edit" applies search/replace', async () => {
       let stored = 'foo bar';
-      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(async () => stored);
+      (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(
+        async () => stored
+      );
       (client.updateAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(
         async (_id: string, body: string) => {
           stored = body;
@@ -1925,10 +1960,7 @@ describe('Total tool surface', () => {
   });
 
   it('format and includeImages params advertise their defaults in the schema', () => {
-    const allTools = [
-      ...registerNoteTools(),
-      ...registerSystemTools(),
-    ];
+    const allTools = [...registerNoteTools(), ...registerSystemTools()];
     const expectations: Array<[string, string, unknown]> = [
       ['get_note', 'format', 'html'],
       ['get_note', 'includeImages', true],
@@ -1952,13 +1984,9 @@ describe('Total tool surface', () => {
 
 describe('content input normalization in handlers', () => {
   const PNG_BYTES = Buffer.from([
-    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
-    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
-    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-    0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
-    0x89,
-    0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44,
-    0xae, 0x42, 0x60, 0x82,
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
   ]);
 
   const cleanups: Array<() => Promise<void>> = [];

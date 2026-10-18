@@ -71,9 +71,7 @@ export async function assertUrlIsSafe(rawUrl: string, opts: UrlGuardOptions): Pr
   // Resolve and check every address. Literal IPs don't need DNS; feed them
   // straight through the same check.
   const ipLiteral = isIP(host);
-  const addresses: string[] = ipLiteral
-    ? [host]
-    : (await safeLookup(host)).map((a) => a.address);
+  const addresses: string[] = ipLiteral ? [host] : (await safeLookup(host)).map((a) => a.address);
 
   if (addresses.length === 0) {
     throw new UrlGuardError('dns_failure', `Could not resolve host: ${host}`);
