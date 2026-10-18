@@ -13,7 +13,10 @@ export class MetricsAuth {
   private readonly mode: MetricsAuthMode;
   private readonly inner: GatewayAuth | null;
 
-  constructor(mode: MetricsAuthMode, options: { gateway: GatewayAuth | null; bearerTokens: string[] }) {
+  constructor(
+    mode: MetricsAuthMode,
+    options: { gateway: GatewayAuth | null; bearerTokens: string[] }
+  ) {
     this.mode = mode;
     if (mode === 'gateway') {
       this.inner = options.gateway;

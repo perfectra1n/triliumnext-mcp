@@ -92,8 +92,16 @@ describe('TriliumClient', () => {
 
     it('builds a full-path URL by walking parentNoteIds to root', async () => {
       mockFetch
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ parentNoteIds: ['mid'] }) })
-        .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ parentNoteIds: ['root'] }) });
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ parentNoteIds: ['mid'] }),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          status: 200,
+          json: async () => ({ parentNoteIds: ['root'] }),
+        });
 
       const url = await client.getNoteUrl('leaf');
       expect(url).toBe('http://localhost:37740/#root/mid/leaf');

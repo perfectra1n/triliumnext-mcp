@@ -1,4 +1,9 @@
-import { createServer as createHttpServer, type IncomingMessage, type ServerResponse, type Server as HttpServer } from 'node:http';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type ServerResponse,
+  type Server as HttpServer,
+} from 'node:http';
 
 import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -65,7 +70,10 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     ? createMetrics('1.0.0', { includePrincipal: config.metricsIncludePrincipal })
     : null;
   const metricsAuth: MetricsAuth | null = metrics
-    ? new MetricsAuth(config.metricsAuth, { gateway: gatewayAuth, bearerTokens: config.metricsTokens })
+    ? new MetricsAuth(config.metricsAuth, {
+        gateway: gatewayAuth,
+        bearerTokens: config.metricsTokens,
+      })
     : null;
   const cors = new CorsPolicy(config.corsOrigins);
   const rateLimiter = new RateLimiter({
@@ -135,7 +143,17 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
       }
     }
 
-    handleRequest(req, res, config, sessions, streamableSessions, gatewayPolicy, logger, metrics, metricsAuth).catch((err) => {
+    handleRequest(
+      req,
+      res,
+      config,
+      sessions,
+      streamableSessions,
+      gatewayPolicy,
+      logger,
+      metrics,
+      metricsAuth
+    ).catch((err) => {
       logger.error('request_handler_error', {
         method,
         path,
@@ -157,11 +175,11 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     httpServer.listen(config.httpPort, () => {
       const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
       const auth =
-      config.gatewayAuth === 'bearer'
-        ? `bearer (${config.gatewayTokens.length} token(s))`
-        : config.gatewayAuth === 'jwt'
-          ? `jwt (${config.jwtJwksUrl ? 'jwks' : 'hs256'})`
-          : 'none';
+        config.gatewayAuth === 'bearer'
+          ? `bearer (${config.gatewayTokens.length} token(s))`
+          : config.gatewayAuth === 'jwt'
+            ? `jwt (${config.jwtJwksUrl ? 'jwks' : 'hs256'})`
+            : 'none';
       const address = httpServer.address();
       const actualPort = typeof address === 'object' && address ? address.port : config.httpPort;
       logger.info('server_started', {
@@ -383,9 +401,7 @@ async function handleStreamable(
   // Single-tenant may override the user-facing note-link base via publicUrl; in
   // multi-tenant mode each connection's link base is derived from its own URL.
   const webBaseUrl =
-    !config.multiTenant && config.publicUrl
-      ? config.publicUrl
-      : deriveWebBaseUrl(triliumUrl);
+    !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
   const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
@@ -592,9 +608,7 @@ async function handleSseConnect(
   // Single-tenant may override the user-facing note-link base via publicUrl; in
   // multi-tenant mode each connection's link base is derived from its own URL.
   const webBaseUrl =
-    !config.multiTenant && config.publicUrl
-      ? config.publicUrl
-      : deriveWebBaseUrl(triliumUrl);
+    !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
   const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
@@ -707,7 +721,10 @@ async function handleSsePost(
   // pay to drain a giant request body just to reject it.
   const contentLengthRaw = req.headers['content-length'];
   if (contentLengthRaw) {
-    const contentLength = parseInt(Array.isArray(contentLengthRaw) ? contentLengthRaw[0] : contentLengthRaw, 10);
+    const contentLength = parseInt(
+      Array.isArray(contentLengthRaw) ? contentLengthRaw[0] : contentLengthRaw,
+      10
+    );
     if (!Number.isNaN(contentLength) && contentLength > maxPostBytes) {
       respondJson(res, 413, { error: 'payload_too_large' });
       return;
@@ -773,7 +790,10 @@ async function handleSsePost(
 class PayloadTooLargeError extends Error {}
 class BadJsonError extends Error {}
 
-async function readJsonBody(req: IncomingMessage, maxBytes: number): Promise<{ parsed: unknown; bytes: number }> {
+async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number
+): Promise<{ parsed: unknown; bytes: number }> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {

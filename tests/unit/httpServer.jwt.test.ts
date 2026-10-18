@@ -130,10 +130,14 @@ describe('gateway-auth=jwt — end-to-end', () => {
   it('startup fails when --gateway-auth=jwt has no secret or jwks URL', async () => {
     // Validate via loadConfig instead of startHttp — startHttp expects a vetted Config.
     const { loadConfig } = await import('../../src/config.js');
-    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit'); });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('exit');
+    });
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     try {
-      expect(() => loadConfig(['--transport', 'http', '--token', 't', '--gateway-auth', 'jwt'])).toThrow();
+      expect(() =>
+        loadConfig(['--transport', 'http', '--token', 't', '--gateway-auth', 'jwt'])
+      ).toThrow();
       expect(exitSpy).toHaveBeenCalledWith(1);
     } finally {
       exitSpy.mockRestore();

@@ -266,9 +266,9 @@ function describeFuzzyRun(args: {
       ? 'Results are ranked by title and attribute relevance.'
       : 'Results keep the ordering you requested via orderBy rather than being re-ranked by relevance.',
     `Showing ${returned} of ${totalCandidates} candidates.`,
-    'Relevance is computed from titles and attributes only — Trilium\'s search response carries no note ' +
+    "Relevance is computed from titles and attributes only — Trilium's search response carries no note " +
       'content — so a note matching only in its body still appears, ranked low. Scan past the first result.',
-    'In termsMatchedInTitleOrAttributes, a 0 means the term was absent from these results\' titles and ' +
+    "In termsMatchedInTitleOrAttributes, a 0 means the term was absent from these results' titles and " +
       'attributes, not that it is absent from the notes.',
     'Pass fuzzy="off" to disable this fallback.',
   ].join(' ');

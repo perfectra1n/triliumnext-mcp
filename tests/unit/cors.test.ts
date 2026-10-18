@@ -80,10 +80,7 @@ describe('CorsPolicy', () => {
 
     it('matches case-insensitively', () => {
       const res = fakeRes();
-      cors.apply(
-        fakeReq({ origin: 'HTTPS://App.Example.com' }),
-        res as unknown as ServerResponse
-      );
+      cors.apply(fakeReq({ origin: 'HTTPS://App.Example.com' }), res as unknown as ServerResponse);
       // Echo preserves the request casing so the browser sees what it sent.
       expect(res.headers['access-control-allow-origin']).toBe('HTTPS://App.Example.com');
     });

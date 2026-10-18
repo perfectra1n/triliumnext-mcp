@@ -33,9 +33,7 @@ describe('Counter', () => {
     // Same labels, different insertion order — should hit the same series.
     c.inc({ b: '2', a: '1' });
     const out = lines(reg.render());
-    expect(out.filter((l) => l.startsWith('m_total{'))).toEqual([
-      'm_total{a="1",b="2"} 2',
-    ]);
+    expect(out.filter((l) => l.startsWith('m_total{'))).toEqual(['m_total{a="1",b="2"} 2']);
   });
 
   it('fills missing label values as empty strings rather than undefined', () => {
@@ -90,8 +88,8 @@ describe('Histogram', () => {
     const reg = new Registry();
     const h = reg.register(new Histogram('h_lat', 'help', [], [0.1, 0.5, 1]));
     h.observe(0.05); // 0.05 → buckets[0]+, [1]+, [2]+, +Inf+
-    h.observe(0.3);  // 0.3  → buckets[1]+, [2]+, +Inf+
-    h.observe(2);    // 2    → only +Inf+
+    h.observe(0.3); // 0.3  → buckets[1]+, [2]+, +Inf+
+    h.observe(2); // 2    → only +Inf+
     const out = lines(reg.render());
     expect(out).toContain('h_lat_bucket{le="0.1"} 1');
     expect(out).toContain('h_lat_bucket{le="0.5"} 2');
@@ -167,11 +165,15 @@ describe('createMetrics — declared surface', () => {
     expect(out).toContain(
       'triliumnext_mcp_tool_calls_total{tool="search_notes",ok="true",error="none"} 1'
     );
-    expect(out).toContain('triliumnext_mcp_tool_call_duration_seconds_count{tool="search_notes"} 1');
+    expect(out).toContain(
+      'triliumnext_mcp_tool_call_duration_seconds_count{tool="search_notes"} 1'
+    );
     expect(out).toContain('triliumnext_mcp_sse_connects_total 1');
     expect(out).toContain('triliumnext_mcp_sse_sessions 1');
     // Process metrics should have a sensible non-negative value.
-    const uptimeLine = lines(out).find((l) => l.startsWith('triliumnext_mcp_process_uptime_seconds '));
+    const uptimeLine = lines(out).find((l) =>
+      l.startsWith('triliumnext_mcp_process_uptime_seconds ')
+    );
     expect(uptimeLine).toBeDefined();
     expect(parseFloat(uptimeLine!.split(' ')[1])).toBeGreaterThanOrEqual(0);
   });

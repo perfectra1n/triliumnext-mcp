@@ -13,7 +13,8 @@ function captureStream(stream: 'stdout' | 'stderr'): {
   const lines: string[] = [];
   const target = stream === 'stdout' ? process.stdout : process.stderr;
   const spy = vi.spyOn(target, 'write').mockImplementation((chunk: unknown) => {
-    const text = typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : '';
+    const text =
+      typeof chunk === 'string' ? chunk : Buffer.isBuffer(chunk) ? chunk.toString('utf8') : '';
     // Strip the trailing newline the logger always appends.
     lines.push(text.endsWith('\n') ? text.slice(0, -1) : text);
     return true;
@@ -38,7 +39,7 @@ describe('redactArgs', () => {
     const out = redactArgs(long);
     expect(typeof out).toBe('string');
     expect((out as string).startsWith('x'.repeat(64))).toBe(true);
-    expect((out as string)).toContain('…(+136)');
+    expect(out as string).toContain('…(+136)');
   });
 
   it('summarizes a top-level array', () => {
@@ -88,7 +89,7 @@ describe('redactArgs', () => {
   it('truncates long non-blob string scalars to 64 chars', () => {
     const out = redactArgs({ title: 'x'.repeat(100) }) as Record<string, unknown>;
     expect(typeof out.title).toBe('string');
-    expect((out.title as string)).toMatch(/^x{64}…\(\+36\)$/);
+    expect(out.title as string).toMatch(/^x{64}…\(\+36\)$/);
   });
 
   it('replaces nested objects and arrays with shape descriptors (no deep traversal)', () => {
@@ -224,7 +225,12 @@ describe('createLogger — json format', () => {
     expect(cap.lines).toHaveLength(2);
     const a = JSON.parse(cap.lines[0]);
     const b = JSON.parse(cap.lines[1]);
-    expect(a).toMatchObject({ level: 'info', event: 'tool_call', session: 'abc', tool: 'search_notes' });
+    expect(a).toMatchObject({
+      level: 'info',
+      event: 'tool_call',
+      session: 'abc',
+      tool: 'search_notes',
+    });
     expect(b).toMatchObject({ level: 'warn', event: 'url_rejected', reason: 'private-ip' });
     expect(typeof a.ts).toBe('string');
     expect(a.ts).toMatch(/^\d{4}-\d{2}-\d{2}T/);

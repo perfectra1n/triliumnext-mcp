@@ -71,6 +71,8 @@ describe('GatewayAuth', () => {
   it('accepts tokens of different lengths', () => {
     const auth = new GatewayAuth(['short', 'a-much-longer-token-here']);
     expect(auth.isAuthorized(fakeReq({ authorization: 'Bearer short' }))).toBe(true);
-    expect(auth.isAuthorized(fakeReq({ authorization: 'Bearer a-much-longer-token-here' }))).toBe(true);
+    expect(auth.isAuthorized(fakeReq({ authorization: 'Bearer a-much-longer-token-here' }))).toBe(
+      true
+    );
   });
 });

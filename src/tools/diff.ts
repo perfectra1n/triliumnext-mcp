@@ -57,7 +57,8 @@ export function applySearchReplace(content: string, changes: SearchReplaceBlock[
       );
     }
 
-    result = result.slice(0, firstIndex) + new_string + result.slice(firstIndex + old_string.length);
+    result =
+      result.slice(0, firstIndex) + new_string + result.slice(firstIndex + old_string.length);
   }
 
   return result;
@@ -92,8 +93,7 @@ export function verifySearchReplaceResults(
   const missing: string[] = [];
   for (const { new_string } of changes) {
     if (new_string !== '' && !readBackContent.includes(new_string)) {
-      const truncated =
-        new_string.length > 200 ? new_string.slice(0, 200) + '...' : new_string;
+      const truncated = new_string.length > 200 ? new_string.slice(0, 200) + '...' : new_string;
       missing.push(truncated);
     }
   }
