@@ -55,6 +55,7 @@ export interface CreateNoteDef {
   branchId?: EntityId;
   dateCreated?: LocalDateTime;
   utcDateCreated?: UtcDateTime;
+  utcDateModified?: UtcDateTime;
 }
 
 /**
@@ -70,6 +71,8 @@ export interface PatchNoteDef {
   type?: NoteType;
   mime?: string;
   dateCreated?: LocalDateTime;
+  utcDateCreated?: UtcDateTime;
+  utcDateModified?: UtcDateTime;
 }
 
 /**

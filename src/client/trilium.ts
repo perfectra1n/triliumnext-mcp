@@ -23,6 +23,13 @@ import type {
   UndeleteResponse,
 } from '../types/etapi.js';
 
+/** Surface the root cause (e.g. ECONNREFUSED) that undici hides in `cause`. */
+function describeNetworkError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as { cause?: { code?: string; message?: string } }).cause;
+  return cause?.code ?? cause?.message ?? error.message;
+}
+
 export class TriliumClientError extends Error {
   constructor(
     public readonly status: number,
@@ -34,10 +41,34 @@ export class TriliumClientError extends Error {
   }
 }
 
+/** Transport-level tuning for {@link TriliumClient}. All fields are optional. */
+export interface TriliumClientOptions {
+  /** Per-request timeout in ms (default 60s). Export/import get 5x this. */
+  timeoutMs?: number;
+  /** Retries for idempotent requests on network errors or 502/503/504 (default 2). */
+  maxRetries?: number;
+  /** Base backoff between retries in ms, doubled each attempt (default 250). */
+  retryDelayMs?: number;
+}
+
+/**
+ * Methods safe to replay: repeating them leaves the server in the same state.
+ * POST is excluded — create-note, branches and attachments would duplicate.
+ */
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'PUT', 'PATCH', 'DELETE']);
+
+/** Gateway-ish statuses that usually mean "try again in a moment". */
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 export class TriliumClient {
   private readonly baseUrl: string;
   private readonly token: string;
   private readonly webBaseUrl: string;
+  private readonly timeoutMs: number;
+  private readonly maxRetries: number;
+  private readonly retryDelayMs: number;
 
   /**
    * @param baseUrl  ETAPI base URL (e.g. `http://host:port/etapi`).
@@ -45,11 +76,19 @@ export class TriliumClient {
    * @param webBaseUrl  Optional user-facing web-UI root for clickable note links.
    *   When omitted, it is derived from `baseUrl` by stripping a trailing `/etapi`.
    */
-  constructor(baseUrl: string, token: string, webBaseUrl?: string) {
+  constructor(
+    baseUrl: string,
+    token: string,
+    webBaseUrl?: string,
+    options: TriliumClientOptions = {}
+  ) {
     // Remove trailing slash if present
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.token = token;
     this.webBaseUrl = (webBaseUrl ?? baseUrl).replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
+    this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.maxRetries = options.maxRetries ?? 2;
+    this.retryDelayMs = options.retryDelayMs ?? 250;
   }
 
   /** The user-facing Trilium web-UI base URL used for note links. */
@@ -76,6 +115,14 @@ export class TriliumClient {
     } catch {
       return `${this.webBaseUrl}/#${noteId}`;
     }
+  }
+
+  /**
+   * The note's tree path, `root/<ancestors>/<noteId>`, as used by Trilium
+   * reference links. Unlike {@link getNoteUrl} this throws when the walk fails.
+   */
+  async getNotePath(noteId: EntityId, viaParentNoteId?: EntityId): Promise<string> {
+    return this.buildNotePath(noteId, viaParentNoteId);
   }
 
   private async buildNotePath(noteId: EntityId, viaParentNoteId?: EntityId): Promise<string> {
@@ -119,9 +166,17 @@ export class TriliumClient {
       query?: Record<string, string | number | boolean | undefined>;
       contentType?: string;
       responseType?: 'json' | 'text' | 'arraybuffer';
+      /** Multiplier on the client timeout for slow endpoints (export/import). */
+      timeoutFactor?: number;
     } = {}
   ): Promise<T> {
-    const { body, query, contentType = 'application/json', responseType = 'json' } = options;
+    const {
+      body,
+      query,
+      contentType = 'application/json',
+      responseType = 'json',
+      timeoutFactor = 1,
+    } = options;
 
     let url = `${this.baseUrl}${path}`;
 
@@ -146,7 +201,7 @@ export class TriliumClient {
       headers['Content-Type'] = contentType;
     }
 
-    const response = await fetch(url, {
+    const init: RequestInit = {
       method,
       headers,
       body:
@@ -157,20 +212,63 @@ export class TriliumClient {
               ? JSON.stringify(body)
               : String(body)
           : undefined,
-    });
+    };
+
+    const retries = IDEMPOTENT_METHODS.has(method) ? this.maxRetries : 0;
+    const timeoutMs = this.timeoutMs * timeoutFactor;
+    let response: Response;
+    let attempt = 0;
+    for (; ; attempt++) {
+      try {
+        response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+      } catch (error) {
+        const timedOut =
+          error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
+        // A timeout is not retried: the request may still be running server-side,
+        // and waiting another full timeout rarely helps an LLM-facing call.
+        if (!timedOut && attempt < retries) {
+          await sleep(this.retryDelayMs * 2 ** attempt);
+          continue;
+        }
+        throw timedOut
+          ? new TriliumClientError(
+              504,
+              'TRILIUM_TIMEOUT',
+              `Trilium did not respond to ${method} ${path} within ${timeoutMs}ms`
+            )
+          : new TriliumClientError(
+              503,
+              'TRILIUM_UNREACHABLE',
+              `Could not reach Trilium at ${this.baseUrl}: ${describeNetworkError(error)}`
+            );
+      }
+      if (RETRYABLE_STATUSES.has(response.status) && attempt < retries) {
+        await response.body?.cancel().catch(() => undefined);
+        await sleep(this.retryDelayMs * 2 ** attempt);
+        continue;
+      }
+      break;
+    }
+
+    // A retried DELETE whose first attempt landed (but whose response was lost)
+    // now sees the entity gone. The caller's intent — "it should not exist" — holds.
+    if (method === 'DELETE' && response.status === 404 && attempt > 0) {
+      await response.body?.cancel().catch(() => undefined);
+      return undefined as T;
+    }
 
     if (!response.ok) {
-      let errorData: EtapiError;
+      let errorData: Partial<EtapiError> = {};
       try {
         errorData = (await response.json()) as EtapiError;
       } catch {
-        errorData = {
-          status: response.status,
-          code: 'UNKNOWN_ERROR',
-          message: response.statusText,
-        };
+        // Non-JSON error body (e.g. a reverse proxy's HTML page) — fall through.
       }
-      throw new TriliumClientError(errorData.status, errorData.code, errorData.message);
+      throw new TriliumClientError(
+        errorData.status ?? response.status,
+        errorData.code ?? 'UNKNOWN_ERROR',
+        errorData.message ?? (response.statusText || `HTTP ${response.status}`)
+      );
     }
 
     // Handle 204 No Content
@@ -178,15 +276,29 @@ export class TriliumClient {
       return undefined as T;
     }
 
-    if (responseType === 'text') {
-      return (await response.text()) as T;
+    // The timeout signal stays armed while the body streams, so a slow body
+    // read aborts too — map it like a timeout on the request itself.
+    try {
+      if (responseType === 'text') {
+        return (await response.text()) as T;
+      }
+      if (responseType === 'arraybuffer') {
+        return (await response.arrayBuffer()) as T;
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        (error.name === 'TimeoutError' || error.name === 'AbortError')
+      ) {
+        throw new TriliumClientError(
+          504,
+          'TRILIUM_TIMEOUT',
+          `Trilium's response to ${method} ${path} did not finish within ${timeoutMs}ms`
+        );
+      }
+      throw error;
     }
-
-    if (responseType === 'arraybuffer') {
-      return (await response.arrayBuffer()) as T;
-    }
-
-    return (await response.json()) as T;
   }
 
   // ==================== Notes ====================
@@ -315,6 +427,11 @@ export class TriliumClient {
     return this.request<Note>('GET', `/calendar/years/${year}`);
   }
 
+  /** Day note for the first day of the week containing `date` (honours the configured first weekday). */
+  async getWeekFirstDayNote(date: string): Promise<Note> {
+    return this.request<Note>('GET', `/calendar/week-first-day/${date}`);
+  }
+
   async getInboxNote(date: string): Promise<Note> {
     return this.request<Note>('GET', `/inbox/${date}`);
   }
@@ -323,6 +440,13 @@ export class TriliumClient {
 
   async getAppInfo(): Promise<AppInfo> {
     return this.request<AppInfo>('GET', '/app-info');
+  }
+
+  /** Instance/database counts (no titles or content). Requires a Trilium with /etapi/metrics. */
+  async getMetrics(): Promise<Record<string, unknown>> {
+    return this.request<Record<string, unknown>>('GET', '/metrics', {
+      query: { format: 'json' },
+    });
   }
 
   // ==================== Revisions ====================
@@ -347,10 +471,17 @@ export class TriliumClient {
     });
   }
 
+  async getRevisionContentBinary(revisionId: EntityId): Promise<Buffer> {
+    const buffer = await this.request<ArrayBuffer>('GET', `/revisions/${revisionId}/content`, {
+      responseType: 'arraybuffer',
+    });
+    return Buffer.from(buffer);
+  }
+
   // ==================== Backup ====================
 
   async createBackup(backupName: string): Promise<void> {
-    await this.request<undefined>('PUT', `/backup/${backupName}`);
+    await this.request<undefined>('PUT', `/backup/${backupName}`, { timeoutFactor: 5 });
   }
 
   // ==================== Export / Import ====================
@@ -359,6 +490,7 @@ export class TriliumClient {
     return this.request<ArrayBuffer>('GET', `/notes/${noteId}/export`, {
       query: { format },
       responseType: 'arraybuffer',
+      timeoutFactor: 5,
     });
   }
 
@@ -366,6 +498,7 @@ export class TriliumClient {
     return this.request<NoteWithBranch>('POST', `/notes/${noteId}/import`, {
       body: data,
       contentType: 'application/octet-stream',
+      timeoutFactor: 5,
     });
   }
 

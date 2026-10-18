@@ -27,7 +27,11 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 
 ## Features
 
-- **19 tools** across 8 categories for full note management, search, organization, attachments, revisions, and system operations (consolidated from 35 in v1 — see [Migrating from v1](#migrating-from-v1))
+- **20 tools** across 8 categories for full note management, search, organization, attachments, revisions, and system operations (consolidated from 35 in v1 — see [Migrating from v1](#migrating-from-v1))
+- **Server-built note links** — write `<a href="note:abc123">` or `[text](note:abc123)` and the server emits a proper Trilium reference link (path, `class`, `data-note-path`), rejecting links to notes that don't exist
+- **Note context on demand** — `get_note` can return tree breadcrumbs (`include_path`) and backlinks (`include_backlinks`); `search_notes` can attach plain-text content previews (`content_preview_chars`)
+- **Revision restore** — `restore_revision` rolls a note back, snapshotting the current state first so the restore is reversible
+- **Resilient ETAPI client** — per-request timeouts, automatic retry of idempotent requests on network errors and 502/503/504, and clear `TRILIUM_UNREACHABLE` / `TRILIUM_TIMEOUT` errors
 - **MCP tool annotations** (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `title`) on every tool for better approval-dialog UX in clients that surface them
 - **Inline image and file embedding** — attach images and files when creating or updating notes in a single tool call
 - **Data URL support** — pass image/file data as raw base64 or `data:` URLs
@@ -180,7 +184,7 @@ Two env vars (defaults shown):
 2026-05-12T18:16:21.098Z INFO  server_started transport=stdio
 2026-05-12T18:16:33.937Z INFO  http_request method=GET path=/health status=200 duration_ms=2 remote=::1
 2026-05-12T18:16:40.512Z INFO  sse_connected session=2f1c... host=notes.example.com
-2026-05-12T18:16:40.871Z INFO  list_tools session=2f1c... count=19
+2026-05-12T18:16:40.871Z INFO  list_tools session=2f1c... count=20
 2026-05-12T18:16:41.044Z INFO  tool_call session=2f1c... tool=search_notes duration_ms=42 ok=true
 2026-05-12T18:16:42.110Z INFO  tool_call session=2f1c... tool=get_note duration_ms=11 ok=false error=trilium status=404 code=NOT_FOUND
 2026-05-12T18:16:55.802Z INFO  sse_closed session=2f1c...
@@ -411,7 +415,7 @@ sum by (reason) (rate(triliumnext_mcp_sse_connect_failures_total[5m]))
 
 ## Available Tools
 
-The server exposes **19 tools**, down from 35 in v1. The trim (see [issue #6](https://github.com/perfectra1n/triliumnext-mcp/issues/6)) improves reliability on clients that pre-load only a subset of a server's tools (claude.ai web, Cursor's 40-tool cap), and consolidates near-duplicate operations behind a `mode` or `action` discriminator. Destructive verbs (`delete_*`) stay as their own tools by design. See [Migrating from v1](#migrating-from-v1) below for the old→new mapping.
+The server exposes **20 tools**, down from 35 in v1. The trim (see [issue #6](https://github.com/perfectra1n/triliumnext-mcp/issues/6)) improves reliability on clients that pre-load only a subset of a server's tools (claude.ai web, Cursor's 40-tool cap), and consolidates near-duplicate operations behind a `mode` or `action` discriminator. Destructive verbs (`delete_*`) stay as their own tools by design. See [Migrating from v1](#migrating-from-v1) below for the old→new mapping.
 
 ### Notes (5 tools)
 
@@ -419,17 +423,17 @@ The note-mutating tools (`create_note`, `write_note`, `organize_note` move/clone
 
 | Tool | Description |
 |------|-------------|
-| `get_note` | Read a note. Returns a metadata block (with a `contentInfo` size summary), the body, and embedded images by default; bodies over 50k chars are truncated with paging via `content_start`/`content_max_chars`. Pass `include_content=false` for metadata-only reads (e.g. tree navigation). |
-| `get_note_history` | Get recent changes (creations, modifications, deletions) across the tree, with optional subtree filtering. |
-| `create_note` | Create a note with title, content, type, and parent. Supports inline image/file embedding. |
-| `write_note` | Write to a note via `mode`: `"metadata"` (title/type/mime), `"replace"` (overwrite content), `"append"` (concatenate), `"edit"` (search/replace or unified diff). Supports inline image/file embedding in `replace`/`append` modes. |
+| `get_note` | Read a note. Returns a metadata block (with a `contentInfo` size summary), the body, and embedded images by default; bodies over 50k chars are truncated with paging via `content_start`/`content_max_chars`. Pass `include_content=false` for metadata-only reads (e.g. tree navigation), `include_path=true` for title breadcrumbs of every placement (`root > Projects > Plan`), and `include_backlinks=true` for the notes that link to it. |
+| `get_note_history` | Get recent changes (creations, modifications, deletions) across the tree, with optional subtree filtering. Returns `{changes, total, returned, truncated}`, bounded by `limit` (default 100, max 1000). |
+| `create_note` | Create a note with title, content, type, and parent. Supports inline image/file embedding, `note:` link placeholders, and backdating (`dateCreated`, `utcDateCreated`, `utcDateModified`). |
+| `write_note` | Write to a note via `mode`: `"metadata"` (title/type/mime and the date fields), `"replace"` (overwrite content), `"append"` (concatenate), `"edit"` (search/replace or unified diff). Supports inline image/file embedding in `replace`/`append` modes, and `note:` link placeholders on text notes. |
 | `delete_note` | Delete or restore a note via required `action`: `"delete"` or `"undelete"`. |
 
 ### Search & Discovery (2 tools)
 
 | Tool | Description |
 |------|-------------|
-| `search_notes` | Full-text and attribute search with filters, subtree scoping (`ancestorNoteId` + `ancestorDepth`), ordering, limits, and query-parse diagnostics (`debug`). Plain-fulltext queries that return zero results are automatically retried as a relevance-ranked OR over the individual terms — see [Graceful fuzzy fallback](#graceful-fuzzy-fallback) below. |
+| `search_notes` | Full-text and attribute search with filters, subtree scoping (`ancestorNoteId` + `ancestorDepth`), ordering, limits, query-parse diagnostics (`debug`), and optional plain-text `contentPreview`s on the top 20 results (`content_preview_chars`). Plain-fulltext queries that return zero results are automatically retried as a relevance-ranked OR over the individual terms — see [Graceful fuzzy fallback](#graceful-fuzzy-fallback) below. |
 | `get_note_tree` | Explore the hierarchy: children expanded `depth` levels (1-5) with titles, types, child counts, and branch IDs. |
 
 #### Graceful fuzzy fallback
@@ -479,7 +483,7 @@ rather than being re-ranked.
 
 | Tool | Description |
 |------|-------------|
-| `organize_note` | Reorganize the note tree via `action`: `"move"` (new parent), `"clone"` (appear under multiple parents), `"reorder"` (change positions), `"unlink"` (remove a branch — cascades to note deletion if it's the last branch). |
+| `organize_note` | Reorganize the note tree via `action`: `"move"` (new parent), `"clone"` (appear under multiple parents), `"reorder"` (change positions), `"unlink"` (remove a branch — cascades to note deletion if it's the last branch). For a cloned note, `move` requires `fromParentNoteId` to say which placement moves; moving onto a parent the note is already under is a no-op. |
 
 ### Attributes & Labels (3 tools)
 
@@ -493,7 +497,7 @@ rather than being re-ranked.
 
 | Tool | Description |
 |------|-------------|
-| `get_special_note` | Get a periodic or inbox note via `kind`: `"day"`, `"week"`, `"month"`, `"year"`, or `"inbox"` (optional `date` in the kind's format, defaults to the current period). |
+| `get_special_note` | Get a periodic or inbox note via `kind`: `"day"`, `"week"`, `"month"`, `"year"`, `"inbox"`, or `"week_first_day"` (the day note starting the week — works without week notes enabled). Optional `date` in the kind's format, defaults to the current period. |
 
 ### Attachments (4 tools)
 
@@ -504,22 +508,45 @@ rather than being re-ranked.
 | `write_attachment` | Write to an attachment via `mode`: `"metadata"`, `"replace"`, or `"edit"`. |
 | `delete_attachment` | Delete an attachment. |
 
-### Revisions (1 tool)
+### Revisions (2 tools)
 
 | Tool | Description |
 |------|-------------|
 | `get_revisions` | Get note revisions. Pass `noteId` to list all revisions of a note; pass `revisionId` for a single revision with its HTML content (pass `include_content=false` for metadata-only). |
+| `restore_revision` | Restore a note to a revision: content (text or binary), type/mime, and by default title. Snapshots the current state first (`snapshot_current`, default `true`) so the restore can itself be undone. |
 
 ### System (2 tools)
 
 | Tool | Description |
 |------|-------------|
 | `create_revision` | Create a revision snapshot of a note. |
-| `manage_system` | System ops via `action`: `"backup"` (create a DB backup by `backupName`), `"export"` (export a note subtree as ZIP, returned base64-encoded), `"import"` (import a base64 ZIP under a parent note), or `"app_info"` (Trilium version/diagnostics). |
+| `manage_system` | System ops via `action`: `"backup"` (create a DB backup by `backupName`), `"export"` (export a note subtree as ZIP, returned base64-encoded), `"import"` (import a base64 ZIP under a parent note), `"app_info"` (Trilium version/diagnostics), or `"metrics"` (note/attachment/revision/attribute counts and per-type breakdowns). |
+
+### Linking notes
+
+Trilium only renders a true note-to-note link when the anchor carries `class="reference-link"`, an `href="#root/<path>"` **and** a matching `data-note-path` — anything else is stored as an inert hash anchor. Instead of building that by hand, write a placeholder and let the server resolve it:
+
+```markdown
+See [the project plan](note:abc123def) and [](note:xyz789ghi).
+```
+
+```html
+<p>See <a href="note:abc123def">the project plan</a>.</p>
+```
+
+Each `note:<noteId>` link becomes a full reference link built from the target's tree path; an empty link text is filled with the target's title. Unknown note IDs fail the write with `NOTE_NOT_FOUND` rather than storing a dead link. Placeholders are resolved on `create_note` and `write_note` (`replace`/`append`/`edit`) for **text** notes only — code notes keep the literal text.
+
+Trilium indexes a note's links (the `internalLink` relations behind backlinks and the note map) only when content is saved through `PUT /notes/{id}/content`, which `POST /create-note` skips. `create_note` therefore re-saves text notes that contain links once, so links made through the MCP show up in Trilium's backlinks and note map immediately.
+
+### Reliability
+
+Every ETAPI request has a timeout (60s; export, import and backup get 5×). Idempotent requests (`GET`/`PUT`/`PATCH`/`DELETE`) are retried up to twice with exponential backoff on network errors and 502/503/504 responses. `POST` is never retried, because replaying `create-note` would duplicate notes. Timeouts are not retried either, since the request may still be running server-side. Failures surface as `TRILIUM_UNREACHABLE` (503) or `TRILIUM_TIMEOUT` (504), each with a suggested next step.
+
+Some features need a recent Trilium: `manage_system` `"metrics"` and `get_special_note` `"week_first_day"` need a release with those ETAPI endpoints (0.105+), and `utcDateModified` on create/patch needs a release newer than 0.105. Older servers return clear `METRICS_UNSUPPORTED` / `PROPERTY_NOT_ALLOWED` errors.
 
 ### Migrating from v1
 
-The tool surface was consolidated in a breaking release. The mapping from the old 35-tool surface to the current 19-tool surface:
+The tool surface was consolidated in a breaking release. The mapping from the old 35-tool surface to the 19-tool v2 surface (`restore_revision` was added later, making 20):
 
 | v1 tool | v2 equivalent |
 |---|---|

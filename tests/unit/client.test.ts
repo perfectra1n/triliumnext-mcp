@@ -358,3 +358,114 @@ describe('TriliumClient', () => {
     });
   });
 });
+
+describe('TriliumClient transport reliability', () => {
+  let mockFetch: ReturnType<typeof vi.fn>;
+  const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+  const status = (code: number) => ({
+    ok: false,
+    status: code,
+    statusText: 'Bad Gateway',
+    json: async () => {
+      throw new SyntaxError('not json');
+    },
+  });
+
+  beforeEach(() => {
+    mockFetch = vi.fn();
+    global.fetch = mockFetch;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const client = (opts = {}) =>
+    new TriliumClient('http://t/etapi', 'tok', undefined, { retryDelayMs: 0, ...opts });
+
+  it('retries idempotent requests on 502/503/504', async () => {
+    mockFetch.mockResolvedValueOnce(status(503)).mockResolvedValueOnce(ok({ noteId: 'n1' }));
+    await expect(client().getNote('n1')).resolves.toEqual({ noteId: 'n1' });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('gives up after maxRetries and surfaces the HTTP status', async () => {
+    mockFetch.mockResolvedValue(status(502));
+    await expect(client({ maxRetries: 1 }).getNote('n1')).rejects.toMatchObject({
+      status: 502,
+      code: 'UNKNOWN_ERROR',
+      message: 'Bad Gateway',
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('never retries POST (would duplicate notes)', async () => {
+    mockFetch.mockResolvedValue(status(503));
+    await expect(
+      client().createNote({ parentNoteId: 'root', title: 't', type: 'text', content: '' })
+    ).rejects.toBeInstanceOf(TriliumClientError);
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps connection failures to TRILIUM_UNREACHABLE with the root cause', async () => {
+    const err = new TypeError('fetch failed', { cause: { code: 'ECONNREFUSED' } });
+    mockFetch.mockRejectedValue(err);
+    await expect(client({ maxRetries: 1 }).getNote('n1')).rejects.toMatchObject({
+      code: 'TRILIUM_UNREACHABLE',
+      message: expect.stringContaining('ECONNREFUSED'),
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps timeouts to TRILIUM_TIMEOUT without retrying', async () => {
+    mockFetch.mockImplementation(
+      (_url: string, init: { signal: AbortSignal }) =>
+        new Promise((_resolve, reject) => {
+          init.signal.addEventListener('abort', () => reject(init.signal.reason));
+        })
+    );
+    await expect(client({ timeoutMs: 20 }).getNote('n1')).rejects.toMatchObject({
+      code: 'TRILIUM_TIMEOUT',
+      status: 504,
+    });
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a 404 on a retried DELETE as success (first attempt landed)', async () => {
+    mockFetch
+      .mockResolvedValueOnce(status(502))
+      .mockResolvedValueOnce({ ok: false, status: 404, json: async () => ({}) });
+    await expect(client().deleteBranch('b1')).resolves.toBeUndefined();
+  });
+
+  it('still reports a 404 on a first-attempt DELETE', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      json: async () => ({ status: 404, code: 'ATTACHMENT_NOT_FOUND', message: 'gone' }),
+    });
+    await expect(client().deleteAttachment('a1')).rejects.toMatchObject({
+      code: 'ATTACHMENT_NOT_FOUND',
+    });
+  });
+
+  it('maps a timeout during the body read to TRILIUM_TIMEOUT', async () => {
+    const abort = Object.assign(new Error('aborted'), { name: 'TimeoutError' });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw abort;
+      },
+    });
+    await expect(client().getNote('n1')).rejects.toMatchObject({ code: 'TRILIUM_TIMEOUT' });
+  });
+
+  it('calls the new week-first-day and metrics endpoints', async () => {
+    mockFetch.mockResolvedValue(ok({}));
+    await client().getWeekFirstDayNote('2026-10-15');
+    await client().getMetrics();
+    expect(mockFetch.mock.calls[0][0]).toBe('http://t/etapi/calendar/week-first-day/2026-10-15');
+    expect(mockFetch.mock.calls[1][0]).toBe('http://t/etapi/metrics?format=json');
+  });
+});

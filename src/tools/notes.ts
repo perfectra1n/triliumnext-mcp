@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
-import type { NoteType } from '../types/etapi.js';
+import type { NoteType, PatchNoteDef } from '../types/etapi.js';
 import { defineTool } from './schemas.js';
 import {
   noteTypeSchema,
@@ -20,6 +20,7 @@ import {
 } from './contentInput.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 import { CONTENT_CHAR_CAP } from './contentLimits.js';
+import { hasNoteLinkPlaceholders, needsLinkIndexing, resolveNoteLinks } from './noteLinks.js';
 
 const imageEntrySchema = z.object({
   data: z.string().describe(`The image. ${CONTENT_SOURCE_GUIDANCE}`),
@@ -257,13 +258,12 @@ function convertHtmlToMarkdown(html: string): string {
 // ============================================================================
 
 const INTERNAL_LINK_GUIDANCE =
-  'Internal links to other Trilium notes must be raw HTML with this exact structure: ' +
-  '<a class="reference-link" href="#root/<path>/<targetNoteId>" data-note-path="root/<path>/<targetNoteId>">Title</a>. ' +
-  'All three attributes are required — Trilium only renders a true note-to-note link when class="reference-link" AND data-note-path are both present; drop either and it stores an inert hash anchor. ' +
-  'The two path strings point to the same target but differ by one character: href starts with "#root/...", data-note-path is the same string without the leading "#". ' +
-  'To build the path: call get_note on the target noteId and prepend each parent from parentNoteIds until you reach "root", giving "root/.../targetNoteId". For a note with one parent (the common case) this is one walk; for cloned notes any valid path works. ' +
-  'When format="markdown", do NOT use markdown link syntax for internal links — [text](#root/...) gets converted to a bare <a href> without class/data-note-path and Trilium will not render it as a reference link. Write the full <a class="reference-link" ...> tag as raw HTML inside the markdown content. ' +
-  'Example: <a class="reference-link" href="#root/abc123def/xyz789ghi" data-note-path="root/abc123def/xyz789ghi">Project Plan</a>.';
+  'Internal links to other Trilium notes: write <a href="note:TARGET_NOTE_ID">Link text</a> in HTML, or ' +
+  '[Link text](note:TARGET_NOTE_ID) in markdown — the server turns it into a proper Trilium reference link ' +
+  '(class="reference-link" + href/data-note-path built from the target\'s tree path) and rejects the write if ' +
+  "the target does not exist. Leave the link text empty to use the target's title. " +
+  'Do NOT write [text](#root/...) markdown links or hand-built anchors without class="reference-link" and ' +
+  'data-note-path — Trilium stores those as inert hash anchors, not note links.';
 
 export const NOTE_URL_GUIDANCE =
   'The response includes a "url" field that opens this note directly in Trilium. ' +
@@ -330,6 +330,12 @@ const createNoteSchema = z.object({
   utcDateCreated: utcDateTimeSchema
     .optional()
     .describe('Set UTC creation date. Format: "2024-01-15 09:30:00.000Z"'),
+  utcDateModified: utcDateTimeSchema
+    .optional()
+    .describe(
+      'Set the UTC last-modified date (e.g. to keep the original date of a note migrated from another app). ' +
+        'Format: "2024-01-15 09:30:00.000Z". Needs a Trilium newer than 0.105 (older ones reject it).'
+    ),
   images: imagesFieldSchema,
   files: filesFieldSchema,
 });
@@ -379,6 +385,21 @@ const getNoteSchema = z.object({
       `Maximum content characters to return (default ${CONTENT_CHAR_CAP}). When the note is larger, ` +
         'the content is truncated with a notice explaining how to fetch the rest.'
     ),
+  include_path: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Add "paths" to the metadata: for every place the note sits in the tree (one per parent, clones ' +
+        'included), the noteId path and a human-readable title breadcrumb like "root > Projects > Plan". ' +
+        'Use it to tell the user WHERE a note lives.'
+    ),
+  include_backlinks: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Add "backlinks" to the metadata: notes whose content links to (or mentions the ID of) this note, ' +
+        'with noteId and title (max 50). Relations without a link in the content (e.g. ~author) are not included.'
+    ),
 });
 
 const writeNoteSchema = z
@@ -394,6 +415,20 @@ const writeNoteSchema = z
           '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to the existing content.'
       ),
     title: z.string().optional().describe('New title (metadata mode only)'),
+    dateCreated: localDateTimeSchema
+      .optional()
+      .describe(
+        'New local creation date (metadata mode only). Format: "2024-01-15 10:30:00.000+0100"'
+      ),
+    utcDateCreated: utcDateTimeSchema
+      .optional()
+      .describe('New UTC creation date (metadata mode only). Format: "2024-01-15 09:30:00.000Z"'),
+    utcDateModified: utcDateTimeSchema
+      .optional()
+      .describe(
+        "New UTC last-modified date (metadata mode only), e.g. to restore a migrated note's original date " +
+          'after rewriting its content. Format: "2024-01-15 09:30:00.000Z". Needs a Trilium newer than 0.105.'
+      ),
     type: noteTypeSchema.optional().describe('New type (metadata mode only)'),
     mime: z
       .string()
@@ -435,13 +470,28 @@ const writeNoteSchema = z
   })
   .check((ctx) => {
     const { mode, title, type, mime, content, changes, patch, format, images, files } = ctx.value;
+    const dateFields = [ctx.value.dateCreated, ctx.value.utcDateCreated, ctx.value.utcDateModified];
+    const hasDates = dateFields.some((v) => v !== undefined);
+
+    if (mode !== 'metadata' && hasDates) {
+      ctx.issues.push({
+        code: 'custom',
+        input: ctx.value,
+        message:
+          'dateCreated/utcDateCreated/utcDateModified are metadata fields — set them with mode="metadata" ' +
+          '(in a separate call after the content write, since a content write bumps the modified date)',
+        path: [],
+      });
+    }
 
     if (mode === 'metadata') {
-      if (title === undefined && type === undefined && mime === undefined) {
+      if (title === undefined && type === undefined && mime === undefined && !hasDates) {
         ctx.issues.push({
           code: 'custom',
           input: ctx.value,
-          message: 'mode="metadata" requires at least one of "title", "type", or "mime"',
+          message:
+            'mode="metadata" requires at least one of "title", "type", "mime", "dateCreated", ' +
+            '"utcDateCreated", or "utcDateModified"',
           path: [],
         });
       }
@@ -541,7 +591,65 @@ const getNoteHistorySchema = z.object({
     .string()
     .optional()
     .describe('Limit changes to a subtree identified by this note ID. Defaults to all notes.'),
+  limit: z
+    .number()
+    .int('limit must be an integer')
+    .min(1, 'limit must be at least 1')
+    .max(1000, 'limit cannot exceed 1000')
+    .default(100)
+    .describe('Maximum number of changes to return, newest first (default 100, max 1000).'),
 });
+
+// ============================================================================
+// Note context helpers
+// ============================================================================
+
+/** Bound the ancestor walks one get_note call can trigger. */
+const MAX_PATHS = 10;
+const MAX_BACKLINKS = 50;
+
+type NoteMeta = Awaited<ReturnType<TriliumClient['getNote']>>;
+
+/** One breadcrumb per tree placement (clones have several). */
+async function buildNotePaths(
+  client: TriliumClient,
+  note: NoteMeta
+): Promise<Array<{ path: string; breadcrumb: string }>> {
+  const titles = new Map<string, string>([[note.noteId, note.title]]);
+  const titleOf = async (id: string): Promise<string> => {
+    const cached = titles.get(id);
+    if (cached !== undefined) return cached;
+    const title = id === 'root' ? 'root' : (await client.getNote(id)).title;
+    titles.set(id, title);
+    return title;
+  };
+
+  const parents = note.noteId === 'root' ? [undefined] : note.parentNoteIds.slice(0, MAX_PATHS);
+  return Promise.all(
+    parents.map(async (parentId) => {
+      const path = await client.getNotePath(note.noteId, parentId);
+      const crumbs = await Promise.all(path.split('/').map(titleOf));
+      return { path, breadcrumb: crumbs.join(' > ') };
+    })
+  );
+}
+
+async function findBacklinks(
+  client: TriliumClient,
+  noteId: string
+): Promise<Array<{ noteId: string; title: string }>> {
+  // Trilium has no "any relation pointing here" query, but every in-content link
+  // carries the target's noteId (href/data-note-path), so a content scan for the
+  // ID finds links regardless of whether Trilium has indexed them as relations.
+  const response = await client.searchNotes({
+    search: `note.content *=* "${noteId}"`,
+    limit: MAX_BACKLINKS + 1,
+  });
+  return response.results
+    .filter((n) => n.noteId !== noteId)
+    .slice(0, MAX_BACKLINKS)
+    .map((n) => ({ noteId: n.noteId, title: n.title }));
+}
 
 // ============================================================================
 // Registration
@@ -560,13 +668,15 @@ export function registerNoteTools(): Tool[] {
         'page through large notes with content_start/content_max_chars. ' +
         'This is the canonical and complete way to read a note — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
         '(e.g. via curl, fetch, or shell). The response format is already designed for direct LLM consumption. ' +
-        'If you only need the title, type, attributes, or parent/child IDs (e.g. for tree navigation), pass include_content=false to skip the body.',
+        'If you only need the title, type, attributes, or parent/child IDs (e.g. for tree navigation), pass include_content=false to skip the body. ' +
+        'Pass include_path=true for human-readable breadcrumbs of where the note lives, and include_backlinks=true for the notes that link to it.',
       getNoteSchema,
       { title: 'Read note', readOnlyHint: true }
     ),
     defineTool(
       'get_note_history',
       'Get recent changes across the note tree — creations, modifications, and deletions. Optionally filter by subtree via ancestorNoteId. ' +
+        'Returns {changes, total, returned, truncated}; pass limit (default 100) to see more. ' +
         'Distinct from revisions: this is a change log across notes; revisions are content snapshots of a single note.',
       getNoteHistorySchema,
       { title: 'Note change history', readOnlyHint: true }
@@ -641,6 +751,10 @@ export async function handleNoteTool(
           ).buffer
         : null;
       let content = isBinary ? '' : await convertContent(parsed.content, parsed.format);
+      if (parsed.type === 'text') {
+        content = await resolveNoteLinks(client, content);
+      }
+      let warning: string | undefined;
       const hasAttachments =
         (parsed.images && parsed.images.length > 0) || (parsed.files && parsed.files.length > 0);
       if (!isBinary && !hasAttachments) {
@@ -659,6 +773,7 @@ export async function handleNoteTool(
         branchId: parsed.branchId,
         dateCreated: parsed.dateCreated,
         utcDateCreated: parsed.utcDateCreated,
+        utcDateModified: parsed.utcDateModified,
       });
 
       if (binaryContent && binaryContent.length > 0) {
@@ -678,6 +793,24 @@ export async function handleNoteTool(
         if (!isBinary) {
           await client.updateNoteContent(result.note.noteId, content);
         }
+      } else if (parsed.type === 'text' && needsLinkIndexing(content)) {
+        // Re-save so Trilium indexes the links (backlinks, note map); see needsLinkIndexing.
+        // The note already exists at this point, so a failure here must not surface
+        // as a failed create — the caller would retry and duplicate the note.
+        try {
+          await client.updateNoteContent(result.note.noteId, content);
+          if (parsed.utcDateModified) {
+            // The re-save stamped "now" — put the requested modified date back.
+            await client.updateNote(result.note.noteId, {
+              utcDateModified: parsed.utcDateModified,
+            });
+          }
+        } catch (error) {
+          warning =
+            'Note created, but re-saving it so Trilium indexes its links failed ' +
+            `(${error instanceof Error ? error.message : String(error)}). The links work, but may not ` +
+            'appear in backlinks/note map until the note is next edited. Do NOT re-create the note.';
+        }
       }
 
       const url = await client.getNoteUrl(result.note.noteId, result.branch.parentNoteId);
@@ -686,7 +819,11 @@ export async function handleNoteTool(
         content: [
           {
             type: 'text',
-            text: JSON.stringify({ note: result.note, branch: result.branch, url }, null, 2),
+            text: JSON.stringify(
+              { note: result.note, branch: result.branch, url, ...(warning ? { warning } : {}) },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -694,7 +831,16 @@ export async function handleNoteTool(
 
     case 'get_note': {
       const parsed = getNoteSchema.parse(args);
-      const meta = await client.getNote(parsed.noteId);
+      const note = await client.getNote(parsed.noteId);
+      const [paths, backlinks] = await Promise.all([
+        parsed.include_path ? buildNotePaths(client, note) : undefined,
+        parsed.include_backlinks ? findBacklinks(client, note.noteId) : undefined,
+      ]);
+      const meta = {
+        ...note,
+        ...(paths ? { paths } : {}),
+        ...(backlinks ? { backlinks } : {}),
+      };
 
       if (!parsed.include_content) {
         return {
@@ -796,10 +942,13 @@ export async function handleNoteTool(
       const parsed = writeNoteSchema.parse(args);
 
       if (parsed.mode === 'metadata') {
-        const patch: { title?: string; type?: NoteType; mime?: string } = {};
+        const patch: PatchNoteDef = {};
         if (parsed.title !== undefined) patch.title = parsed.title;
         if (parsed.type !== undefined) patch.type = parsed.type as NoteType;
         if (parsed.mime !== undefined) patch.mime = parsed.mime;
+        if (parsed.dateCreated !== undefined) patch.dateCreated = parsed.dateCreated;
+        if (parsed.utcDateCreated !== undefined) patch.utcDateCreated = parsed.utcDateCreated;
+        if (parsed.utcDateModified !== undefined) patch.utcDateModified = parsed.utcDateModified;
         const result = await client.updateNote(parsed.noteId, patch);
         const url = await client.getNoteUrl(parsed.noteId, result.parentNoteIds?.[0]);
         return {
@@ -808,6 +957,7 @@ export async function handleNoteTool(
       }
 
       let finalContent: string;
+      let appliedChanges = parsed.changes;
 
       if (parsed.mode === 'replace') {
         finalContent = await resolveContent(
@@ -822,10 +972,31 @@ export async function handleNoteTool(
       } else {
         // edit
         const existing = await client.getNoteContent(parsed.noteId);
+        // Resolve note: placeholders inside each new_string up front, so the
+        // read-back verification below checks for the text actually written.
+        if (appliedChanges?.some((c) => hasNoteLinkPlaceholders(c.new_string))) {
+          if ((await client.getNote(parsed.noteId)).type === 'text') {
+            appliedChanges = await Promise.all(
+              appliedChanges.map(async (c) => ({
+                ...c,
+                new_string: await resolveNoteLinks(client, c.new_string),
+              }))
+            );
+          }
+        }
         finalContent = await resolveContent(existing, {
-          changes: parsed.changes,
+          changes: appliedChanges,
           patch: parsed.patch,
         });
+      }
+
+      if (hasNoteLinkPlaceholders(finalContent)) {
+        // Only text notes hold HTML links; a code note may legitimately contain
+        // the literal string, so check the type before rewriting anything.
+        const target = await client.getNote(parsed.noteId);
+        if (target.type === 'text') {
+          finalContent = await resolveNoteLinks(client, finalContent);
+        }
       }
 
       if (parsed.images && parsed.images.length > 0) {
@@ -840,7 +1011,7 @@ export async function handleNoteTool(
 
       if (parsed.mode === 'edit' && parsed.changes !== undefined) {
         const readBack = await client.getNoteContent(parsed.noteId);
-        verifySearchReplaceResults(readBack, parsed.changes);
+        verifySearchReplaceResults(readBack, appliedChanges ?? parsed.changes);
       }
 
       const url = await client.getNoteUrl(parsed.noteId);
@@ -885,8 +1056,23 @@ export async function handleNoteTool(
     case 'get_note_history': {
       const parsed = getNoteHistorySchema.parse(args);
       const history = await client.getNoteHistory(parsed.ancestorNoteId);
+      const changes = history.slice(0, parsed.limit);
       return {
-        content: [{ type: 'text', text: JSON.stringify(history, null, 2) }],
+        content: [
+          {
+            type: 'text',
+            text: JSON.stringify(
+              {
+                changes,
+                total: history.length,
+                returned: changes.length,
+                truncated: changes.length < history.length,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     }
 

@@ -66,7 +66,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   const allTools = [
     ...registerSearchTools(), // search_notes, get_note_tree
     ...registerNoteTools(), // get_note, get_note_history, create_note, write_note, delete_note
-    ...registerRevisionTools(), // get_revisions
+    ...registerRevisionTools(), // get_revisions, restore_revision
     ...registerAttributeTools(), // get_attributes, set_attribute, delete_attribute
     ...registerAttachmentTools(), // get_attachment, create_attachment, write_attachment, delete_attachment
     ...registerCalendarTools(), // get_special_note

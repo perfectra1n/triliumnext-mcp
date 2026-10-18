@@ -31,7 +31,7 @@ async function startTriliumBox(): Promise<{
   etapiUrl: string;
   baseUrl: string;
 }> {
-  const container = await new GenericContainer('triliumnext/notes:latest')
+  const container = await new GenericContainer('triliumnext/trilium:latest')
     .withExposedPorts(8080)
     .withEnvironment({ TRILIUM_GENERAL_NOAUTHENTICATION: 'true' })
     .withWaitStrategy(Wait.forHttp('/api/app-info', 8080).forStatusCode(200))

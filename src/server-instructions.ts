@@ -50,4 +50,13 @@ Creating these note types is only step 1 — they do nothing until you add the a
 - Create a frontend code note (mime "application/javascript;env=frontend") that returns a widget, then mark it:
   set_attribute { type:"label", name:"widget", value:"" }.
 
+# Linking notes
+
+To link to another note, write <a href="note:TARGET_NOTE_ID">text</a> (or markdown [text](note:TARGET_NOTE_ID)) in create_note/write_note content — the server builds the real Trilium reference link and rejects unknown IDs. Use get_note with include_path=true to tell the user where a note lives, and include_backlinks=true to find what links to it.
+
+# Safety
+
+- organize_note "move" on a cloned note needs fromParentNoteId; never guess which placement to remove.
+- Before rewriting a note wholesale, prefer create_revision (or rely on restore_revision's automatic snapshot) so the change can be undone.
+
 When you finish creating or wiring a note, give the user the returned \`url\` so they can open it directly.`;

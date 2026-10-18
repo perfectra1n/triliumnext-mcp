@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { exportFormatSchema, backupNameSchema, required } from './validators.js';
 
@@ -20,13 +21,14 @@ const createRevisionSchema = z.object({
 const manageSystemSchema = z
   .object({
     action: z
-      .enum(['backup', 'export', 'import', 'app_info'])
+      .enum(['backup', 'export', 'import', 'app_info', 'metrics'])
       .describe(
         'System action to perform. ' +
           '"backup" — create a full database backup (fields: backupName). ' +
           '"export" — export a note and its subtree as a ZIP archive, returned base64-encoded (fields: noteId, format?). ' +
           '"import" — import a ZIP archive (e.g. from a previous export) under a parent note (fields: noteId, data). ' +
-          '"app_info" — return Trilium instance info (version, database version) for diagnostics (no fields).'
+          '"app_info" — return Trilium instance info (version, database version) for diagnostics (no fields). ' +
+          '"metrics" — note/attachment/revision/attribute counts and note-type breakdowns (no fields).'
       ),
     backupName: backupNameSchema
       .optional()
@@ -111,7 +113,7 @@ export function registerSystemTools(): Tool[] {
     ),
     defineTool(
       'manage_system',
-      'Trilium system operations. Four actions via "action":\n' +
+      'Trilium system operations. Five actions via "action":\n' +
         '- "backup": create a full database backup file (backup-{backupName}.db) in Trilium\'s data directory. ' +
         'Use before major operations for safety.\n' +
         '- "export": export a note and its subtree as a ZIP archive, returned base64-encoded. ' +
@@ -119,7 +121,10 @@ export function registerSystemTools(): Tool[] {
         '- "import": import a ZIP archive (typically from a previous export) under a parent note. ' +
         'Pass the archive base64-encoded in "data". Returns the created note. Intended for small archives.\n' +
         '- "app_info": return Trilium instance info (app version, database version, clipper protocol version) — ' +
-        'useful for diagnostics and version-dependent behavior.',
+        'useful for diagnostics and version-dependent behavior.\n' +
+        '- "metrics": database statistics — total/active/deleted/protected note counts, attachment, revision, ' +
+        'branch and attribute counts, and per-type breakdowns. Counts only, no titles or content. ' +
+        'Requires a Trilium version that has /etapi/metrics.',
       manageSystemSchema,
       {
         title: 'Backup, export, import, or app info',
@@ -166,6 +171,26 @@ export async function handleSystemTool(
               text: `Backup created: backup-${backupName}.db. The backup is stored in Trilium's data directory.`,
             },
           ],
+        };
+      }
+
+      if (parsed.action === 'metrics') {
+        let metrics;
+        try {
+          metrics = await client.getMetrics();
+        } catch (error) {
+          if (error instanceof TriliumClientError && error.status === 404) {
+            throw new TriliumClientError(
+              404,
+              'METRICS_UNSUPPORTED',
+              'This Trilium version has no /etapi/metrics endpoint. Upgrade Trilium, or use ' +
+                'manage_system {action:"app_info"} for version info.'
+            );
+          }
+          throw error;
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify(metrics, null, 2) }],
         };
       }
 

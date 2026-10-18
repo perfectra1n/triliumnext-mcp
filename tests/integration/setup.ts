@@ -24,7 +24,7 @@ export async function startTriliumContainer(): Promise<string> {
 
   console.log('Starting Trilium container via testcontainers...');
 
-  triliumContainer = await new GenericContainer('triliumnext/notes:latest')
+  triliumContainer = await new GenericContainer('triliumnext/trilium:latest')
     .withExposedPorts(8080)
     .withEnvironment({ TRILIUM_GENERAL_NOAUTHENTICATION: 'true' })
     .withWaitStrategy(Wait.forHttp('/api/app-info', 8080).forStatusCode(200))

@@ -118,4 +118,4 @@ export async function cleanup(
   serverProcess?.kill();
 }
 
-export const EXPECTED_TOOL_COUNT = 19;
+export const EXPECTED_TOOL_COUNT = 20;
