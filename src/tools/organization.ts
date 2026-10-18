@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
+import type { Branch } from '../types/etapi.js';
 import { defineTool } from './schemas.js';
 import { positionSchema, required } from './validators.js';
 
@@ -10,7 +11,7 @@ const organizeNoteSchema = z
       .enum(['move', 'clone', 'reorder', 'unlink'])
       .describe(
         'Operation to perform. ' +
-          '"move" — move a note to a new parent (fields: noteId, newParentNoteId, prefix?). ' +
+          '"move" — move a note to a new parent (fields: noteId, newParentNoteId, fromParentNoteId?, prefix?). ' +
           '"clone" — make a note appear under an additional parent (fields: noteId, parentNoteId, prefix?). ' +
           '"reorder" — change display order of children under a parent (fields: parentNoteId, notePositions[]). ' +
           '"unlink" — remove a specific parent-child branch (field: branchId). WARNING: removing a note\'s last branch deletes the note.'
@@ -21,6 +22,13 @@ const organizeNoteSchema = z
       .optional()
       .describe(
         'Destination parent for "move". Use search_notes/get_note_tree to pick the right parent.'
+      ),
+    fromParentNoteId: z
+      .string()
+      .optional()
+      .describe(
+        'Optional for "move": the parent to move the note AWAY from. Required when the note is cloned ' +
+          '(has several parents) so the right placement is moved; ignored otherwise.'
       ),
     parentNoteId: z
       .string()
@@ -87,12 +95,50 @@ const organizeNoteSchema = z
     }
   });
 
+/**
+ * Decide which existing placement a "move" takes the note away from.
+ *
+ * Returns undefined when there is nothing to remove (the note is already under
+ * the destination and nowhere else that was asked for). Throws rather than
+ * guessing when a cloned note's source is ambiguous — silently unlinking the
+ * wrong clone is a data-loss bug, not a convenience.
+ */
+export function pickSourceBranch(
+  noteId: string,
+  parentBranches: Branch[],
+  newParentNoteId: string,
+  fromParentNoteId: string | undefined
+): Branch | undefined {
+  if (fromParentNoteId !== undefined) {
+    const match = parentBranches.find((b) => b.parentNoteId === fromParentNoteId);
+    if (!match) {
+      const parents = parentBranches.map((b) => b.parentNoteId).join(', ') || '(none)';
+      throw new Error(
+        `Note '${noteId}' is not a child of fromParentNoteId '${fromParentNoteId}'. Current parents: ${parents}.`
+      );
+    }
+    return match.parentNoteId === newParentNoteId ? undefined : match;
+  }
+
+  const candidates = parentBranches.filter((b) => b.parentNoteId !== newParentNoteId);
+  if (candidates.length <= 1) return candidates[0];
+
+  throw new Error(
+    `Note '${noteId}' is cloned under several parents (${candidates
+      .map((b) => b.parentNoteId)
+      .join(', ')}). Pass "fromParentNoteId" to say which placement to move, ` +
+      'or use action="clone" to add a placement without removing any.'
+  );
+}
+
 export function registerOrganizationTools(): Tool[] {
   return [
     defineTool(
       'organize_note',
       'Reorganize the note tree. Four actions selected via "action":\n' +
-        '- "move": relocate a note to a new parent (deletes primary branch, creates new one under destination)\n' +
+        '- "move": relocate a note to a new parent (creates the destination placement, then removes the old one). ' +
+        'For a cloned note (several parents) pass fromParentNoteId to choose which placement moves; ' +
+        'moving onto a parent the note is already under is a safe no-op\n' +
         '- "clone": make a note appear in multiple locations (new branch pointing to same note)\n' +
         '- "reorder": change display order of notes under a parent by updating branch positions\n' +
         '- "unlink": remove a specific parent-child branch without deleting the note (unless it\'s the last branch)\n\n' +
@@ -120,16 +166,34 @@ export async function handleOrganizationTool(
       const noteId = required(parsed.noteId, 'noteId');
       const newParentNoteId = required(parsed.newParentNoteId, 'newParentNoteId');
 
-      // Create new branch first so the note isn't briefly orphaned
       const note = await client.getNote(noteId);
+      const parentBranches = await Promise.all(
+        note.parentBranchIds.map((id) => client.getBranch(id))
+      );
+      const sourceBranch = pickSourceBranch(
+        noteId,
+        parentBranches,
+        newParentNoteId,
+        parsed.fromParentNoteId
+      );
+
+      // POST /branches is an upsert: when the note already sits under the
+      // destination it returns that existing branch rather than a new one.
+      // Create first so the note is never briefly orphaned, then delete the
+      // source only if it is genuinely a different branch — otherwise a move
+      // onto the current parent would delete the note's only placement.
       const newBranch = await client.createBranch({
         noteId,
         parentNoteId: newParentNoteId,
         prefix: parsed.prefix,
       });
 
-      if (note.parentBranchIds.length > 0) {
-        await client.deleteBranch(note.parentBranchIds[0]);
+      const removed =
+        sourceBranch !== undefined && sourceBranch.branchId !== newBranch.branchId
+          ? sourceBranch
+          : undefined;
+      if (removed) {
+        await client.deleteBranch(removed.branchId);
       }
 
       const url = await client.getNoteUrl(noteId, newBranch.parentNoteId);
@@ -139,7 +203,17 @@ export async function handleOrganizationTool(
           {
             type: 'text',
             text: JSON.stringify(
-              { success: true, action: 'move', branch: newBranch, url },
+              {
+                success: true,
+                action: 'move',
+                branch: newBranch,
+                removedBranchId: removed?.branchId ?? null,
+                fromParentNoteId: removed?.parentNoteId ?? null,
+                ...(removed
+                  ? {}
+                  : { note: 'The note was already under this parent; nothing was moved.' }),
+                url,
+              },
               null,
               2
             ),

@@ -997,6 +997,10 @@ describe('Organization tools', () => {
         noteId: 'n1',
         parentBranchIds: ['old-b'],
       });
+      (client.getBranch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        branchId: 'old-b',
+        parentNoteId: 'oldParent',
+      });
       (client.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ branchId: 'new-b' });
 
       await handleOrganizationTool(client, 'organize_note', {
@@ -1013,6 +1017,10 @@ describe('Organization tools', () => {
       (client.getNote as ReturnType<typeof vi.fn>).mockResolvedValue({
         noteId: 'n1',
         parentBranchIds: ['old-b'],
+      });
+      (client.getBranch as ReturnType<typeof vi.fn>).mockResolvedValue({
+        branchId: 'old-b',
+        parentNoteId: 'oldParent',
       });
       (client.createBranch as ReturnType<typeof vi.fn>).mockResolvedValue({
         branchId: 'new-b',
@@ -1725,9 +1733,9 @@ describe('Attachment tools', () => {
 // ============================================================================
 
 describe('Revision tools', () => {
-  it('registers 1 tool (get_revisions)', () => {
+  it('registers get_revisions (read-only) and restore_revision', () => {
     const tools = registerRevisionTools();
-    expect(tools.map((t) => t.name)).toEqual(['get_revisions']);
+    expect(tools.map((t) => t.name)).toEqual(['get_revisions', 'restore_revision']);
     expect(tools[0].annotations?.readOnlyHint).toBe(true);
   });
 
@@ -1793,7 +1801,7 @@ describe('Revision tools', () => {
 // ============================================================================
 
 describe('Total tool surface', () => {
-  it('exposes exactly 19 tools after consolidation (see issue #6)', () => {
+  it('exposes exactly 20 tools (19 after consolidation in issue #6, + restore_revision)', () => {
     const allTools = [
       ...registerSearchTools(),
       ...registerNoteTools(),
@@ -1804,10 +1812,10 @@ describe('Total tool surface', () => {
       ...registerOrganizationTools(),
       ...registerSystemTools(),
     ];
-    expect(allTools).toHaveLength(19);
+    expect(allTools).toHaveLength(20);
 
     const names = allTools.map((t) => t.name);
-    expect(new Set(names).size).toBe(19); // no duplicates
+    expect(new Set(names).size).toBe(20); // no duplicates
 
     // Dropped tools from pre-consolidation surface
     for (const dropped of [

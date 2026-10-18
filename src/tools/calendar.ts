@@ -7,6 +7,7 @@ import { dateSchema, weekSchema, monthSchema, yearSchema } from './validators.js
 const DATE_FORMAT_BY_KIND = {
   day: { schema: dateSchema, hint: 'YYYY-MM-DD' },
   inbox: { schema: dateSchema, hint: 'YYYY-MM-DD' },
+  week_first_day: { schema: dateSchema, hint: 'YYYY-MM-DD (any day within the week)' },
   week: { schema: weekSchema, hint: 'YYYY-Www (ISO week, e.g. 2026-W03)' },
   month: { schema: monthSchema, hint: 'YYYY-MM' },
   year: { schema: yearSchema, hint: 'YYYY' },
@@ -15,17 +16,19 @@ const DATE_FORMAT_BY_KIND = {
 const getSpecialNoteSchema = z
   .object({
     kind: z
-      .enum(['day', 'week', 'month', 'year', 'inbox'])
+      .enum(['day', 'week', 'month', 'year', 'inbox', 'week_first_day'])
       .describe(
         '"day" — the daily journal note. "week"/"month"/"year" — the corresponding periodic journal note ' +
           '(for weekly/monthly/yearly reviews). All are created if missing. ' +
-          '"inbox" — the quick-capture inbox note (may be a fixed note or the daily note depending on Trilium configuration).'
+          '"inbox" — the quick-capture inbox note (may be a fixed note or the daily note depending on Trilium configuration). ' +
+          '"week_first_day" — the DAY note for the first day of the week containing date (honours the configured ' +
+          'first weekday); unlike "week" it works without week notes being enabled. Needs a recent Trilium.'
       ),
     date: z
       .string()
       .optional()
       .describe(
-        'Which period to fetch; format depends on kind — day/inbox: YYYY-MM-DD, week: YYYY-Www ' +
+        'Which period to fetch; format depends on kind — day/inbox/week_first_day: YYYY-MM-DD, week: YYYY-Www ' +
           '(ISO week, e.g. 2026-W03), month: YYYY-MM, year: YYYY. Defaults to the current day/week/month/year.'
       ),
   })
@@ -73,7 +76,8 @@ export function registerCalendarTools(): Tool[] {
       'Get a periodic journal note or the inbox note. kind="day" fetches the daily note, "week"/"month"/"year" ' +
         'fetch the corresponding periodic notes (useful for weekly/monthly/yearly reviews) — all auto-created if ' +
         'missing. kind="inbox" fetches the quick-capture inbox (configuration-dependent: either a fixed note or ' +
-        'the daily note). The date format follows the kind (YYYY-MM-DD, YYYY-Www, YYYY-MM, or YYYY) and defaults ' +
+        'the daily note). kind="week_first_day" returns the day note that starts the week. ' +
+        'The date format follows the kind (YYYY-MM-DD, YYYY-Www, YYYY-MM, or YYYY) and defaults ' +
         'to the current period.',
       getSpecialNoteSchema,
       { title: 'Get periodic or inbox note', readOnlyHint: false, idempotentHint: true }
@@ -98,6 +102,9 @@ export async function handleCalendarTool(
       break;
     case 'inbox':
       note = await client.getInboxNote(parsed.date ?? today);
+      break;
+    case 'week_first_day':
+      note = await client.getWeekFirstDayNote(parsed.date ?? today);
       break;
     case 'week':
       note = await client.getWeekNote(parsed.date ?? isoWeekString(new Date()));

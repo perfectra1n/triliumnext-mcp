@@ -32,6 +32,12 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   INVALID_ENTITY_ID: 'The entity ID format is invalid. IDs must be 4-32 alphanumeric characters.',
   NOTE_IS_DELETED: 'This note has been deleted. It cannot be accessed or modified.',
   VALIDATION_ERROR: 'The request contains invalid data. Check the field requirements.',
+  PROPERTY_NOT_ALLOWED:
+    'This Trilium version does not accept that field. utcDateModified on create_note/write_note needs a Trilium newer than 0.105 — drop the field or upgrade Trilium.',
+  TRILIUM_UNREACHABLE:
+    'The MCP server could not connect to Trilium (it already retried). Check that Trilium is running and that TRILIUM_URL points at its /etapi endpoint.',
+  TRILIUM_TIMEOUT:
+    'Trilium accepted the connection but did not answer in time. The operation may still complete server-side — re-read the note before retrying a write.',
   ETAPI_TOKEN_INVALID:
     'The API token is invalid or expired. Check your TRILIUM_TOKEN configuration.',
 };

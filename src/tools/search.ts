@@ -14,6 +14,10 @@ import {
   type FuzzyMode,
 } from './fuzzySearch.js';
 
+/** How many results get a content preview; each one costs a content fetch. */
+const MAX_PREVIEW_RESULTS = 20;
+const PREVIEW_CONCURRENCY = 5;
+
 const searchNotesSchema = z.object({
   query: z
     .string()
@@ -54,6 +58,17 @@ const searchNotesSchema = z.object({
     .boolean()
     .optional()
     .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
+  content_preview_chars: z
+    .number()
+    .int('content_preview_chars must be an integer')
+    .min(0, 'content_preview_chars must be >= 0')
+    .max(2000, 'content_preview_chars cannot exceed 2000')
+    .default(0)
+    .describe(
+      `Attach a plain-text "contentPreview" (first N characters, HTML stripped) to the first ${MAX_PREVIEW_RESULTS} ` +
+        'results so you can tell candidates apart without a get_note call per result. 0 (default) = off. ' +
+        '200-300 is usually enough. Skipped for binary (image/file) and protected notes.'
+    ),
   fuzzy: z
     .enum(['auto', 'off', 'force'])
     .optional()
@@ -197,7 +212,7 @@ export function registerSearchTools(): Tool[] {
 - \`id:abc123def\` - Direct lookup of note by ID
 - \`title:weekly meeting\` - Notes with "weekly meeting" in title
 
-**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).
+**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body, or pass \`content_preview_chars\` (e.g. 250) to get a short plain-text \`contentPreview\` on the top results. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).
 
 **Graceful fallback (\`fuzzy\`):**
 Trilium ANDs fulltext terms, so one wrong term returns nothing. By default (\`fuzzy: "auto"\`),
@@ -228,6 +243,54 @@ Never applies to \`#label\`, \`note.*\`, \`id:\`/\`title:\`, or already-OR queri
 }
 
 type SearchArgs = z.infer<typeof searchNotesSchema>;
+
+const PREVIEWABLE_TYPES = new Set(['text', 'code', 'mermaid', 'book', 'render', 'webView']);
+
+/** Crude but dependency-free HTML → text for previews; not used for anything stored. */
+export function htmlToPreviewText(html: string): string {
+  return html
+    .replace(/<(script|style)\b[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<br\s*\/?>|<\/(p|div|li|h[1-6]|tr)>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\s*\n\s*/g, '\n')
+    .trim();
+}
+
+/**
+ * Add `contentPreview` to the leading results in place. Best-effort: a preview
+ * that fails to load is simply omitted — it must never fail the search.
+ */
+async function attachPreviews(
+  client: TriliumClient,
+  results: unknown,
+  chars: number
+): Promise<void> {
+  if (chars <= 0 || !Array.isArray(results)) return;
+  const targets = (results as Array<Record<string, unknown>>)
+    .slice(0, MAX_PREVIEW_RESULTS)
+    .filter((n) => PREVIEWABLE_TYPES.has(String(n.type)) && n.isProtected !== true);
+
+  for (let i = 0; i < targets.length; i += PREVIEW_CONCURRENCY) {
+    await Promise.all(
+      targets.slice(i, i + PREVIEW_CONCURRENCY).map(async (n) => {
+        try {
+          const raw = await client.getNoteContent(String(n.noteId));
+          const text = n.type === 'text' ? htmlToPreviewText(raw) : raw.trim();
+          n.contentPreview = text.length > chars ? `${text.slice(0, chars)}…` : text;
+        } catch {
+          // Omit the preview for this note.
+        }
+      })
+    );
+  }
+}
 
 /** Scope and shaping options shared by the exact search and its fuzzy retry. */
 function scopeParams(parsed: SearchArgs) {
@@ -266,9 +329,9 @@ function describeFuzzyRun(args: {
       ? 'Results are ranked by title and attribute relevance.'
       : 'Results keep the ordering you requested via orderBy rather than being re-ranked by relevance.',
     `Showing ${returned} of ${totalCandidates} candidates.`,
-    'Relevance is computed from titles and attributes only — Trilium\'s search response carries no note ' +
+    "Relevance is computed from titles and attributes only — Trilium's search response carries no note " +
       'content — so a note matching only in its body still appears, ranked low. Scan past the first result.',
-    'In termsMatchedInTitleOrAttributes, a 0 means the term was absent from these results\' titles and ' +
+    "In termsMatchedInTitleOrAttributes, a 0 means the term was absent from these results' titles and " +
       'attributes, not that it is absent from the notes.',
     'Pass fuzzy="off" to disable this fallback.',
   ].join(' ');
@@ -380,6 +443,7 @@ export async function handleSearchTool(
         try {
           const note = await client.getNote(preprocessed.query);
           const result = { results: [note] };
+          await attachPreviews(client, result.results, parsed.content_preview_chars);
           return {
             content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
           };
@@ -394,6 +458,7 @@ export async function handleSearchTool(
               parsed.query,
               false
             );
+            await attachPreviews(client, result.results, parsed.content_preview_chars);
             return {
               content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
             };
@@ -409,6 +474,7 @@ export async function handleSearchTool(
         parsed.query,
         true
       );
+      await attachPreviews(client, result.results, parsed.content_preview_chars);
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
