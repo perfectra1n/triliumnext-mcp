@@ -15,7 +15,7 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       file-type:
-        specifier: ^22.2.0
+        specifier: ^22.0.0
         version: 22.2.0
       jose:
         specifier: ^6.2.3
@@ -61,7 +61,7 @@ importers:
         specifier: ^8.53.1
         version: 8.71.2(eslint@10.12.0)(typescript@5.9.3)
       vitest:
-        specifier: ^5.0.0
+        specifier: ^5.0.5
         version: 5.0.5(@types/node@25.9.9)(vite@8.1.5(@types/node@25.9.9)(yaml@2.9.0))
 
 packages:
@@ -1310,10 +1310,6 @@ packages:
 
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
-
-  picomatch@4.0.5:
-    resolution: {integrity: sha512-RvwwcruNjI1ncT5xRakeyS9Lf8lcItv34KD+aif+VH9kduAyfYBipGh12274xtenIPZ119/R9BdTBa8gAwSh0A==}
-    engines: {node: '>=12'}
 
   picomatch@4.0.7:
     resolution: {integrity: sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==}
@@ -2990,8 +2986,6 @@ snapshots:
   path-to-regexp@8.4.2: {}
 
   picocolors@1.1.1: {}
-
-  picomatch@4.0.5: {}
 
   picomatch@4.0.7: {}
 
