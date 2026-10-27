@@ -110,6 +110,9 @@ export TRILIUM_PUBLIC_URL=https://trilium.example.com  # optional; web URL for n
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
 export TRILIUM_MAX_POST_BYTES=500mb  # SSE POST body cap; see "Request body size limits"
+export TRILIUM_REQUEST_TIMEOUT=60s   # per-request ETAPI timeout (ms, or 90s / 2m); see "Reliability"
+export TRILIUM_BUSY_COOLDOWN=30s     # how long a timed-out Trilium is treated as busy
+export TRILIUM_SEARCH_STRATEGY=auto  # search_notes default: auto | fast | full
 
 # Content input (file paths / URLs in attachment and image tool inputs):
 export TRILIUM_ALLOW_LOCAL_FILE_READ=true   # default: true for stdio, false for http
@@ -540,7 +543,16 @@ Trilium indexes a note's links (the `internalLink` relations behind backlinks an
 
 ### Reliability
 
-Every ETAPI request has a timeout (60s; export, import and backup get 5×). Idempotent requests (`GET`/`PUT`/`PATCH`/`DELETE`) are retried up to twice with exponential backoff on network errors and 502/503/504 responses. `POST` is never retried, because replaying `create-note` would duplicate notes. Timeouts are not retried either, since the request may still be running server-side. Failures surface as `TRILIUM_UNREACHABLE` (503) or `TRILIUM_TIMEOUT` (504), each with a suggested next step.
+Every ETAPI request has a timeout (60s by default, set with `TRILIUM_REQUEST_TIMEOUT` / `--request-timeout`; export, import and backup get 5×). Idempotent requests (`GET`/`PUT`/`PATCH`/`DELETE`) are retried up to twice with exponential backoff on network errors and 502/503/504 responses. `POST` is never retried, because replaying `create-note` would duplicate notes. Timeouts are not retried either, since the request may still be running server-side. Failures surface as `TRILIUM_UNREACHABLE` (503) or `TRILIUM_TIMEOUT` (504), each with a suggested next step.
+
+#### Slow searches
+
+Trilium runs its database queries on one thread, and a full-text search scans the text of every note and attachment with `LIKE '%…%'`. On a large instance that can take minutes, and Trilium answers nothing else meanwhile; aborting the HTTP request does not stop the scan. The server limits the damage:
+
+- **Fast search first.** `search_notes` defaults to `strategy: "auto"`: a plain-word query first matches titles and labels (milliseconds) and only searches note bodies when that finds fewer than 5 notes (or fewer than `limit`). Fast-pass responses carry `searchMode: "fast"`. Use `strategy: "full"` to always search bodies or `"fast"` to never, or change the default with `TRILIUM_SEARCH_STRATEGY` / `--search-strategy`. Queries using Trilium syntax (`#label`, `note.*`, `title:`, `OR`) and calls that set `fastSearch` run as written.
+- **Fail fast while Trilium is busy.** After a request times out, that Trilium host is marked busy for `TRILIUM_BUSY_COOLDOWN` (30s by default), across all sessions. Meanwhile any search that reads note bodies is refused at once with `TRILIUM_BUSY` (503) and a retry-after hint instead of queueing another scan, and other requests get a 5s timeout: the first one Trilium answers clears the flag. If the body search of an `auto` search fails this way, the title matches are returned with `partial: true`.
+- **One scan per question.** Identical searches already in flight on the same Trilium with the same token share one request.
+- **Progress.** When a client sends a `progressToken` with a tool call, the server sends a `notifications/progress` heartbeat every 10s while the call runs (plus a message when a search moves on to note bodies), so clients that reset their timeout on progress keep waiting instead of giving up.
 
 Some features need a recent Trilium: `manage_system` `"metrics"` and `get_special_note` `"week_first_day"` need a release with those ETAPI endpoints (0.105+), and `utcDateModified` on create/patch needs a release newer than 0.105. Older servers return clear `METRICS_UNSUPPORTED` / `PROPERTY_NOT_ALLOWED` errors.
 

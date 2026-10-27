@@ -5,6 +5,9 @@ import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
 import { orderDirectionSchema, searchLimitSchema } from './validators.js';
 import { preprocessSearchQuery } from './queryPreprocessor.js';
+import type { ToolContext } from './context.js';
+import type { SearchStrategy } from '../config.js';
+import type { SearchResponse } from '../types/etapi.js';
 import {
   buildFuzzyQuery,
   extractFuzzyTerms,
@@ -18,6 +21,20 @@ import {
 const MAX_PREVIEW_RESULTS = 20;
 const PREVIEW_CONCURRENCY = 5;
 
+/**
+ * Under strategy "auto", a fast (title/label) pass that finds at least this many
+ * notes (or the caller's limit, if smaller) is returned without a body search.
+ */
+export const FAST_FIRST_MIN_RESULTS = 5;
+
+const DEFAULT_SEARCH_STRATEGY: SearchStrategy = 'auto';
+let defaultStrategy: SearchStrategy = DEFAULT_SEARCH_STRATEGY;
+
+/** Process-wide default for search_notes' `strategy` (TRILIUM_SEARCH_STRATEGY). */
+export function configureSearch(options: { defaultStrategy?: SearchStrategy }): void {
+  defaultStrategy = options.defaultStrategy ?? DEFAULT_SEARCH_STRATEGY;
+}
+
 const searchNotesSchema = z.object({
   query: z
     .string()
@@ -29,7 +46,22 @@ const searchNotesSchema = z.object({
         'Boolean: "term1 or term2" for OR between any terms, AND with parentheses. ' +
         'Examples: "meeting", "#project", "#status = active", "meeting #project"'
     ),
-  fastSearch: z.boolean().optional().describe('Enable fast search (skips content search)'),
+  fastSearch: z
+    .boolean()
+    .optional()
+    .describe(
+      'Low-level Trilium flag: true matches titles and labels only. Setting it overrides `strategy`.'
+    ),
+  strategy: z
+    .enum(['auto', 'fast', 'full'])
+    .optional()
+    .describe(
+      'How hard to search. "auto" (default): a plain-word query first matches note titles and labels ' +
+        `only (milliseconds) and searches note bodies only when that finds fewer than ${FAST_FIRST_MIN_RESULTS} notes. ` +
+        '"fast": titles and labels only. "full": always search note bodies too; on a large Trilium this can ' +
+        'take seconds to minutes and blocks Trilium meanwhile. Queries using Trilium syntax (#label, note.*, ' +
+        'title:, OR) always run as written.'
+    ),
   includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
   ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
   ancestorDepth: z
@@ -222,7 +254,13 @@ OR over the individual terms, ranked by relevance. The response then adds \`sear
 spot which term is failing and re-query without it. Ranking uses titles and attributes only, so
 a note matching only in its body is still returned but ranks low: scan past the first result.
 Set \`fuzzy: "off"\` for strict Trilium semantics, or \`"force"\` to skip the exact attempt.
-Never applies to \`#label\`, \`note.*\`, \`id:\`/\`title:\`, or already-OR queries.`,
+Never applies to \`#label\`, \`note.*\`, \`id:\`/\`title:\`, or already-OR queries.
+
+**Speed (\`strategy\`):** by default a plain-word query first matches titles and labels (fast) and only
+searches note bodies when that finds too few notes; such responses carry \`searchMode: "fast"\`. Pass
+\`strategy: "full"\` when the words may appear only inside note text. If Trilium is still busy with an
+earlier slow search, the call fails fast with \`TRILIUM_BUSY\` (or returns the title matches with
+\`partial: true\`): wait the suggested time before retrying.`,
       searchNotesSchema,
       { title: 'Search notes', readOnlyHint: true, openWorldHint: false }
     ),
@@ -378,6 +416,74 @@ async function runFuzzySearch(
 }
 
 /**
+ * Pick how hard to search. Fast-first only applies to plain words: Trilium syntax
+ * runs as written, and an explicit fastSearch flag is the caller's own decision.
+ */
+function resolveStrategy(
+  parsed: SearchArgs,
+  effectiveQuery: string,
+  originalQuery: string
+): SearchStrategy | 'as-is' {
+  if (parsed.fastSearch !== undefined) return 'as-is';
+  const strategy = parsed.strategy ?? defaultStrategy;
+  if (strategy !== 'auto') return strategy;
+  const plain = effectiveQuery === originalQuery && isFuzzyEligible(originalQuery, 'force');
+  return plain ? 'auto' : 'full';
+}
+
+const FAST_NOTE =
+  'Matched note titles and labels only (fast search). Pass strategy:"full" to also search ' +
+  'note bodies; that is slower, and Trilium answers nothing else while it runs.';
+
+/**
+ * The exact (non-fuzzy) search, fast pass first under strategy "auto". A body
+ * search that hits a busy or timed-out Trilium degrades to the title matches
+ * rather than an error, as long as there are some.
+ */
+async function runExactSearch(
+  client: TriliumClient,
+  parsed: SearchArgs,
+  effectiveQuery: string,
+  strategy: SearchStrategy | 'as-is',
+  ctx: ToolContext
+): Promise<SearchResponse & { searchMode?: string; partial?: boolean; note?: string }> {
+  const params = { ...scopeParams(parsed), search: effectiveQuery, limit: parsed.limit };
+  if (strategy === 'full' || strategy === 'as-is') {
+    return client.searchNotes(params);
+  }
+
+  const fast = await client.searchNotes({ ...params, fastSearch: true });
+  if (strategy === 'fast') {
+    return { ...fast, searchMode: 'fast', note: FAST_NOTE };
+  }
+
+  const enough = Math.min(parsed.limit ?? FAST_FIRST_MIN_RESULTS, FAST_FIRST_MIN_RESULTS);
+  if (fast.results.length >= enough) {
+    return { ...fast, searchMode: 'fast', note: FAST_NOTE };
+  }
+
+  ctx.progress?.(
+    `Titles and labels matched ${fast.results.length} note(s); searching note bodies.`
+  );
+  try {
+    return await client.searchNotes(params);
+  } catch (error) {
+    const slow =
+      error instanceof TriliumClientError &&
+      (error.code === 'TRILIUM_BUSY' || error.code === 'TRILIUM_TIMEOUT');
+    if (!slow || fast.results.length === 0) throw error;
+    return {
+      ...fast,
+      searchMode: 'fast',
+      partial: true,
+      note:
+        `Only title and label matches: the note-body search did not finish (${error.message}) ` +
+        'Retry with strategy:"full" later to include notes that mention the words only in their text.',
+    };
+  }
+}
+
+/**
  * Run the search, retrying as a ranked OR when the exact query comes back empty.
  *
  * Both call sites route through here so the parameter list cannot drift between the
@@ -389,20 +495,18 @@ async function runSearchWithFallback(
   parsed: SearchArgs,
   effectiveQuery: string,
   originalQuery: string,
-  allowFuzzy: boolean
+  allowFuzzy: boolean,
+  ctx: ToolContext = {}
 ): Promise<Record<string, unknown>> {
   const mode: FuzzyMode = parsed.fuzzy ?? 'auto';
   const eligible = allowFuzzy && isFuzzyEligible(originalQuery, mode);
+  const strategy = resolveStrategy(parsed, effectiveQuery, originalQuery);
 
   if (mode === 'force' && eligible) {
     return runFuzzySearch(client, parsed, extractFuzzyTerms(originalQuery), true);
   }
 
-  const exact = await client.searchNotes({
-    ...scopeParams(parsed),
-    search: effectiveQuery,
-    limit: parsed.limit,
-  });
+  const exact = await runExactSearch(client, parsed, effectiveQuery, strategy, ctx);
 
   if (mode === 'force') {
     // Forced, but the query is structured — OR-expanding it would produce something
@@ -416,7 +520,8 @@ async function runSearchWithFallback(
     };
   }
 
-  if (!eligible || exact.results.length !== 0) {
+  // strategy "fast" promised not to touch note bodies; the fuzzy retry would.
+  if (!eligible || strategy === 'fast' || exact.results.length !== 0) {
     return exact as unknown as Record<string, unknown>;
   }
 
@@ -432,7 +537,8 @@ async function runSearchWithFallback(
 export async function handleSearchTool(
   client: TriliumClient,
   name: string,
-  args: unknown
+  args: unknown,
+  ctx: ToolContext = {}
 ): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
   switch (name) {
     case 'search_notes': {
@@ -456,7 +562,8 @@ export async function handleSearchTool(
               parsed,
               preprocessed.query,
               parsed.query,
-              false
+              false,
+              ctx
             );
             await attachPreviews(client, result.results, parsed.content_preview_chars);
             return {
@@ -472,7 +579,8 @@ export async function handleSearchTool(
         parsed,
         preprocessed.query,
         parsed.query,
-        true
+        true,
+        ctx
       );
       await attachPreviews(client, result.results, parsed.content_preview_chars);
       return {

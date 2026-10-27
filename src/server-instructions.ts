@@ -14,6 +14,10 @@
  */
 export const SERVER_INSTRUCTIONS = `This server manages a TriliumNext notes tree. Use search_notes and get_note_tree to explore before creating or moving notes, and confirm the parent with the user when unsure.
 
+# Searching
+
+search_notes defaults to strategy "auto": a plain-word query first matches titles and labels (fast) and searches note bodies only when that finds too few notes. A body search can take a long time on a large Trilium and blocks it meanwhile, so use strategy "full" only when the words may appear only inside note text. If a call fails with TRILIUM_BUSY, wait the suggested time instead of retrying at once.
+
 # Note types
 
 Pick the right \`type\` (and \`mime\` where noted) when calling create_note. Most types need no extra setup; the "functional" types below are inert until you also wire attributes via set_attribute.

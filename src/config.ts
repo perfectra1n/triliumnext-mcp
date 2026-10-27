@@ -34,6 +34,8 @@ export function deriveWebBaseUrl(url: string): string {
 
 export type GatewayAuthMode = 'none' | 'bearer' | 'jwt';
 export type MetricsAuthMode = 'gateway' | 'bearer' | 'none';
+/** search_notes strategy: titles/labels first (auto), titles/labels only (fast), or bodies too (full). */
+export type SearchStrategy = 'auto' | 'fast' | 'full';
 
 export interface Config {
   /**
@@ -162,6 +164,16 @@ export interface Config {
   jwtIssuer: string | null;
   jwtAudience: string | null;
   jwtPrincipalClaim: string;
+  /** Per-request ETAPI timeout in ms (default 60000; export/import/backup get 5x). */
+  requestTimeoutMs?: number;
+  /**
+   * How long a Trilium host is treated as busy after a request to it times out
+   * (default 30000 ms). Meanwhile full-text searches are refused and other
+   * requests get a short timeout.
+   */
+  busyCooldownMs?: number;
+  /** Default `strategy` for search_notes. */
+  searchStrategy?: SearchStrategy;
 }
 
 interface ConfigFile {
@@ -192,6 +204,9 @@ interface ConfigFile {
   jwtIssuer?: string;
   jwtAudience?: string;
   jwtPrincipalClaim?: string;
+  requestTimeoutMs?: number;
+  busyCooldownMs?: number;
+  searchStrategy?: string;
 }
 
 interface CliArgs {
@@ -223,6 +238,9 @@ interface CliArgs {
   jwtIssuer?: string;
   jwtAudience?: string;
   jwtPrincipalClaim?: string;
+  requestTimeoutMs?: number;
+  busyCooldownMs?: number;
+  searchStrategy?: string;
 }
 
 function parseCliArgs(args: string[]): CliArgs {
@@ -360,6 +378,22 @@ function parseCliArgs(args: string[]): CliArgs {
         result.jwtPrincipalClaim = nextArg;
         i++;
         break;
+      case '--request-timeout': {
+        const ms = parseDuration(nextArg);
+        if (ms !== undefined) result.requestTimeoutMs = ms;
+        i++;
+        break;
+      }
+      case '--busy-cooldown': {
+        const ms = parseDuration(nextArg);
+        if (ms !== undefined) result.busyCooldownMs = ms;
+        i++;
+        break;
+      }
+      case '--search-strategy':
+        result.searchStrategy = nextArg;
+        i++;
+        break;
       case '--help':
       case '-h':
         result.help = true;
@@ -478,6 +512,16 @@ JWT gateway auth (--gateway-auth jwt):
   --jwt-audience <aud>               Required aud claim (optional).
   --jwt-principal-claim <name>       Which claim names the user. Default: sub.
 
+Backend behaviour:
+  --request-timeout <duration>       Per-request ETAPI timeout (e.g. 60000, 90s, 2m). Default: 60s.
+                                     Export, import and backup get 5x this.
+  --busy-cooldown <duration>         After a request times out, treat that Trilium as busy for
+                                     this long: full-text searches are refused at once and other
+                                     requests get a 5s timeout. Default: 30s.
+  --search-strategy <mode>           Default search_notes strategy: auto (titles and labels
+                                     first, note bodies only if that finds too few), fast, or
+                                     full. Default: auto.
+
   -h, --help                         Show this help message
 
 Environment Variables:
@@ -509,6 +553,9 @@ Environment Variables:
   TRILIUM_JWT_ISSUER                 Required iss claim.
   TRILIUM_JWT_AUDIENCE               Required aud claim.
   TRILIUM_JWT_PRINCIPAL_CLAIM        Claim name carrying the principal (default: sub).
+  TRILIUM_REQUEST_TIMEOUT            Per-request ETAPI timeout (ms, or e.g. 90s, 2m). Default: 60s.
+  TRILIUM_BUSY_COOLDOWN              How long a timed-out Trilium is treated as busy. Default: 30s.
+  TRILIUM_SEARCH_STRATEGY            Default search_notes strategy: auto | fast | full.
 
 Logging:
   LOG_LEVEL                          silent | error | warn | info | debug (default: info)
@@ -551,6 +598,19 @@ function parseBoolean(value: string | undefined): boolean | undefined {
 
 const DEFAULT_MAX_POST_BYTES = 500 * 1024 * 1024;
 const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
+
+/** Accepts milliseconds ("90000") or a suffixed value ("500ms", "90s", "2m"). */
+export function parseDuration(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const match = value.trim().match(/^(\d+(?:\.\d+)?)\s*(ms|s|m)?$/i);
+  if (!match) return undefined;
+  const n = parseFloat(match[1]);
+  const unit = (match[2] ?? 'ms').toLowerCase();
+  const ms = unit === 'm' ? n * 60_000 : unit === 's' ? n * 1000 : n;
+  return ms > 0 ? Math.round(ms) : undefined;
+}
 
 /** Accepts a raw byte count or a suffixed value like "500mb", "10MiB", "2g". */
 function parseSize(value: string | undefined): number | undefined {
@@ -728,6 +788,25 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.jwtPrincipalClaim ??
     'sub';
 
+  const requestTimeoutMs =
+    cli.requestTimeoutMs ??
+    parseDuration(process.env.TRILIUM_REQUEST_TIMEOUT) ??
+    file.requestTimeoutMs ??
+    DEFAULT_REQUEST_TIMEOUT_MS;
+
+  const busyCooldownMs =
+    cli.busyCooldownMs ??
+    parseDuration(process.env.TRILIUM_BUSY_COOLDOWN) ??
+    file.busyCooldownMs ??
+    DEFAULT_BUSY_COOLDOWN_MS;
+
+  const searchStrategyRaw =
+    cli.searchStrategy ??
+    emptyToUndefined(process.env.TRILIUM_SEARCH_STRATEGY) ??
+    file.searchStrategy;
+  const searchStrategy: SearchStrategy =
+    searchStrategyRaw === 'fast' || searchStrategyRaw === 'full' ? searchStrategyRaw : 'auto';
+
   const metricsAuthRaw =
     cli.metricsAuth ?? process.env.TRILIUM_METRICS_AUTH ?? file.metricsAuth ?? undefined;
   let metricsAuth: MetricsAuthMode;
@@ -856,5 +935,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     jwtIssuer,
     jwtAudience,
     jwtPrincipalClaim,
+    requestTimeoutMs,
+    busyCooldownMs,
+    searchStrategy,
   };
 }

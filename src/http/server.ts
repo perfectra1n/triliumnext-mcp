@@ -12,7 +12,7 @@ import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index
 import { randomUUID } from 'node:crypto';
 
 import { normalizeServerUrl, deriveWebBaseUrl, type Config } from '../config.js';
-import { TriliumClient, TriliumClientError } from '../client/trilium.js';
+import { TriliumClient, TriliumClientError, clientOptionsFromConfig } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
 import { JwtAuth } from './jwtAuth.js';
@@ -402,7 +402,12 @@ async function handleStreamable(
   // multi-tenant mode each connection's link base is derived from its own URL.
   const webBaseUrl =
     !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
-  const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
+  const client = new TriliumClient(
+    triliumUrl,
+    clientToken,
+    webBaseUrl,
+    clientOptionsFromConfig(config)
+  );
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
   } catch (err) {
@@ -609,7 +614,12 @@ async function handleSseConnect(
   // multi-tenant mode each connection's link base is derived from its own URL.
   const webBaseUrl =
     !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
-  const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl);
+  const client = new TriliumClient(
+    triliumUrl,
+    clientToken,
+    webBaseUrl,
+    clientOptionsFromConfig(config)
+  );
   try {
     await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
   } catch (err) {

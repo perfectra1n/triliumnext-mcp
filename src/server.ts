@@ -3,7 +3,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { ZodError } from 'zod';
 
-import { TriliumClient, TriliumClientError } from './client/trilium.js';
+import { TriliumClient, TriliumClientError, clientOptionsFromConfig } from './client/trilium.js';
 import {
   formatTriliumError,
   formatZodError,
@@ -18,7 +18,7 @@ import type { Config } from './config.js';
 import { deriveWebBaseUrl } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
-import { registerSearchTools, handleSearchTool } from './tools/search.js';
+import { registerSearchTools, handleSearchTool, configureSearch } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from './tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
@@ -38,7 +38,15 @@ export interface McpServerContext {
    * tool_call audit logs and, when enabled, into per-tenant metric labels.
    */
   principal?: string;
+  /**
+   * How often to send a progress heartbeat during a tool call whose request
+   * carried a progressToken (default 10s). Clients that reset their request
+   * timeout on progress then keep waiting on a slow Trilium instead of giving up.
+   */
+  progressIntervalMs?: number;
 }
+
+const DEFAULT_PROGRESS_INTERVAL_MS = 10_000;
 
 /**
  * Builds a fully-configured MCP Server bound to the given Trilium client.
@@ -47,7 +55,13 @@ export interface McpServerContext {
  * state from other tenants.
  */
 export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Server {
-  const { logger, sessionId, metrics, principal } = ctx;
+  const {
+    logger,
+    sessionId,
+    metrics,
+    principal,
+    progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
+  } = ctx;
   const server = new Server(
     {
       name: 'triliumnext-mcp',
@@ -107,9 +121,31 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     }
   };
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
     const t0 = performance.now();
+
+    // MCP progress notifications, only when the client asked with a progressToken.
+    const progressToken = request.params._meta?.progressToken;
+    let progressCount = 0;
+    const progress = (message: string): void => {
+      if (progressToken === undefined) return;
+      progressCount += 1;
+      void extra
+        .sendNotification({
+          method: 'notifications/progress',
+          params: { progressToken, progress: progressCount, message },
+        })
+        .catch(() => undefined);
+    };
+    const heartbeat =
+      progressToken === undefined
+        ? undefined
+        : setInterval(() => {
+            const waited = Math.round((performance.now() - t0) / 1000);
+            progress(`Still working on ${name} (${waited}s), waiting for Trilium.`);
+          }, progressIntervalMs);
+    heartbeat?.unref?.();
     logger.debug('tool_call_args', {
       session: sessionId,
       principal,
@@ -128,7 +164,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
         return result;
       }
 
-      result = await handleSearchTool(client, name, args);
+      result = await handleSearchTool(client, name, args, { progress });
       if (result !== null) {
         recordToolCall(name, t0, { ok: true });
         return result;
@@ -203,6 +239,8 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
         });
       }
       return formatErrorForMCP(structured);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
     }
   });
 
@@ -217,7 +255,8 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
   const client = new TriliumClient(
     config.triliumUrl,
     config.triliumToken,
-    config.publicUrl ?? deriveWebBaseUrl(config.triliumUrl)
+    config.publicUrl ?? deriveWebBaseUrl(config.triliumUrl),
+    clientOptionsFromConfig(config)
   );
   const server = buildMcpServer(client, { logger, sessionId: 'stdio' });
   const transport = new StdioServerTransport();
@@ -235,6 +274,7 @@ export async function createServer(config: Config, logger: Logger): Promise<void
     maxBytes: config.maxContentFetchBytes,
     fetchTimeoutMs: 30_000,
   });
+  configureSearch({ defaultStrategy: config.searchStrategy });
 
   if (config.transport === 'stdio') {
     await startStdio(config, logger);
