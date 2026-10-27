@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureContentInput } from '../../src/tools/contentInput.js';
 import { registerNoteTools, handleNoteTool } from '../../src/tools/notes.js';
-import { registerSearchTools, handleSearchTool } from '../../src/tools/search.js';
+import { registerSearchTools, handleSearchTool, configureSearch } from '../../src/tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from '../../src/tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import {
@@ -749,6 +749,10 @@ describe('Search tools', () => {
 // ============================================================================
 
 describe('search_notes fuzzy fallback', () => {
+  // These tests pin the exact-then-fuzzy call sequence, so run without fast-first.
+  beforeEach(() => configureSearch({ defaultStrategy: 'full' }));
+  afterEach(() => configureSearch({}));
+
   function searchNote(title: string, extra: Record<string, unknown> = {}) {
     return {
       noteId: `id_${title.replace(/\W+/g, '_')}`,

@@ -37,7 +37,9 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   TRILIUM_UNREACHABLE:
     'The MCP server could not connect to Trilium (it already retried). Check that Trilium is running and that TRILIUM_URL points at its /etapi endpoint.',
   TRILIUM_TIMEOUT:
-    'Trilium accepted the connection but did not answer in time. The operation may still complete server-side — re-read the note before retrying a write.',
+    'Trilium accepted the connection but did not answer in time, usually because a slow full-text search is holding its database. The operation may still complete server-side — re-read the note before retrying a write. For a short while, further calls to this Trilium fail fast with TRILIUM_BUSY.',
+  TRILIUM_BUSY:
+    'Trilium is still busy with an earlier slow request (usually a full-text search) and is not answering. Wait the time given in the message, then retry. Avoid strategy:"full" searches until it recovers: they would queue behind the slow one.',
   ETAPI_TOKEN_INVALID:
     'The API token is invalid or expired. Check your TRILIUM_TOKEN configuration.',
 };

@@ -1,4 +1,13 @@
+import { createHash } from 'node:crypto';
 import { fileTypeFromBuffer } from 'file-type';
+import {
+  clearBusy,
+  dedupe,
+  getBusy,
+  markBusy,
+  retryAfterSeconds,
+  type BusyState,
+} from './hostGuard.js';
 import type {
   Note,
   NoteWithBranch,
@@ -49,6 +58,25 @@ export interface TriliumClientOptions {
   maxRetries?: number;
   /** Base backoff between retries in ms, doubled each attempt (default 250). */
   retryDelayMs?: number;
+  /**
+   * How long a Trilium host stays marked busy after a request to it times out
+   * (default 30s). Shared by every client for that host; see hostGuard.ts.
+   */
+  busyCooldownMs?: number;
+  /** Timeout for cheap requests while the host is marked busy (default 5s). */
+  busyProbeTimeoutMs?: number;
+}
+
+export const DEFAULT_TIMEOUT_MS = 60_000;
+export const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
+export const DEFAULT_BUSY_PROBE_TIMEOUT_MS = 5_000;
+
+/** Map server config onto client options; unset fields keep the client defaults. */
+export function clientOptionsFromConfig(config: {
+  requestTimeoutMs?: number;
+  busyCooldownMs?: number;
+}): TriliumClientOptions {
+  return { timeoutMs: config.requestTimeoutMs, busyCooldownMs: config.busyCooldownMs };
 }
 
 /**
@@ -69,6 +97,10 @@ export class TriliumClient {
   private readonly timeoutMs: number;
   private readonly maxRetries: number;
   private readonly retryDelayMs: number;
+  private readonly busyCooldownMs: number;
+  private readonly busyProbeTimeoutMs: number;
+  /** In-flight requests are only shared between callers holding the same token. */
+  private readonly dedupeScope: string;
 
   /**
    * @param baseUrl  ETAPI base URL (e.g. `http://host:port/etapi`).
@@ -86,9 +118,47 @@ export class TriliumClient {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.token = token;
     this.webBaseUrl = (webBaseUrl ?? baseUrl).replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
-    this.timeoutMs = options.timeoutMs ?? 60_000;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.maxRetries = options.maxRetries ?? 2;
     this.retryDelayMs = options.retryDelayMs ?? 250;
+    this.busyCooldownMs = options.busyCooldownMs ?? DEFAULT_BUSY_COOLDOWN_MS;
+    this.busyProbeTimeoutMs = options.busyProbeTimeoutMs ?? DEFAULT_BUSY_PROBE_TIMEOUT_MS;
+    const tokenTag = createHash('sha256').update(token).digest('hex').slice(0, 16);
+    this.dedupeScope = `${this.baseUrl}|${tokenTag}`;
+  }
+
+  /**
+   * Seconds until this client's Trilium host stops being treated as busy, or
+   * null when it is not marked busy.
+   */
+  busyRetryAfterSeconds(): number | null {
+    const state = getBusy(this.baseUrl);
+    return state ? retryAfterSeconds(state) : null;
+  }
+
+  private busyError(state: BusyState): TriliumClientError {
+    const since = Math.round((Date.now() - state.since) / 1000);
+    return new TriliumClientError(
+      503,
+      'TRILIUM_BUSY',
+      `Trilium at ${this.baseUrl} is busy: ${state.reason} timed out ${since}s ago and Trilium ` +
+        `has not answered since. Try again in about ${retryAfterSeconds(state)}s.`
+    );
+  }
+
+  /**
+   * A timeout means Trilium is wedged, usually by one slow full-text search
+   * holding its single SQL thread. Flag the host so the next callers fail fast.
+   */
+  private onTimeout(
+    busyBefore: BusyState | undefined,
+    what: string,
+    message: string
+  ): TriliumClientError {
+    const state = markBusy(this.baseUrl, this.busyCooldownMs, what);
+    return busyBefore
+      ? this.busyError(state)
+      : new TriliumClientError(504, 'TRILIUM_TIMEOUT', message);
   }
 
   /** The user-facing Trilium web-UI base URL used for note links. */
@@ -168,6 +238,14 @@ export class TriliumClient {
       responseType?: 'json' | 'text' | 'arraybuffer';
       /** Multiplier on the client timeout for slow endpoints (export/import). */
       timeoutFactor?: number;
+      /**
+       * Slow on Trilium's side (a full-text search). Refused outright while the
+       * host is marked busy, because it would queue behind the request that is
+       * already holding Trilium's database.
+       */
+      expensive?: boolean;
+      /** Share the response with identical in-flight GETs made with the same token. */
+      dedupe?: boolean;
     } = {}
   ): Promise<T> {
     const {
@@ -176,6 +254,7 @@ export class TriliumClient {
       contentType = 'application/json',
       responseType = 'json',
       timeoutFactor = 1,
+      expensive = false,
     } = options;
 
     let url = `${this.baseUrl}${path}`;
@@ -214,8 +293,36 @@ export class TriliumClient {
           : undefined,
     };
 
+    const send = (): Promise<T> =>
+      this.send<T>(method, path, url, init, { responseType, timeoutFactor, expensive });
+    if (options.dedupe && method === 'GET') {
+      // Each caller gets its own copy: tool handlers decorate results in place.
+      return dedupe(`${this.dedupeScope}|${url}`, send).then((value) => structuredClone(value));
+    }
+    return send();
+  }
+
+  private async send<T>(
+    method: string,
+    path: string,
+    url: string,
+    init: RequestInit,
+    opts: {
+      responseType: 'json' | 'text' | 'arraybuffer';
+      timeoutFactor: number;
+      expensive: boolean;
+    }
+  ): Promise<T> {
+    const { responseType, timeoutFactor, expensive } = opts;
+    const busyBefore = getBusy(this.baseUrl);
+    if (busyBefore && expensive) {
+      throw this.busyError(busyBefore);
+    }
     const retries = IDEMPOTENT_METHODS.has(method) ? this.maxRetries : 0;
-    const timeoutMs = this.timeoutMs * timeoutFactor;
+    const fullTimeoutMs = this.timeoutMs * timeoutFactor;
+    // While the host is busy a cheap request gets a short leash: it either
+    // squeezes through (and clears the flag) or fails fast instead of hanging.
+    const timeoutMs = busyBefore ? Math.min(fullTimeoutMs, this.busyProbeTimeoutMs) : fullTimeoutMs;
     let response: Response;
     let attempt = 0;
     for (; ; attempt++) {
@@ -230,17 +337,22 @@ export class TriliumClient {
           await sleep(this.retryDelayMs * 2 ** attempt);
           continue;
         }
-        throw timedOut
-          ? new TriliumClientError(
-              504,
-              'TRILIUM_TIMEOUT',
-              `Trilium did not respond to ${method} ${path} within ${timeoutMs}ms`
-            )
-          : new TriliumClientError(
-              503,
-              'TRILIUM_UNREACHABLE',
-              `Could not reach Trilium at ${this.baseUrl}: ${describeNetworkError(error)}`
-            );
+        if (timedOut) {
+          throw this.onTimeout(
+            busyBefore,
+            `${method} ${path}`,
+            `Trilium did not respond to ${method} ${path} within ${timeoutMs}ms`
+          );
+        }
+        throw new TriliumClientError(
+          503,
+          'TRILIUM_UNREACHABLE',
+          `Could not reach Trilium at ${this.baseUrl}: ${describeNetworkError(error)}`
+        );
+      }
+      // Trilium itself answered, so whatever was holding it has finished.
+      if (busyBefore && !RETRYABLE_STATUSES.has(response.status)) {
+        clearBusy(this.baseUrl);
       }
       if (RETRYABLE_STATUSES.has(response.status) && attempt < retries) {
         await response.body?.cancel().catch(() => undefined);
@@ -291,9 +403,9 @@ export class TriliumClient {
         error instanceof Error &&
         (error.name === 'TimeoutError' || error.name === 'AbortError')
       ) {
-        throw new TriliumClientError(
-          504,
-          'TRILIUM_TIMEOUT',
+        throw this.onTimeout(
+          busyBefore,
+          `${method} ${path}`,
           `Trilium's response to ${method} ${path} did not finish within ${timeoutMs}ms`
         );
       }
@@ -355,6 +467,11 @@ export class TriliumClient {
 
   async searchNotes(params: SearchParams): Promise<SearchResponse> {
     return this.request<SearchResponse>('GET', '/notes', {
+      // Anything that reads note bodies is a LIKE scan over every note and
+      // attachment on Trilium's single SQL thread. fastSearch skips that,
+      // unless the query names note.content itself.
+      expensive: !params.fastSearch || /note\.content/i.test(params.search),
+      dedupe: true,
       query: {
         search: params.search,
         fastSearch: params.fastSearch,
