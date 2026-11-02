@@ -15,10 +15,10 @@ importers:
         specifier: ^9.0.0
         version: 9.0.0
       file-type:
-        specifier: ^22.0.0
-        version: 22.2.0
+        specifier: ^22.3.0
+        version: 22.3.0
       jose:
-        specifier: ^6.2.14
+        specifier: ^6.2.3
         version: 6.2.14
       marked:
         specifier: ^18.0.0
@@ -349,8 +349,8 @@ packages:
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
-  '@tokenizer/inflate@0.5.1':
-    resolution: {integrity: sha512-56U2O6fDLFtqokwWh597IdeUgtM7j+TT9tb1soybhgA6cy163gAcVmoQr8H4Ud/CkgCkViwcuLyqtn6wYqw59Q==}
+  '@tokenizer/inflate@0.6.0':
+    resolution: {integrity: sha512-+0RDxhBkyT9xMnGdJAwmats9yxRLR8ypJrQgrnLqOu4Gv/aHlnxYgdGVy2QTwvBl6IF/w2Hr+ZNirH+iMUbVZA==}
     engines: {node: '>=18'}
 
   '@tokenizer/token@0.3.0':
@@ -913,8 +913,8 @@ packages:
   file-entry-cache@11.1.5:
     resolution: {integrity: sha512-+PFTHITI08JIGhnNpGNI8T8inUpgZfk3GNEqfT9R2zZV2iFXg3CvqzSl/uEhs7TSGujYRELEANyDvS8Fj7+S7Q==}
 
-  file-type@22.2.0:
-    resolution: {integrity: sha512-XmEVJsRpQMVYC+sWFW+FKAVo2P7/lPctDdWH4UQ1r6oxhdrTobnowdM3z+ZJ93a4J8D3yDpxX0bEvRuFev0vUQ==}
+  file-type@22.3.0:
+    resolution: {integrity: sha512-PrPedgnnWl5bWz3JHgar0QSzRvzeyFh7dZ9JpYOgcPZu4KALS9zw4MMa6qXRYyjeBsAlpaWB2boLuG991+0HIQ==}
     engines: {node: '>=22'}
 
   finalhandler@2.1.1:
@@ -1519,8 +1519,8 @@ packages:
     resolution: {integrity: sha512-yDPMNjp4WyfYBkHnjIRLfca1i6KMyGCtsVgoKe/z1+6vukgaENdgGBZt+ZmKPc4gavvEZ5OgHfHdrazhgNyG7w==}
     engines: {node: '>=12'}
 
-  strtok3@10.5.0:
-    resolution: {integrity: sha512-PgAsgIuizbZN/r4+g4UNvbVCTpJWdoIdI71kIWwKmdIH0vJ0q7ylMVGU8PWj2s9O98y4MtFWiDTIrtNukZMMgQ==}
+  strtok3@10.6.3:
+    resolution: {integrity: sha512-MD8mENgyXMr2mDaDfzP3RWYDSyYQxIIou7HhCiCJiBekrsoDtUG0id3vYnjDfY9ndOEbazFXe13Qw6u/1AB8ew==}
     engines: {node: '>=18'}
 
   tar-fs@2.1.5:
@@ -2026,9 +2026,10 @@ snapshots:
 
   '@rolldown/pluginutils@1.0.1': {}
 
-  '@tokenizer/inflate@0.5.1':
+  '@tokenizer/inflate@0.6.0':
     dependencies:
       debug: 4.4.3
+      strtok3: 10.6.3
       token-types: 6.1.2
     transitivePeerDependencies:
       - supports-color
@@ -2659,10 +2660,10 @@ snapshots:
     dependencies:
       flat-cache: 6.1.23
 
-  file-type@22.2.0:
+  file-type@22.3.0:
     dependencies:
-      '@tokenizer/inflate': 0.5.1
-      strtok3: 10.5.0
+      '@tokenizer/inflate': 0.6.0
+      strtok3: 10.6.3
       token-types: 6.1.2
       uint8array-extras: 1.6.0
     transitivePeerDependencies:
@@ -3263,7 +3264,7 @@ snapshots:
     dependencies:
       ansi-regex: 6.2.2
 
-  strtok3@10.5.0:
+  strtok3@10.6.3:
     dependencies:
       '@tokenizer/token': 0.3.0
 
