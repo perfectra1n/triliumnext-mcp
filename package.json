@@ -41,7 +41,7 @@
     "@eslint/js": "^10.0.0",
     "@types/diff": "^8.0.0",
     "@types/marked": "^6.0.0",
-    "@types/node": "^25.0.9",
+    "@types/node": "^26.0.0",
     "@types/turndown": "^5.0.6",
     "eslint": "^10.0.0",
     "prettier": "^3.8.1",
