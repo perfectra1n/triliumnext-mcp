@@ -109,3 +109,47 @@ describe('RateLimiter', () => {
     expect(d.retryAfter).toBe(2);
   });
 });
+
+describe('RateLimiter — split pre/post-auth axes and sweeping', () => {
+  it('checkIp never creates token buckets, even with an Authorization header', () => {
+    const rl = new RateLimiter({ rps: 1, burst: 2, now: () => 0 });
+    expect(rl.checkIp(req('1.2.3.4', 'Bearer garbage')).allowed).toBe(true);
+    expect(rl.inspect()).toEqual({ ips: 1, tokens: 0 });
+  });
+
+  it('checkToken limits per credential across IPs', () => {
+    const rl = new RateLimiter({ rps: 1, burst: 1, now: () => 0 });
+    expect(rl.checkToken(req('1.1.1.1', 'Bearer A')).allowed).toBe(true);
+    const d = rl.checkToken(req('2.2.2.2', 'Bearer A'));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe('token');
+    // Explicit credential overrides the header.
+    expect(rl.checkToken(req('2.2.2.2', 'Bearer A'), 'B').allowed).toBe(true);
+  });
+
+  it('evicts drained buckets once they have been idle long enough to refill', () => {
+    let now = 0;
+    const rl = new RateLimiter({ rps: 1, burst: 2, now: () => now, idleSweepMs: 10_000 });
+    // Drain two IP buckets completely; their stored token count is 0.
+    rl.check(req('1.1.1.1', 'Bearer A'));
+    rl.check(req('1.1.1.1', 'Bearer A'));
+    rl.check(req('2.2.2.2'));
+    rl.check(req('2.2.2.2'));
+    expect(rl.inspect()).toEqual({ ips: 2, tokens: 1 });
+    // After idling past the sweep interval, the next request triggers a
+    // sweep that must evict them even though their stored tokens are stale.
+    now = 20_000;
+    rl.check(req('3.3.3.3'));
+    expect(rl.inspect()).toEqual({ ips: 1, tokens: 0 });
+  });
+
+  it('does not evict a bucket that is still refilling', () => {
+    let now = 0;
+    // 0.0001 rps -> 10_000s to refill one token.
+    const rl = new RateLimiter({ rps: 0.0001, burst: 1, now: () => now, idleSweepMs: 1000 });
+    rl.check(req('1.1.1.1'));
+    now = 5000;
+    rl.check(req('9.9.9.9'));
+    expect(rl.check(req('1.1.1.1')).allowed).toBe(false);
+  });
+});

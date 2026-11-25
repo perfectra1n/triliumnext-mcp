@@ -309,6 +309,57 @@ describe('preprocessSearchQuery', () => {
       // "title:" alone — no value, falls through
       expect(preprocessSearchQuery('title:')).toEqual({ type: 'search', query: 'title:' });
     });
+
+    it('keeps a trailing #label outside the title text', () => {
+      expect(preprocessSearchQuery('title:meeting #project')).toEqual({
+        type: 'search',
+        query: 'note.title *=* meeting #project',
+      });
+      expect(preprocessSearchQuery('title:weekly meeting #project ~owner')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "weekly meeting" #project ~owner',
+      });
+    });
+
+    it('keeps trailing filters per OR segment', () => {
+      expect(preprocessSearchQuery('title:alpha #a or title:beta')).toEqual({
+        type: 'search',
+        query: 'note.title *=* alpha #a OR note.title *=* beta',
+      });
+    });
+
+    it('escapes embedded quotes instead of emitting a broken literal', () => {
+      expect(preprocessSearchQuery('title:say "hi" now')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "say hi now"',
+      });
+      expect(preprocessSearchQuery('title:5" ruler')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "5\\" ruler"',
+      });
+      expect(preprocessSearchQuery('title:a"b')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "a\\"b"',
+      });
+    });
+
+    it('treats only a single fully-quoted phrase as already quoted', () => {
+      expect(preprocessSearchQuery('title:"a b" "c d"')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "a b c d"',
+      });
+    });
+
+    it('handles a space after title:', () => {
+      expect(preprocessSearchQuery('title: meeting')).toEqual({
+        type: 'search',
+        query: 'note.title *=* meeting',
+      });
+    });
+
+    it('falls through when only filters follow title:', () => {
+      expect(preprocessSearchQuery('title: #project').query).toBe('title: #project');
+    });
   });
 });
 

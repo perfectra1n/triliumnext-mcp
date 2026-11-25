@@ -3,7 +3,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
-import { orderDirectionSchema, searchLimitSchema } from './validators.js';
+import { entityIdSchema, orderDirectionSchema, searchLimitSchema } from './validators.js';
 import { preprocessSearchQuery } from './queryPreprocessor.js';
 import type { ToolContext } from './context.js';
 import type { SearchStrategy } from '../config.js';
@@ -19,7 +19,12 @@ import {
 
 /** How many results get a content preview; each one costs a content fetch. */
 const MAX_PREVIEW_RESULTS = 20;
-const PREVIEW_CONCURRENCY = 5;
+/** Max in-flight ETAPI requests for preview and tree fan-out. */
+const FETCH_CONCURRENCY = 5;
+/** Results returned when the caller passes no limit. */
+export const DEFAULT_SEARCH_LIMIT = 50;
+/** searchLimitSchema's ceiling; over-fetching by one must not exceed it. */
+const MAX_SEARCH_LIMIT = 10000;
 
 /**
  * Under strategy "auto", a fast (title/label) pass that finds at least this many
@@ -39,31 +44,23 @@ const searchNotesSchema = z.object({
   query: z
     .string()
     .min(1, 'Search query is required')
-    .describe(
-      'Trilium search query. Fulltext: "word1 word2" (implicit AND), "exact phrase" (quotes). ' +
-        'Labels: #label, #label=value, #!label (negation). Relations: ~relation. ' +
-        'Operators: = != *=* =* *= >= > < <=. ' +
-        'Boolean: "term1 or term2" for OR between any terms, AND with parentheses. ' +
-        'Examples: "meeting", "#project", "#status = active", "meeting #project"'
-    ),
+    .describe('Trilium search query; see tool description for syntax.'),
   fastSearch: z
     .boolean()
     .optional()
-    .describe(
-      'Low-level Trilium flag: true matches titles and labels only. Setting it overrides `strategy`.'
-    ),
+    .describe('Low-level flag: true matches titles and labels only. Overrides `strategy`.'),
   strategy: z
     .enum(['auto', 'fast', 'full'])
     .optional()
     .describe(
-      'How hard to search. "auto" (default): a plain-word query first matches note titles and labels ' +
-        `only (milliseconds) and searches note bodies only when that finds fewer than ${FAST_FIRST_MIN_RESULTS} notes. ` +
-        '"fast": titles and labels only. "full": always search note bodies too; on a large Trilium this can ' +
-        'take seconds to minutes and blocks Trilium meanwhile. Queries using Trilium syntax (#label, note.*, ' +
-        'title:, OR) always run as written.'
+      '"auto" (default): plain-word queries match titles/labels first and search note bodies only ' +
+        `when that finds fewer than ${FAST_FIRST_MIN_RESULTS} notes. "fast": titles/labels only. "full": always ` +
+        'search bodies (slow on large Trilium; blocks it meanwhile). Trilium-syntax queries run as written.'
     ),
   includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
-  ancestorNoteId: z.string().optional().describe('Search only in subtree of this note'),
+  ancestorNoteId: entityIdSchema
+    .optional()
+    .describe('Restrict results to descendants of this note (combine with ancestorDepth).'),
   ancestorDepth: z
     .string()
     .regex(
@@ -85,7 +82,15 @@ const searchNotesSchema = z.object({
   orderDirection: orderDirectionSchema.optional().describe('Order direction'),
   limit: searchLimitSchema
     .optional()
-    .describe('Maximum number of results. No default — pass one to bound large result sets.'),
+    .describe(
+      `Maximum results (default ${DEFAULT_SEARCH_LIMIT}). The response reports truncated:true when more matched.`
+    ),
+  verbose: z
+    .boolean()
+    .optional()
+    .describe(
+      'Return full note metadata (child/branch IDs, blobId, UTC dates, isInheritable). Default false.'
+    ),
   debug: z
     .boolean()
     .optional()
@@ -106,19 +111,13 @@ const searchNotesSchema = z.object({
     .optional()
     .default('auto')
     .describe(
-      'Fallback behavior when the query finds nothing. "auto" (default): if the exact query returns ZERO ' +
-        'results and the query is plain fulltext with 2+ terms, retry it as an OR over the individual terms, ' +
-        'ranked by title/attribute relevance — the response then carries searchMode:"fuzzy" and fuzzyTerms. ' +
-        '"off": never retry; exact Trilium semantics only. "force": go straight to the ranked OR search. ' +
-        'Never applies to attribute (#label), property (note.*), id:/title:-prefixed, or already-OR queries.'
+      '"auto" (default): a plain multi-word query with zero results is retried as a ranked OR over its ' +
+        'words. "off": exact only. "force": skip the exact attempt.'
     ),
 });
 
 const getNoteTreeSchema = z.object({
-  noteId: z
-    .string()
-    .min(1, 'Note ID is required')
-    .describe('ID of the parent note (use "root" for the root note)'),
+  noteId: entityIdSchema.describe('ID of the note to expand ("root" for the top of the tree).'),
   depth: z
     .number()
     .int('Depth must be an integer')
@@ -138,9 +137,12 @@ type NoteLike = Awaited<ReturnType<TriliumClient['getNote']>>;
 
 interface TreeNode {
   noteId: string;
+  /** Branch linking this node to the parent it was reached from. */
+  branchId?: string;
   title?: string;
   type?: string;
   childCount?: number;
+  /** Branch IDs of the visible children, index-aligned with the children / childNoteIds. */
   childBranchIds?: string[];
   systemChildrenSkipped?: number;
   childNoteIds?: string[];
@@ -148,51 +150,78 @@ interface TreeNode {
   error?: string;
 }
 
+/** Run `fn` over `items` with at most `limit` calls in flight, preserving order. */
+async function mapLimited<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    while (next < items.length) {
+      const i = next++;
+      out[i] = await fn(items[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
 async function buildTree(
   client: TriliumClient,
   note: NoteLike,
   depth: number,
   includeSystem: boolean,
-  budget: { remaining: number; truncated: boolean }
+  budget: { remaining: number; truncated: boolean },
+  branchId?: string
 ): Promise<TreeNode> {
   const allChildIds = note.childNoteIds ?? [];
-  const visibleIds = includeSystem ? allChildIds : allChildIds.filter((id) => !id.startsWith('_'));
+  const allBranchIds = note.childBranchIds ?? [];
+  // Filter note IDs and branch IDs together so index i of each still refers to
+  // the same child after system children are dropped.
+  const visible = allChildIds
+    .map((noteId, i) => ({ noteId, branchId: allBranchIds[i] as string | undefined }))
+    .filter((c) => includeSystem || !c.noteId.startsWith('_'));
 
   const node: TreeNode = {
     noteId: note.noteId,
+    ...(branchId !== undefined ? { branchId } : {}),
     title: note.title,
     type: note.type,
-    childCount: visibleIds.length,
-    childBranchIds: note.childBranchIds,
+    childCount: visible.length,
+    childBranchIds: visible.map((c) => c.branchId).filter((b): b is string => b !== undefined),
   };
-  const skipped = allChildIds.length - visibleIds.length;
+  const skipped = allChildIds.length - visible.length;
   if (skipped > 0) {
     node.systemChildrenSkipped = skipped;
   }
 
-  if (depth <= 0 || visibleIds.length === 0) {
-    if (visibleIds.length > 0) {
-      node.childNoteIds = visibleIds;
+  if (depth <= 0 || visible.length === 0) {
+    if (visible.length > 0) {
+      node.childNoteIds = visible.map((c) => c.noteId);
     }
     return node;
   }
 
-  const toFetch = visibleIds.slice(0, Math.max(0, budget.remaining));
-  if (toFetch.length < visibleIds.length) {
+  const toFetch = visible.slice(0, Math.max(0, budget.remaining));
+  if (toFetch.length < visible.length) {
     budget.truncated = true;
   }
   budget.remaining -= toFetch.length;
 
-  node.children = await Promise.all(
-    toFetch.map(async (id): Promise<TreeNode> => {
-      try {
-        const child = await client.getNote(id);
-        return await buildTree(client, child, depth - 1, includeSystem, budget);
-      } catch (error) {
-        return { noteId: id, error: error instanceof Error ? error.message : String(error) };
-      }
-    })
-  );
+  node.children = await mapLimited(toFetch, FETCH_CONCURRENCY, async (c): Promise<TreeNode> => {
+    try {
+      const child = await client.getNote(c.noteId);
+      return await buildTree(client, child, depth - 1, includeSystem, budget, c.branchId);
+    } catch (error) {
+      return {
+        noteId: c.noteId,
+        ...(c.branchId !== undefined ? { branchId: c.branchId } : {}),
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  });
   return node;
 }
 
@@ -200,82 +229,30 @@ export function registerSearchTools(): Tool[] {
   return [
     defineTool(
       'search_notes',
-      `Search notes using full-text search and/or attribute filters. Supports Trilium search syntax. Use this tool to find existing notes, discover the note hierarchy, and identify the best parent before creating or moving notes.
+      `Find notes by full-text and/or attribute filters (Trilium search syntax). Returns metadata only (noteId, title, type, mime, dateModified, parentNoteIds, attributes); read bodies with get_note, or set content_preview_chars for short previews.
 
-**Full-text search:**
-- \`rings tolkien\` - Both terms must appear (implicit AND between words)
-- \`"exact phrase"\` - Use quotes for exact phrase matching
+Syntax:
+- \`rings tolkien\` — all words must appear (AND); \`"exact phrase"\` for phrases.
+- \`#label\`, \`#!label\` (without), \`#year >= 1950\`, \`#name *=* john\`, \`~relation\`; combine with fulltext by spaces (AND).
+- Operators: = != *=* (contains) =* (starts) *= (ends) %= (regex) >= > < <=. Group with parentheses and AND/OR, e.g. \`(#year >= 1950 AND #year <= 1960)\`, \`#book or #article\`.
+- \`a or b\` between plain words is rewritten to match note content only (not titles); for titles use \`title:a or title:b\`.
+- \`title:weekly meeting\` — title contains the text (auto-quoted; trailing #label/~relation filters still apply).
+- \`id:abc123\` — direct lookup by note ID. A lone 12-character alphanumeric token containing a digit is also tried as an ID first.
+- Properties: note.title, note.dateCreated, note.dateModified, note.parents.title, note.ancestors.title.
 
-**Attribute filters (labels and relations):**
-- \`#labelname\` - Notes with label
-- \`#!labelname\` - Notes WITHOUT label
-- \`#year = 1954\` - Label with exact value
-- \`#year >= 1950\` - Numeric comparison (>=, >, <, <=)
-- \`#name *=* john\` - Label value contains "john"
-- \`~relationname\` - Notes with relation
-
-**Combining searches:**
-- \`tolkien #book\` - Fulltext AND attribute (space = implicit AND)
-- \`meeting or project\` - OR between fulltext terms
-- \`#book or #article\` - OR between attributes
-- \`(#year >= 1950 AND #year <= 1960)\` - AND with parentheses for grouping
-
-**Direct note lookup:**
-- \`id:abc123\` - Look up a note directly by its ID (any 4-32 char ID, including digit-free ones)
-- Single 12-character alphanumeric tokens containing a digit are auto-detected as note IDs (e.g., \`abc123def456\`); if no note has that ID, the query falls back to a normal search
-
-**Title search:**
-- \`title:meeting\` - Search notes by title containing "meeting"
-- \`title:meeting notes\` - Title containing "meeting notes" (auto-quoted)
-- \`title:"exact title"\` - Title containing exact phrase
-- \`title:meeting or title:project\` - Title OR search
-
-**String operators:** = (exact), != (not equal), *=* (contains), =* (starts with), *= (ends with), %= (regex)
-
-**Note properties:** note.title, note.dateCreated, note.dateModified, note.parents.title, note.ancestors.title
-
-**Examples:**
-- \`meeting\` - Notes containing "meeting"
-- \`#project\` - Notes with "project" label
-- \`#status = active\` - Notes where status label equals "active"
-- \`meeting #project\` - Notes containing "meeting" with "project" label
-- \`#type = task #priority = high\` - Multiple label conditions (implicit AND)
-- \`meeting or project\` - Notes containing "meeting" OR "project"
-- \`id:abc123def\` - Direct lookup of note by ID
-- \`title:weekly meeting\` - Notes with "weekly meeting" in title
-
-**Results:** returns \`{results: [...]}\` with note metadata only (noteId, title, type, dates, attributes) — content bodies are NOT included; call get_note for the body, or pass \`content_preview_chars\` (e.g. 250) to get a short plain-text \`contentPreview\` on the top results. There is no default limit, so pass \`limit\` to bound large result sets. To scope a search to a subtree, combine \`ancestorNoteId\` with \`ancestorDepth\` (e.g. \`eq1\` = direct children only).
-
-**Graceful fallback (\`fuzzy\`):**
-Trilium ANDs fulltext terms, so one wrong term returns nothing. By default (\`fuzzy: "auto"\`),
-a plain-fulltext query with 2+ terms that returns ZERO results is automatically retried as an
-OR over the individual terms, ranked by relevance. The response then adds \`searchMode: "fuzzy"\`,
-\`fuzzyTerms\`, \`totalCandidates\`, and \`termsMatchedInTitleOrAttributes\` — use that last one to
-spot which term is failing and re-query without it. Ranking uses titles and attributes only, so
-a note matching only in its body is still returned but ranks low: scan past the first result.
-Set \`fuzzy: "off"\` for strict Trilium semantics, or \`"force"\` to skip the exact attempt.
-Never applies to \`#label\`, \`note.*\`, \`id:\`/\`title:\`, or already-OR queries.
-
-**Speed (\`strategy\`):** by default a plain-word query first matches titles and labels (fast) and only
-searches note bodies when that finds too few notes; such responses carry \`searchMode: "fast"\`. Pass
-\`strategy: "full"\` when the words may appear only inside note text. If Trilium is still busy with an
-earlier slow search, the call fails fast with \`TRILIUM_BUSY\` (or returns the title matches with
-\`partial: true\`): wait the suggested time before retrying.`,
+Scope a subtree with ancestorNoteId + ancestorDepth. If a plain multi-word query finds nothing, it is retried as a ranked OR (see fuzzy); the response then has searchMode:"fuzzy" and termsMatchedInTitleOrAttributes. Plain-word queries match titles/labels first and search bodies only when that finds too few (strategy); TRILIUM_BUSY means wait the suggested time before retrying.`,
       searchNotesSchema,
-      { title: 'Search notes', readOnlyHint: true, openWorldHint: false }
+      { title: 'Search notes', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
     defineTool(
       'get_note_tree',
-      'Explore the note hierarchy. Returns the note with its children expanded "depth" levels (default 1) — ' +
-        'each expanded node includes noteId, title, type, childCount, and childBranchIds (branch IDs are what ' +
-        'organize_note reorder/unlink need). Nodes at the depth boundary include childNoteIds so you can drill ' +
-        'further with another call. System notes (IDs starting with "_", e.g. the _hidden subtree under root) are ' +
-        'skipped unless you request a system note directly. At most ~200 notes are fetched per call; the response ' +
-        'is marked truncated when the cap is hit. ' +
-        'Use this tool to explore the hierarchy before creating or moving notes — start from "root" to see top-level structure. ' +
-        'When the user asks to create or organize notes, proactively explore the tree and suggest where the note should go.',
+      'Explore the note hierarchy from a note, expanding children "depth" levels (default 1). Each node has ' +
+        'noteId, title, type, childCount and childBranchIds; expanded children also carry their own branchId ' +
+        '(what organize_note reorder/unlink need). Nodes at the depth boundary list childNoteIds for a follow-up ' +
+        'call. System notes (IDs starting with "_") are skipped unless you start from one. At most ' +
+        `${MAX_TREE_NOTES} notes per call; the response is marked truncated when the cap is hit.`,
       getNoteTreeSchema,
-      { title: 'Get note tree', readOnlyHint: true }
+      { title: 'Get note tree', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
   ];
 }
@@ -315,19 +292,63 @@ async function attachPreviews(
     .slice(0, MAX_PREVIEW_RESULTS)
     .filter((n) => PREVIEWABLE_TYPES.has(String(n.type)) && n.isProtected !== true);
 
-  for (let i = 0; i < targets.length; i += PREVIEW_CONCURRENCY) {
-    await Promise.all(
-      targets.slice(i, i + PREVIEW_CONCURRENCY).map(async (n) => {
-        try {
-          const raw = await client.getNoteContent(String(n.noteId));
-          const text = n.type === 'text' ? htmlToPreviewText(raw) : raw.trim();
-          n.contentPreview = text.length > chars ? `${text.slice(0, chars)}…` : text;
-        } catch {
-          // Omit the preview for this note.
-        }
-      })
-    );
+  await mapLimited(targets, FETCH_CONCURRENCY, async (n) => {
+    try {
+      const raw = await client.getNoteContent(String(n.noteId));
+      const text = n.type === 'text' ? htmlToPreviewText(raw) : raw.trim();
+      n.contentPreview = text.length > chars ? `${text.slice(0, chars)}…` : text;
+    } catch {
+      // Omit the preview for this note.
+    }
+  });
+}
+
+/**
+ * Drop the heavy per-note fields (child/branch ID arrays, blobId, UTC dates,
+ * per-attribute bookkeeping) that rarely matter for picking a result. A search
+ * over a large tree otherwise returns mostly child-ID noise.
+ */
+export function compactSearchResult(note: Record<string, unknown>): Record<string, unknown> {
+  const attributes = Array.isArray(note.attributes)
+    ? (note.attributes as Array<Record<string, unknown>>).map((a) => ({
+        type: a.type,
+        name: a.name,
+        value: a.value,
+      }))
+    : note.attributes;
+  return {
+    noteId: note.noteId,
+    title: note.title,
+    type: note.type,
+    mime: note.mime,
+    ...(note.isProtected === true ? { isProtected: true } : {}),
+    dateModified: note.dateModified,
+    parentNoteIds: note.parentNoteIds,
+    attributes,
+    ...(note.contentPreview !== undefined ? { contentPreview: note.contentPreview } : {}),
+  };
+}
+
+/** Attach previews, compact unless verbose, and add the returned count. */
+async function finalizeSearchResult(
+  client: TriliumClient,
+  parsed: SearchArgs,
+  result: Record<string, unknown>
+): Promise<{ content: Array<{ type: 'text'; text: string }> }> {
+  await attachPreviews(client, result.results, parsed.content_preview_chars);
+  const results = Array.isArray(result.results)
+    ? (result.results as Array<Record<string, unknown>>)
+    : [];
+  const shaped = parsed.verbose ? results : results.map(compactSearchResult);
+  const payload: Record<string, unknown> = {
+    ...result,
+    results: shaped,
+    returned: shaped.length,
+  };
+  if (payload.truncated === true && payload.searchMode !== 'fuzzy') {
+    payload.note = 'More notes matched. Narrow the query or raise limit to see them.';
   }
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
 
 /** Scope and shaping options shared by the exact search and its fuzzy retry. */
@@ -381,7 +402,7 @@ async function runFuzzySearch(
   terms: string[],
   forced: boolean
 ): Promise<Record<string, unknown>> {
-  const { fetchLimit, sliceTo } = resolveFuzzyLimit(parsed.limit);
+  const { fetchLimit, sliceTo } = resolveFuzzyLimit(parsed.limit ?? DEFAULT_SEARCH_LIMIT);
   const response = await client.searchNotes({
     ...scopeParams(parsed),
     search: buildFuzzyQuery(terms),
@@ -400,6 +421,7 @@ async function runFuzzySearch(
 
   return {
     results: ordered.slice(0, sliceTo),
+    truncated: ordered.length > sliceTo,
     searchMode: 'fuzzy',
     fuzzyTerms: terms,
     totalCandidates: response.results.length,
@@ -445,9 +467,10 @@ async function runExactSearch(
   parsed: SearchArgs,
   effectiveQuery: string,
   strategy: SearchStrategy | 'as-is',
-  ctx: ToolContext
+  ctx: ToolContext,
+  fetchLimit: number
 ): Promise<SearchResponse & { searchMode?: string; partial?: boolean; note?: string }> {
-  const params = { ...scopeParams(parsed), search: effectiveQuery, limit: parsed.limit };
+  const params = { ...scopeParams(parsed), search: effectiveQuery, limit: fetchLimit };
   if (strategy === 'full' || strategy === 'as-is') {
     return client.searchNotes(params);
   }
@@ -457,7 +480,7 @@ async function runExactSearch(
     return { ...fast, searchMode: 'fast', note: FAST_NOTE };
   }
 
-  const enough = Math.min(parsed.limit ?? FAST_FIRST_MIN_RESULTS, FAST_FIRST_MIN_RESULTS);
+  const enough = Math.min(parsed.limit ?? DEFAULT_SEARCH_LIMIT, FAST_FIRST_MIN_RESULTS);
   if (fast.results.length >= enough) {
     return { ...fast, searchMode: 'fast', note: FAST_NOTE };
   }
@@ -506,7 +529,21 @@ async function runSearchWithFallback(
     return runFuzzySearch(client, parsed, extractFuzzyTerms(originalQuery), true);
   }
 
-  const exact = await runExactSearch(client, parsed, effectiveQuery, strategy, ctx);
+  // Over-fetch by one so truncation is observable without a second query.
+  const limit = parsed.limit ?? DEFAULT_SEARCH_LIMIT;
+  const fetched = await runExactSearch(
+    client,
+    parsed,
+    effectiveQuery,
+    strategy,
+    ctx,
+    Math.min(limit + 1, MAX_SEARCH_LIMIT)
+  );
+  const exact = {
+    ...fetched,
+    results: fetched.results.slice(0, limit),
+    truncated: fetched.results.length > limit,
+  };
 
   if (mode === 'force') {
     // Forced, but the query is structured — OR-expanding it would produce something
@@ -548,11 +585,10 @@ export async function handleSearchTool(
       if (preprocessed.type === 'noteIdLookup') {
         try {
           const note = await client.getNote(preprocessed.query);
-          const result = { results: [note] };
-          await attachPreviews(client, result.results, parsed.content_preview_chars);
-          return {
-            content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-          };
+          return await finalizeSearchResult(client, parsed, {
+            results: [note],
+            truncated: false,
+          });
         } catch (error) {
           if (error instanceof TriliumClientError && error.status === 404) {
             // Note not found — fall back to regular search, but never fuzzily:
@@ -565,10 +601,7 @@ export async function handleSearchTool(
               false,
               ctx
             );
-            await attachPreviews(client, result.results, parsed.content_preview_chars);
-            return {
-              content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-            };
+            return finalizeSearchResult(client, parsed, result);
           }
           throw error;
         }
@@ -582,10 +615,7 @@ export async function handleSearchTool(
         true,
         ctx
       );
-      await attachPreviews(client, result.results, parsed.content_preview_chars);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-      };
+      return finalizeSearchResult(client, parsed, result);
     }
 
     case 'get_note_tree': {

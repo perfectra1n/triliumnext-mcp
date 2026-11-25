@@ -40,15 +40,20 @@ export const EXPORT_FORMATS = ['html', 'markdown'] as const;
 export const ORDER_DIRECTIONS = ['asc', 'desc'] as const;
 
 /**
- * Entity ID validator (4-32 alphanumeric characters)
- * Used for noteId, branchId, attributeId
+ * Validator for an ID that references an existing entity (note, branch,
+ * attribute, attachment, revision). These IDs are interpolated into ETAPI URL
+ * paths, so anything other than letters, digits and underscores is rejected:
+ * a "/", "?" or "#" in an LLM-supplied ID would otherwise redirect the request
+ * to a different endpoint. Underscores are allowed because branch IDs are
+ * "<parentId>_<childId>" and system notes look like "_hidden" / "_lbRoot".
  */
 export const entityIdSchema = z
   .string()
   .min(1, 'ID is required')
-  .refine(
-    (val) => val === 'root' || /^[a-zA-Z0-9]{4,32}$/.test(val),
-    'ID must be 4-32 alphanumeric characters (or "root" for the root note)'
+  .max(128, 'ID must be at most 128 characters')
+  .regex(
+    /^[A-Za-z0-9_]+$/,
+    'ID may contain only letters, digits and underscores (e.g. "root", "abc123XYZ", "root_abc123")'
   );
 
 /**

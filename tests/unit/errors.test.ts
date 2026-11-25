@@ -6,10 +6,13 @@ import {
   formatZodError,
   formatUnknownError,
   formatContentInputError,
+  formatDiffError,
   formatErrorForMCP,
   type StructuredError,
 } from '../../src/errors/index.js';
 import { ContentNormalizationError } from '../../src/tools/contentInput.js';
+import { DiffApplicationError } from '../../src/tools/diff.js';
+import { entityIdSchema } from '../../src/tools/validators.js';
 
 describe('Error Formatting', () => {
   describe('formatTriliumError', () => {
@@ -65,7 +68,7 @@ describe('Error Formatting', () => {
       const result = formatTriliumError(error);
 
       expect(result.status).toBe(418);
-      expect(result.suggestion).toContain('unexpected error');
+      expect(result.suggestion).toBe('See the error message above.');
     });
   });
 
@@ -160,7 +163,7 @@ describe('Error Formatting', () => {
       const result = formatUnknownError(error);
 
       expect(result.message).toBe('Something went wrong');
-      expect(result.suggestion).toContain('unexpected error');
+      expect(result.suggestion).toBe('See the error message above.');
     });
 
     it('should format string errors', () => {
@@ -276,5 +279,82 @@ describe('formatContentInputError', () => {
     expect(mcp.isError).toBe(true);
     expect(mcp.content[0].text).toContain('**Code**: URL_BLOCKED');
     expect(mcp.content[0].text).toContain('**Suggestion**: Use a public URL.');
+  });
+});
+
+describe('formatZodError issue messages', () => {
+  it('surfaces custom regex messages from validators verbatim', () => {
+    const schema = z.object({ noteId: entityIdSchema });
+    const result = schema.safeParse({ noteId: 'bad/id' });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['noteId']).toContain('letters, digits and underscores');
+    expect(formatted.fieldErrors!['noteId']).not.toContain('Invalid format');
+  });
+
+  it('uses the zod message for too_small/too_big instead of assuming characters', () => {
+    const schema = z.object({ depth: z.number().min(1), tags: z.array(z.string()).max(1) });
+    const result = schema.safeParse({ depth: 0, tags: ['a', 'b'] });
+    if (result.success) throw new Error('expected failure');
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['depth']).not.toContain('characters');
+    expect(formatted.fieldErrors!['depth']).toMatch(/>=\s*1/);
+    expect(formatted.fieldErrors!['tags']).not.toContain('characters');
+  });
+
+  it('aggregates several issues on the same path', () => {
+    const schema = z.object({
+      name: z
+        .string()
+        .min(5, 'too short')
+        .regex(/^[a-z]+$/, 'lowercase only'),
+    });
+    const result = schema.safeParse({ name: 'A1' });
+    if (result.success) throw new Error('expected failure');
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['name']).toBe('name: too short; lowercase only');
+  });
+});
+
+describe('recovery hints', () => {
+  it('branch hint points at the fields that actually carry branch IDs', () => {
+    const s = formatTriliumError(new TriliumClientError(404, 'BRANCH_NOT_FOUND', 'x')).suggestion!;
+    expect(s).toContain('parentBranchIds');
+    expect(s).toContain('get_note_tree');
+  });
+
+  it('deleted-note hint explains how to restore', () => {
+    const s = formatTriliumError(new TriliumClientError(400, 'NOTE_IS_DELETED', 'x')).suggestion!;
+    expect(s).toContain('delete_note');
+    expect(s).toContain('undelete');
+  });
+
+  it('auth errors tell the model not to retry', () => {
+    for (const err of [
+      new TriliumClientError(401, 'WHATEVER', 'x'),
+      new TriliumClientError(401, 'ETAPI_TOKEN_INVALID', 'x'),
+    ]) {
+      const s = formatTriliumError(err).suggestion!;
+      expect(s).toContain('do not retry');
+      expect(s).toContain('tell the user');
+    }
+  });
+
+  it('diff errors branch on not-found vs ambiguous', () => {
+    const notFound = formatDiffError(
+      new DiffApplicationError(
+        'Search/replace failed: could not find the search string in content.'
+      )
+    );
+    expect(notFound.suggestion).toContain('format="html"');
+    expect(notFound.suggestion).toContain('exact substring');
+
+    const ambiguous = formatDiffError(
+      new DiffApplicationError(
+        'Search/replace failed: the search string is ambiguous (appears multiple times).'
+      )
+    );
+    expect(ambiguous.suggestion).toContain('unique');
   });
 });

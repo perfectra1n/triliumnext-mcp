@@ -246,3 +246,33 @@ describe('Diff Module', () => {
     });
   });
 });
+
+describe('diff hardening', () => {
+  it('wraps a multi-file patch in DiffApplicationError', () => {
+    const patch = '--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n--- a/y\n+++ b/y\n@@ -1 +1 @@\n-c\n+d\n';
+    expect(() => applyUnifiedDiff('a\n', patch)).toThrow(DiffApplicationError);
+    expect(() => applyUnifiedDiff('a\n', patch)).toThrow(/could not be parsed/);
+  });
+
+  it('flags a pure deletion that did not persist', () => {
+    expect(() =>
+      verifySearchReplaceResults(
+        '<p>keep DROP</p>',
+        [{ old_string: ' DROP', new_string: '' }],
+        '<p>keep</p>'
+      )
+    ).toThrow(/deleted text still present/);
+  });
+
+  it('accepts a deletion whose old_string legitimately remains elsewhere', () => {
+    expect(() =>
+      verifySearchReplaceResults('<p>x x</p>', [{ old_string: 'x', new_string: '' }], '<p>x x</p>')
+    ).not.toThrow();
+  });
+
+  it('read-back failure says the write happened and to re-read first', () => {
+    expect(() =>
+      verifySearchReplaceResults('<p>a</p>', [{ old_string: 'a', new_string: 'b' }])
+    ).toThrow(/WAS written[\s\S]*get_note/);
+  });
+});

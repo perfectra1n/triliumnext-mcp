@@ -15,6 +15,8 @@ export interface JwtAuthOptions {
   principalClaim?: string;
   /** Allowed signing algorithms. Defaults to a sane set; never includes `none`. */
   algorithms?: string[];
+  /** Clock skew tolerated on exp/nbf/iat, in seconds. Default 30. */
+  clockToleranceSec?: number;
 }
 
 export interface JwtAuthResult {
@@ -23,6 +25,9 @@ export interface JwtAuthResult {
   /** When unauthorized, a short non-secret reason useful for logs. */
   reason?: 'no_token' | 'verify_failed' | 'no_principal';
 }
+
+/** Default leeway for exp/nbf checks between issuer and gateway clocks. */
+export const DEFAULT_JWT_CLOCK_TOLERANCE_SEC = 30;
 
 const DEFAULT_ALGS = [
   'HS256',
@@ -38,8 +43,9 @@ const DEFAULT_ALGS = [
 
 /**
  * JWT-based gateway auth. Supports HS256 shared secrets and asymmetric
- * verification via a JWKS URL (the standard OIDC pattern). Validates `exp`
- * and `nbf` automatically; `iss` and `aud` are validated when configured.
+ * verification via a JWKS URL (the standard OIDC pattern). `exp` is REQUIRED
+ * (tokens without an expiry are rejected) and validated together with `nbf`
+ * using a small clock tolerance; `iss` and `aud` are validated when configured.
  *
  * The "principal" returned from authorization is whatever claim the operator
  * names (default `sub`). It threads into audit logs and, opt-in, into
@@ -50,6 +56,7 @@ export class JwtAuth {
   private readonly issuer?: string;
   private readonly audience?: string | string[];
   private readonly algorithms: string[];
+  private readonly clockTolerance: number;
   private readonly hsKeys: Uint8Array[];
   private readonly jwks: JWTVerifyGetKey | null;
 
@@ -58,6 +65,7 @@ export class JwtAuth {
     this.issuer = opts.issuer;
     this.audience = opts.audience;
     this.algorithms = opts.algorithms ?? DEFAULT_ALGS;
+    this.clockTolerance = opts.clockToleranceSec ?? DEFAULT_JWT_CLOCK_TOLERANCE_SEC;
     const enc = new TextEncoder();
     this.hsKeys = (opts.secrets ?? []).map((s) => enc.encode(s));
     this.jwks = opts.jwksUrl ? createRemoteJWKSet(new URL(opts.jwksUrl)) : null;
@@ -70,7 +78,11 @@ export class JwtAuth {
     const token = extractBearerToken(req.headers['authorization']);
     if (!token) return { authorized: false, principal: null, reason: 'no_token' };
 
-    const verifyOpts: JWTVerifyOptions = { algorithms: this.algorithms };
+    const verifyOpts: JWTVerifyOptions = {
+      algorithms: this.algorithms,
+      requiredClaims: ['exp'],
+      clockTolerance: this.clockTolerance,
+    };
     if (this.issuer !== undefined) verifyOpts.issuer = this.issuer;
     if (this.audience !== undefined) verifyOpts.audience = this.audience;
 

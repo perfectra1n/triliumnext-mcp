@@ -17,20 +17,27 @@ export interface StructuredError {
 /**
  * Guidance map for common Trilium error codes
  */
+const AUTH_GUIDANCE =
+  'Authentication with Trilium failed (invalid or missing ETAPI token). This is a server configuration problem — do not retry; tell the user.';
+
+const GENERIC_GUIDANCE = 'See the error message above.';
+
 const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   NOTE_NOT_FOUND:
     'The specified note ID does not exist. Use search_notes to find valid note IDs, or check for typos.',
   NOTE_IS_PROTECTED:
     'This note is protected. Choose a different note or unprotect it in Trilium first.',
   BRANCH_NOT_FOUND:
-    "The specified branch ID does not exist. Use get_note to retrieve valid branch IDs from a note's parentBranch or childBranches.",
+    'The specified branch ID does not exist. Get valid branch IDs from get_note (parentBranchIds/childBranchIds) or get_note_tree (childBranchIds / children[].branchId).',
   ATTRIBUTE_NOT_FOUND:
     'The specified attribute ID does not exist. Use get_attributes to list valid attribute IDs for a note.',
   ATTACHMENT_NOT_FOUND:
     'The specified attachment ID does not exist. Use get_attachment with a noteId to list attachments on that note.',
   ENTITY_NOT_FOUND: 'The specified entity does not exist. Verify the ID is correct.',
-  INVALID_ENTITY_ID: 'The entity ID format is invalid. IDs must be 4-32 alphanumeric characters.',
-  NOTE_IS_DELETED: 'This note has been deleted. It cannot be accessed or modified.',
+  INVALID_ENTITY_ID:
+    'The entity ID format is invalid. Copy IDs exactly from search_notes, get_note_tree or get_note results.',
+  NOTE_IS_DELETED:
+    'This note has been deleted. Restore it with delete_note {action:"undelete", noteId} before using it, or pick another note.',
   VALIDATION_ERROR: 'The request contains invalid data. Check the field requirements.',
   PROPERTY_NOT_ALLOWED:
     'This Trilium version does not accept that field. utcDateModified on create_note/write_note needs a Trilium newer than 0.105 — drop the field or upgrade Trilium.',
@@ -40,8 +47,7 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
     'Trilium accepted the connection but did not answer in time, usually because a slow full-text search is holding its database. The operation may still complete server-side — re-read the note before retrying a write. For a short while, further calls to this Trilium fail fast with TRILIUM_BUSY.',
   TRILIUM_BUSY:
     'Trilium is still busy with an earlier slow request (usually a full-text search) and is not answering. Wait the time given in the message, then retry. Avoid strategy:"full" searches until it recovers: they would queue behind the slow one.',
-  ETAPI_TOKEN_INVALID:
-    'The API token is invalid or expired. Check your TRILIUM_TOKEN configuration.',
+  ETAPI_TOKEN_INVALID: AUTH_GUIDANCE,
 };
 
 /**
@@ -49,8 +55,8 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
  */
 const STATUS_CODE_GUIDANCE: Record<number, string> = {
   400: 'The request was malformed. Check the parameter values and formats.',
-  401: 'Authentication failed. Verify your TRILIUM_TOKEN is correct.',
-  403: 'Access denied. The token may lack required permissions.',
+  401: AUTH_GUIDANCE,
+  403: AUTH_GUIDANCE,
   404: 'The requested resource was not found. Verify the ID exists.',
   409: 'A conflict occurred. The resource may have been modified by another operation.',
   500: 'An internal server error occurred in Trilium. Try again or check Trilium logs.',
@@ -61,9 +67,7 @@ const STATUS_CODE_GUIDANCE: Record<number, string> = {
  */
 export function formatTriliumError(error: TriliumClientError): StructuredError {
   const suggestion =
-    TRILIUM_ERROR_GUIDANCE[error.code] ??
-    STATUS_CODE_GUIDANCE[error.status] ??
-    'An unexpected error occurred. Check the error details for more information.';
+    TRILIUM_ERROR_GUIDANCE[error.code] ?? STATUS_CODE_GUIDANCE[error.status] ?? GENERIC_GUIDANCE;
 
   return {
     message: error.message,
@@ -104,24 +108,13 @@ function formatZodIssue(issue: ZodIssue): string {
       return `${fieldName}: ${valueIssue.message}`;
     }
 
-    case 'too_small': {
-      const smallIssue = issue as { minimum?: number; message: string };
-      if (smallIssue.minimum !== undefined) {
-        return `${fieldName}: Must be at least ${smallIssue.minimum} characters`;
-      }
-      return `${fieldName}: ${smallIssue.message}`;
-    }
-
-    case 'too_big': {
-      const bigIssue = issue as { maximum?: number; message: string };
-      if (bigIssue.maximum !== undefined) {
-        return `${fieldName}: Must be at most ${bigIssue.maximum} characters`;
-      }
-      return `${fieldName}: ${bigIssue.message}`;
-    }
-
+    // Zod 4 messages for these already name the bound and type ("Too small: expected
+    // string to have >=1 characters"), and validators supply custom messages (e.g.
+    // the entity-ID regex hint) that must reach the model verbatim.
+    case 'too_small':
+    case 'too_big':
     case 'invalid_format':
-      return `${fieldName}: Invalid format`;
+      return `${fieldName}: ${issue.message}`;
 
     case 'custom': {
       const customIssue = issue as { message: string };
@@ -141,7 +134,12 @@ export function formatZodError(error: ZodError, toolName?: string): StructuredEr
 
   for (const issue of error.issues) {
     const path = issue.path.join('.') || 'input';
-    fieldErrors[path] = formatZodIssue(issue);
+    const formatted = formatZodIssue(issue);
+    // Several issues can share a path (e.g. min length and regex); keep all of them.
+    fieldErrors[path] =
+      fieldErrors[path] === undefined
+        ? formatted
+        : `${fieldErrors[path]}; ${formatted.slice(path.length + 2)}`;
   }
 
   const errorList = Object.values(fieldErrors)
@@ -163,8 +161,24 @@ export function formatDiffError(error: DiffApplicationError): StructuredError {
   return {
     message: error.message,
     code: 'DIFF_APPLICATION_FAILED',
-    suggestion: 'Fetch the current content and retry with updated diffs.',
+    suggestion: diffSuggestion(error.message),
   };
+}
+
+function diffSuggestion(message: string): string {
+  if (message.includes('ambiguous')) {
+    return 'old_string matches more than once. Add surrounding context so old_string is unique.';
+  }
+  if (message.includes('could not find')) {
+    return (
+      'old_string was not found. Edits match the stored HTML, not rendered text: re-read with ' +
+      'get_note format="html" and copy the exact substring.'
+    );
+  }
+  if (message.includes('read-back verification')) {
+    return 'Trilium normalized the saved HTML. Re-read with get_note format="html" before editing again.';
+  }
+  return 'Re-read the note with get_note format="html" and retry with changes based on the current content.';
 }
 
 /**
@@ -187,7 +201,7 @@ export function formatUnknownError(error: unknown): StructuredError {
 
   return {
     message,
-    suggestion: 'An unexpected error occurred. Check the error message for details.',
+    suggestion: GENERIC_GUIDANCE,
   };
 }
 

@@ -11,7 +11,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { randomUUID } from 'node:crypto';
 
-import { normalizeServerUrl, deriveWebBaseUrl, type Config } from '../config.js';
+import { normalizeServerUrl, deriveWebBaseUrl, DEFAULT_HTTP_HOST, type Config } from '../config.js';
 import { TriliumClient, TriliumClientError, clientOptionsFromConfig } from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
@@ -22,6 +22,7 @@ import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
 import { MetricsAuth } from './metricsAuth.js';
 import { CorsPolicy } from './cors.js';
 import { RateLimiter } from './rateLimit.js';
+import { checkRequestOrigin } from './originGuard.js';
 import type { Logger } from '../utils/logger.js';
 
 /** Upper bound on a single MCP JSON-RPC message POST body. The SDK enforces
@@ -38,20 +39,81 @@ const SSE_KEEPALIVE_INTERVAL_MS = 30_000;
  *  connection indefinitely. */
 const TRILIUM_VALIDATE_TIMEOUT_MS = 10_000;
 
+/** Default idle TTL for StreamableHTTP sessions (no requests for this long → closed). */
+export const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
+/** Default cap on concurrently open sessions (SSE + StreamableHTTP). */
+export const DEFAULT_MAX_SESSIONS = 1000;
+
+/** `realm` advertised in `WWW-Authenticate` on gateway 401s. */
+const AUTH_REALM = 'triliumnext-mcp';
+
 interface Session {
   transport: SSEServerTransport;
   mcpServer: McpServer;
   keepAlive: NodeJS.Timeout;
+  /** Identity (principal / token fingerprint) that opened the session. */
+  identity: string;
+  lastActivity: number;
 }
 
 interface StreamableSession {
   transport: StreamableHTTPServerTransport;
   mcpServer: McpServer;
+  identity: string;
+  lastActivity: number;
 }
 
-export async function startHttp(config: Config, logger: Logger): Promise<HttpServer> {
+/** Tunables for tests / embedding. All optional. */
+export interface HttpServerOptions {
+  /** Idle TTL for StreamableHTTP sessions. Default 30 min. `0` disables. */
+  sessionIdleTtlMs?: number;
+  /** Max concurrently open sessions across both transports. Default 1000. */
+  maxSessions?: number;
+  /** How often the idle sweep runs. Default min(60s, ttl/2). */
+  sweepIntervalMs?: number;
+}
+
+interface Ctx {
+  config: Config;
+  logger: Logger;
+  sessions: Map<string, Session>;
+  streamableSessions: Map<string, StreamableSession>;
+  gatewayPolicy: GatewayPolicy;
+  rateLimiter: RateLimiter;
+  metrics: Metrics | null;
+  metricsAuth: MetricsAuth | null;
+  maxSessions: number;
+}
+
+/** Log-safe session id: first 8 chars only (the full id is a bearer capability for SSE). */
+export function shortSessionId(id: string): string {
+  return id.slice(0, 8);
+}
+
+/** Servers started by `startHttp` that are still open, for graceful shutdown. */
+const liveServers = new Set<() => Promise<void>>();
+
+/**
+ * Close every HTTP server started by `startHttp` in this process: stop
+ * accepting connections, close all MCP sessions/transports, and drop open
+ * sockets (SSE streams would otherwise hold `server.close()` open forever).
+ */
+export async function shutdownHttpServers(): Promise<void> {
+  const closers = [...liveServers];
+  liveServers.clear();
+  await Promise.allSettled(closers.map((c) => c()));
+}
+
+export async function startHttp(
+  config: Config,
+  logger: Logger,
+  options: HttpServerOptions = {}
+): Promise<HttpServer> {
   const sessions = new Map<string, Session>();
   const streamableSessions = new Map<string, StreamableSession>();
+  const sessionIdleTtlMs = options.sessionIdleTtlMs ?? DEFAULT_SESSION_IDLE_TTL_MS;
+  const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const bindHost = config.httpHost ?? DEFAULT_HTTP_HOST;
   const gatewayAuth =
     config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
   const jwtAuth =
@@ -80,6 +142,18 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     rps: config.rateLimitRps,
     burst: config.rateLimitBurst,
   });
+
+  const ctx: Ctx = {
+    config,
+    logger,
+    sessions,
+    streamableSessions,
+    gatewayPolicy,
+    rateLimiter,
+    metrics,
+    metricsAuth,
+    maxSessions,
+  };
 
   if (config.allowPrivateUrls && config.multiTenant) {
     // Loud but not fatal: private-IP block is the primary SSRF defense, and
@@ -115,6 +189,21 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     res.on('finish', recordAccess);
     res.on('close', recordAccess);
 
+    // DNS-rebinding / cross-site defenses run before CORS, auth and routing.
+    // /health stays exempt so container/LB probes keep working.
+    if (path !== '/health') {
+      const originCheck = checkRequestOrigin(req, {
+        bindHost,
+        cors,
+        allowedHosts: config.allowedHosts ?? [],
+      });
+      if (!originCheck.ok) {
+        logger.warn('request_rejected', { reason: originCheck.reason, remote, path });
+        respondJson(res, 403, { error: originCheck.reason });
+        return;
+      }
+    }
+
     // Apply CORS headers to every response, and short-circuit OPTIONS preflight.
     cors.apply(req, res);
     if (cors.handlePreflight(req, res)) {
@@ -122,38 +211,18 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     }
 
     // Rate limit everything except /health (cheap liveness) and OPTIONS
-    // (already short-circuited above for CORS-enabled deployments).
-    if (rateLimiter.enabled && req.method !== 'OPTIONS') {
-      const rawPath = (req.url ?? '/').split('?')[0];
-      if (rawPath !== '/health') {
-        const decision = rateLimiter.check(req);
-        if (!decision.allowed) {
-          logger.warn('rate_limited', {
-            remote: req.socket.remoteAddress,
-            path: rawPath,
-            reason: decision.reason,
-          });
-          res.writeHead(429, {
-            'Content-Type': 'application/json',
-            'Retry-After': String(decision.retryAfter ?? 1),
-          });
-          res.end(JSON.stringify({ error: 'rate_limited', reason: decision.reason }));
-          return;
-        }
+    // (already short-circuited above for CORS-enabled deployments). Only the
+    // per-IP axis runs here; the per-credential axis runs after successful
+    // auth (see `authorizeOrReject`) so garbage tokens can't mint buckets.
+    if (rateLimiter.enabled && req.method !== 'OPTIONS' && path !== '/health') {
+      const decision = rateLimiter.checkIp(req);
+      if (!decision.allowed) {
+        respondRateLimited(req, res, logger, path, decision);
+        return;
       }
     }
 
-    handleRequest(
-      req,
-      res,
-      config,
-      sessions,
-      streamableSessions,
-      gatewayPolicy,
-      logger,
-      metrics,
-      metricsAuth
-    ).catch((err) => {
+    handleRequest(req, res, ctx).catch((err) => {
       logger.error('request_handler_error', {
         method,
         path,
@@ -171,8 +240,65 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
     });
   });
 
-  await new Promise<void>((resolve) => {
-    httpServer.listen(config.httpPort, () => {
+  // Idle sweep for StreamableHTTP sessions: they outlive any single HTTP
+  // connection, so an abandoned one would otherwise live forever. SSE
+  // sessions are bound to their open response stream and are torn down when
+  // it closes, so they only count toward the session cap.
+  let sweepTimer: NodeJS.Timeout | null = null;
+  if (sessionIdleTtlMs > 0) {
+    const interval =
+      options.sweepIntervalMs ?? Math.min(60_000, Math.max(1000, sessionIdleTtlMs / 2));
+    sweepTimer = setInterval(() => {
+      const cutoff = Date.now() - sessionIdleTtlMs;
+      for (const [sid, s] of streamableSessions) {
+        if (s.lastActivity < cutoff) {
+          streamableSessions.delete(sid);
+          logger.info('mcp_session_expired', {
+            session: shortSessionId(sid),
+            transport: 'streamable',
+          });
+          if (metrics) {
+            metrics.sseSessions.dec();
+            metrics.sseClosesTotal.inc();
+          }
+          s.transport.close().catch(() => {});
+        }
+      }
+    }, interval);
+    sweepTimer.unref();
+  }
+
+  const closeAll = async (): Promise<void> => {
+    if (sweepTimer) clearInterval(sweepTimer);
+    sweepTimer = null;
+    const transports: Array<Promise<void>> = [];
+    for (const s of sessions.values()) {
+      clearInterval(s.keepAlive);
+      transports.push(s.transport.close().catch(() => {}));
+    }
+    for (const s of streamableSessions.values()) {
+      transports.push(s.transport.close().catch(() => {}));
+    }
+    await Promise.allSettled(transports);
+    sessions.clear();
+    streamableSessions.clear();
+    await new Promise<void>((resolve) => {
+      if (!httpServer.listening) return resolve();
+      httpServer.close(() => resolve());
+      httpServer.closeAllConnections();
+    });
+  };
+  liveServers.add(closeAll);
+  httpServer.on('close', () => {
+    if (sweepTimer) clearInterval(sweepTimer);
+    sweepTimer = null;
+    liveServers.delete(closeAll);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    httpServer.once('error', reject);
+    httpServer.listen(config.httpPort, bindHost, () => {
+      httpServer.off('error', reject);
       const mode = config.multiTenant ? 'multi-tenant' : 'single-tenant';
       const auth =
         config.gatewayAuth === 'bearer'
@@ -184,6 +310,7 @@ export async function startHttp(config: Config, logger: Logger): Promise<HttpSer
       const actualPort = typeof address === 'object' && address ? address.port : config.httpPort;
       logger.info('server_started', {
         transport: 'http',
+        host: bindHost,
         port: actualPort,
         mode,
         gateway_auth: auth,

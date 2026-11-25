@@ -5,8 +5,12 @@ import { applyPatch } from 'diff';
  * Zod schema for a single search/replace block.
  */
 export const searchReplaceBlockSchema = z.object({
-  old_string: z.string().describe('The exact string to find in the existing content'),
-  new_string: z.string().describe('The replacement string'),
+  old_string: z
+    .string()
+    .describe(
+      'Exact substring of the stored content; must occur exactly once ("" = insert at start)'
+    ),
+  new_string: z.string().describe('Replacement text ("" deletes old_string)'),
 });
 
 export type SearchReplaceBlock = z.infer<typeof searchReplaceBlockSchema>;
@@ -20,6 +24,8 @@ export class DiffApplicationError extends Error {
     this.name = 'DiffApplicationError';
   }
 }
+
+const preview = (s: string, max: number): string => (s.length > max ? s.slice(0, max) + '...' : s);
 
 /**
  * Apply a sequence of search/replace operations to content.
@@ -44,16 +50,16 @@ export function applySearchReplace(content: string, changes: SearchReplaceBlock[
     const firstIndex = result.indexOf(old_string);
     if (firstIndex === -1) {
       throw new DiffApplicationError(
-        `Search/replace failed: could not find the search string in content. ` +
-          `Search string: "${old_string.length > 100 ? old_string.slice(0, 100) + '...' : old_string}"`
+        `Search/replace failed (nothing was written): could not find old_string in the stored content. ` +
+          `Search string: "${preview(old_string, 100)}"`
       );
     }
 
     const secondIndex = result.indexOf(old_string, firstIndex + 1);
     if (secondIndex !== -1) {
       throw new DiffApplicationError(
-        `Search/replace failed: the search string is ambiguous (appears multiple times in content). ` +
-          `Search string: "${old_string.length > 100 ? old_string.slice(0, 100) + '...' : old_string}"`
+        `Search/replace failed (nothing was written): old_string is ambiguous — it appears more than once. ` +
+          `Search string: "${preview(old_string, 100)}"`
       );
     }
 
@@ -66,46 +72,69 @@ export function applySearchReplace(content: string, changes: SearchReplaceBlock[
 
 /**
  * Apply a unified diff patch to content.
- * Wraps diff.applyPatch() and throws DiffApplicationError if the patch fails.
+ * Wraps diff.applyPatch() and throws DiffApplicationError if the patch is
+ * malformed, spans several files, or does not apply.
  */
 export function applyUnifiedDiff(content: string, patch: string): string {
-  const result = applyPatch(content, patch);
+  let result: string | false;
+  try {
+    result = applyPatch(content, patch);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new DiffApplicationError(
+      `Unified diff failed: the patch could not be parsed (${reason}). ` +
+        'Provide a single-file unified diff with @@ hunk headers, or use "changes" ' +
+        '(search/replace blocks), which is more reliable for Trilium HTML.'
+    );
+  }
   if (result === false) {
     throw new DiffApplicationError(
-      'Unified diff failed: the patch could not be applied to the current content. ' +
-        'The content may have changed since the patch was created. ' +
-        'Fetch the current content and retry with updated diffs.'
+      'Unified diff failed: the patch could not be applied to the current content (nothing was written). ' +
+        'Re-read the note with get_note (format="html") and rebuild the patch, or use "changes" ' +
+        'instead — Trilium HTML is often a single long line, which makes line-based hunks fragile.'
     );
   }
   return result;
 }
 
 /**
- * Verify that search/replace changes were persisted by checking that each
- * non-empty new_string appears in the read-back content.
+ * Verify that search/replace changes were persisted. Each non-empty new_string
+ * must appear in the read-back content; for a pure deletion (empty new_string)
+ * whose old_string is absent from the content that was sent, old_string must
+ * also be absent from the read-back.
  *
- * Throws DiffApplicationError if verification fails.
+ * Throws DiffApplicationError if verification fails. The write has already
+ * happened at this point, so the message says so and steers the caller to
+ * re-read rather than blindly re-apply the same edit.
  */
 export function verifySearchReplaceResults(
   readBackContent: string,
-  changes: SearchReplaceBlock[]
+  changes: SearchReplaceBlock[],
+  sentContent?: string
 ): void {
-  const missing: string[] = [];
-  for (const { new_string } of changes) {
-    if (new_string !== '' && !readBackContent.includes(new_string)) {
-      const truncated = new_string.length > 200 ? new_string.slice(0, 200) + '...' : new_string;
-      missing.push(truncated);
+  const problems: string[] = [];
+  for (const { old_string, new_string } of changes) {
+    if (new_string !== '') {
+      if (!readBackContent.includes(new_string)) {
+        problems.push(`- replacement not found: "${preview(new_string, 200)}"`);
+      }
+    } else if (
+      old_string !== '' &&
+      sentContent !== undefined &&
+      !sentContent.includes(old_string) &&
+      readBackContent.includes(old_string)
+    ) {
+      problems.push(`- deleted text still present: "${preview(old_string, 200)}"`);
     }
   }
 
-  if (missing.length > 0) {
+  if (problems.length > 0) {
     throw new DiffApplicationError(
-      `Content was sent to Trilium but read-back verification failed. ` +
-        `The following replacement strings were not found after saving:\n` +
-        missing.map((s) => `- "${s}"`).join('\n') +
-        '\n\n' +
-        `Trilium may have normalized or sanitized the HTML. ` +
-        `Use get_note with include_content=true to see what was actually saved, then retry with corrected HTML if needed.`
+      'The edit WAS written to Trilium, but read-back verification failed:\n' +
+        problems.join('\n') +
+        '\n\nTrilium probably normalized or sanitized the HTML. Do not re-apply the same edit: ' +
+        'call get_note (format="html") to see what was actually saved, then make any follow-up ' +
+        'edit against that content.'
     );
   }
 }

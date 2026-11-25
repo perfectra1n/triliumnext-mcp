@@ -22,7 +22,7 @@ export function hasNoteLinkPlaceholders(html: string): boolean {
   return new RegExp(NOTE_LINK_SOURCE).test(html);
 }
 
-function escapeHtml(text: string): string {
+export function escapeHtml(text: string): string {
   return text
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')

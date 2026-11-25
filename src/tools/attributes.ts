@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
-import type { AttributeType } from '../types/etapi.js';
-import { defineTool } from './schemas.js';
+import type { Attribute, AttributeType } from '../types/etapi.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
 import {
   attributeTypeSchema,
+  entityIdSchema,
   optionalEntityIdSchema,
   positionSchema,
   required,
@@ -12,18 +13,12 @@ import {
 
 const getAttributesSchema = z
   .object({
-    noteId: z
-      .string()
+    noteId: entityIdSchema
       .optional()
-      .describe(
-        'If provided, returns all attributes of this note grouped by type (labels, relations).'
-      ),
-    attributeId: z
-      .string()
+      .describe("List this note's own attributes, grouped into labels and relations."),
+    attributeId: entityIdSchema
       .optional()
-      .describe(
-        'If provided, returns the single attribute with this ID (noteId, type, name, value, position).'
-      ),
+      .describe('Fetch one attribute (noteId, type, name, value, position, isInheritable).'),
   })
   .check((ctx) => {
     const { noteId, attributeId } = ctx.value;
@@ -46,56 +41,59 @@ const getAttributesSchema = z
   });
 
 const setAttributeSchema = z.object({
-  noteId: z.string().min(1, 'Note ID is required').describe('ID of the note to set attribute on'),
-  type: attributeTypeSchema.describe('Type of attribute'),
+  noteId: entityIdSchema.describe('Note that owns the attribute.'),
+  type: attributeTypeSchema.describe('"label" (#name) or "relation" (~name).'),
   name: z
     .string()
     .min(1, 'Attribute name is required')
-    .describe('Name of the attribute (without # or ~)'),
-  value: z.string().describe('Value (for labels) or target noteId (for relations)'),
+    .describe('Attribute name without the leading # or ~.'),
+  value: z
+    .string()
+    .describe(
+      'Label value ("" for a valueless label such as #archived), or the target noteId for a relation.'
+    ),
   mode: z
     .enum(['upsert', 'add'])
     .default('upsert')
     .describe(
-      '"upsert" (default) — update the first existing attribute with the same type+name, or create ' +
-        'one if none exists. "add" — always create a new attribute, enabling multiple same-name ' +
-        'labels (e.g. several #tag values on one note). Ignored when attributeId is provided.'
+      '"upsert" (default): change the first own attribute with the same type+name, or create one. ' +
+        '"add": always create, for repeated labels (e.g. several #tag values). Ignored when attributeId is given.'
     ),
-  isInheritable: z.boolean().optional().describe('Whether inherited by child notes'),
-  position: positionSchema
+  isInheritable: z
+    .boolean()
     .optional()
     .describe(
-      'Position for ordering (10, 20, 30...). Lower = earlier when multiple attributes share a name'
+      'Whether child notes inherit the attribute. On upsert, changing it replaces the attribute ' +
+        '(delete + create, new attributeId).'
     ),
+  position: positionSchema
+    .optional()
+    .describe('Ordering among attributes (10, 20, 30...); lower comes first.'),
   attributeId: optionalEntityIdSchema.describe(
-    'Force a specific attribute ID (for imports/migrations). Must be 4-32 alphanumeric chars.'
+    'Force the ID of a newly created attribute (imports/migrations; 4-32 alphanumeric chars). ' +
+      'Always creates — it does not select an existing attribute.'
   ),
 });
 
 const deleteAttributeSchema = z.object({
-  attributeId: z
-    .string()
-    .min(1, 'Attribute ID is required')
-    .describe('ID of the attribute to delete'),
+  attributeId: entityIdSchema.describe('ID of the attribute to delete (from get_attributes).'),
 });
 
 export function registerAttributeTools(): Tool[] {
   return [
     defineTool(
       'get_attributes',
-      'Get attributes of a note (all, grouped by type) or a single attribute by ID. ' +
-        'Pass "noteId" to list all attributes on that note (labels + relations). ' +
-        'Pass "attributeId" to fetch one specific attribute. Exactly one is required.',
+      "Read attributes. Pass noteId for the note's own labels and relations (inherited attributes are " +
+        'not included), or attributeId for one attribute. Exactly one is required.',
       getAttributesSchema,
-      { title: 'Get attributes', readOnlyHint: true }
+      { title: 'Get attributes', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
     defineTool(
       'set_attribute',
-      'Add or update an attribute on a note. For labels, value is the label value. ' +
-        'For relations, value is the target noteId. Default mode "upsert": if an attribute with the ' +
-        'same noteId+type+name already exists, its value/position are updated (the first match, if ' +
-        'several share the name); otherwise a new attribute is created. Pass mode="add" to always ' +
-        'create — Trilium allows multiple same-name labels (e.g. several #tag values).',
+      'Add or update a label or relation on a note. Upsert (default) edits the first own attribute ' +
+        "with the same type+name in place when only a label's value or the position changes. Trilium " +
+        "cannot edit a relation's target or isInheritable in place, so those changes delete and recreate " +
+        'the attribute; the response then has replaced:true, oldAttributeId and the new attributeId.',
       setAttributeSchema,
       {
         title: 'Set attribute',
@@ -103,6 +101,7 @@ export function registerAttributeTools(): Tool[] {
         destructiveHint: false,
         // Not idempotent: mode="add" creates a new attribute on every call.
         idempotentHint: false,
+        openWorldHint: false,
       }
     ),
     defineTool(
@@ -114,6 +113,7 @@ export function registerAttributeTools(): Tool[] {
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: true,
+        openWorldHint: false,
       }
     ),
   ];
@@ -123,7 +123,7 @@ export async function handleAttributeTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<ToolHandlerResult> {
   switch (name) {
     case 'get_attributes': {
       const parsed = getAttributesSchema.parse(args);
@@ -137,8 +137,9 @@ export async function handleAttributeTool(
 
       const noteId = required(parsed.noteId, 'noteId');
       const note = await client.getNote(noteId);
-      const labels = note.attributes.filter((a) => a.type === 'label');
-      const relations = note.attributes.filter((a) => a.type === 'relation');
+      const own = ownAttributes(note.attributes, noteId);
+      const labels = own.filter((a) => a.type === 'label');
+      const relations = own.filter((a) => a.type === 'relation');
 
       return {
         content: [
@@ -152,33 +153,7 @@ export async function handleAttributeTool(
 
     case 'set_attribute': {
       const parsed = setAttributeSchema.parse(args);
-
-      let existingAttr = null;
-      if (!parsed.attributeId && parsed.mode !== 'add') {
-        const note = await client.getNote(parsed.noteId);
-        existingAttr = note.attributes.find(
-          (a) => a.type === parsed.type && a.name === parsed.name
-        );
-      }
-
-      let result;
-      if (existingAttr) {
-        result = await client.updateAttribute(existingAttr.attributeId, {
-          value: parsed.value,
-          position: parsed.position,
-        });
-      } else {
-        result = await client.createAttribute({
-          noteId: parsed.noteId,
-          type: parsed.type as AttributeType,
-          name: parsed.name,
-          value: parsed.value,
-          isInheritable: parsed.isInheritable,
-          position: parsed.position,
-          attributeId: parsed.attributeId,
-        });
-      }
-
+      const result = await setAttribute(client, parsed);
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
@@ -200,4 +175,96 @@ export async function handleAttributeTool(
     default:
       return null;
   }
+}
+
+/** Attributes owned by the note itself (defensive: ETAPI returns owned ones). */
+function ownAttributes(attributes: Attribute[], noteId: string): Attribute[] {
+  return attributes.filter((a) => a.noteId === undefined || a.noteId === noteId);
+}
+
+type SetAttributeArgs = z.infer<typeof setAttributeSchema>;
+
+/**
+ * Create or upsert an attribute. ETAPI's PATCH /attributes only accepts value
+ * and position for labels and only position for relations, so an upsert that
+ * changes a relation's target or isInheritable has to delete and recreate.
+ * The new attribute is created before the old one is deleted so a failure
+ * never leaves the note without it.
+ */
+export async function setAttribute(
+  client: TriliumClient,
+  parsed: SetAttributeArgs
+): Promise<Record<string, unknown>> {
+  let existing: Attribute | undefined;
+  if (!parsed.attributeId && parsed.mode !== 'add') {
+    const note = await client.getNote(parsed.noteId);
+    existing = ownAttributes(note.attributes, parsed.noteId).find(
+      (a) => a.type === parsed.type && a.name === parsed.name
+    );
+  }
+
+  if (!existing) {
+    const created = await client.createAttribute({
+      noteId: parsed.noteId,
+      type: parsed.type as AttributeType,
+      name: parsed.name,
+      value: parsed.value,
+      isInheritable: parsed.isInheritable,
+      position: parsed.position,
+      attributeId: parsed.attributeId,
+    });
+    return created as unknown as Record<string, unknown>;
+  }
+
+  const targetChanged = existing.type === 'relation' && existing.value !== parsed.value;
+  const inheritableChanged =
+    parsed.isInheritable !== undefined &&
+    parsed.isInheritable !== (existing.isInheritable ?? false);
+
+  if (targetChanged || inheritableChanged) {
+    const created = await client.createAttribute({
+      noteId: parsed.noteId,
+      type: parsed.type as AttributeType,
+      name: parsed.name,
+      value: parsed.value,
+      isInheritable: parsed.isInheritable ?? existing.isInheritable,
+      position: parsed.position ?? existing.position,
+    });
+    try {
+      await client.deleteAttribute(existing.attributeId);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Created replacement attribute '${created.attributeId}' but failed to delete the old ` +
+          `attribute '${existing.attributeId}' (${reason}). The note now has both; remove the old ` +
+          `one with delete_attribute {attributeId:"${existing.attributeId}"}.`,
+        { cause: error }
+      );
+    }
+    return {
+      ...(created as unknown as Record<string, unknown>),
+      replaced: true,
+      oldAttributeId: existing.attributeId,
+      reason: targetChanged
+        ? 'Relation targets cannot be edited in place; the attribute was recreated.'
+        : 'isInheritable cannot be edited in place; the attribute was recreated.',
+    };
+  }
+
+  if (existing.type === 'relation') {
+    // Same target: only position can change.
+    if (parsed.position === undefined) {
+      return existing as unknown as Record<string, unknown>;
+    }
+    const updated = await client.updateAttribute(existing.attributeId, {
+      position: parsed.position,
+    });
+    return updated as unknown as Record<string, unknown>;
+  }
+
+  const updated = await client.updateAttribute(existing.attributeId, {
+    value: parsed.value,
+    position: parsed.position,
+  });
+  return updated as unknown as Record<string, unknown>;
 }

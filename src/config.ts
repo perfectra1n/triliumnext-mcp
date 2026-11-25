@@ -37,6 +37,20 @@ export type MetricsAuthMode = 'gateway' | 'bearer' | 'none';
 /** search_notes strategy: titles/labels first (auto), titles/labels only (fast), or bodies too (full). */
 export type SearchStrategy = 'auto' | 'fast' | 'full';
 
+const GATEWAY_AUTH_MODES: readonly GatewayAuthMode[] = ['none', 'bearer', 'jwt'];
+const METRICS_AUTH_MODES: readonly MetricsAuthMode[] = ['gateway', 'bearer', 'none'];
+
+/** Invalid configuration. `main()` prints the message and exits 1. */
+export class ConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigError';
+  }
+}
+
+/** Default interface the HTTP transport binds to. Loopback unless overridden. */
+export const DEFAULT_HTTP_HOST = '127.0.0.1';
+
 export interface Config {
   /**
    * Default Trilium URL. In multi-tenant mode this is a fallback used when a
@@ -60,6 +74,19 @@ export interface Config {
   publicUrl: string | null;
   transport: 'stdio' | 'http';
   httpPort: number;
+  /**
+   * Interface the HTTP transport binds to. Defaults to `127.0.0.1`; the Docker
+   * image sets `0.0.0.0`. When this is a loopback address, the `Host` header
+   * of every request must name a loopback host (or one of `allowedHosts`) to
+   * defeat DNS-rebinding attacks from a browser.
+   */
+  httpHost: string;
+  /**
+   * Extra `Host` header names (hostname, optional `:port`) accepted when the
+   * server is bound to loopback — e.g. the public name a same-host reverse
+   * proxy forwards. Ignored when bound to a non-loopback interface.
+   */
+  allowedHosts: string[];
   /**
    * When true, clients supply `X-Trilium-Url` / `X-Trilium-Token` per connection
    * and each SSE session gets its own TriliumClient. Requires `transport=http`.
@@ -139,9 +166,12 @@ export interface Config {
   metricsIncludePrincipal: boolean;
   /**
    * CORS allowlist of origins (e.g. `https://app.example.com`). Empty disables CORS
-   * entirely. `*` enables wildcard mode (the request Origin is echoed back so
-   * credentialed requests still work — browsers reject `Allow-Origin: *` with
-   * credentials).
+   * entirely. `*` enables wildcard mode (`Access-Control-Allow-Origin: *`,
+   * without `Allow-Credentials`).
+   *
+   * This list is ALSO the server's Origin allowlist: any request carrying an
+   * `Origin` header that is not listed here is rejected with 403 — except, when
+   * bound to loopback, origins whose host is itself a loopback name.
    */
   corsOrigins: string[];
   /**
@@ -182,6 +212,8 @@ interface ConfigFile {
   publicUrl?: string;
   transport?: 'stdio' | 'http';
   httpPort?: number;
+  httpHost?: string;
+  allowedHosts?: string[];
   multiTenant?: boolean;
   gatewayAuth?: GatewayAuthMode;
   gatewayTokens?: string[];
@@ -214,7 +246,9 @@ interface CliArgs {
   token?: string;
   publicUrl?: string;
   transport?: string;
-  port?: number;
+  port?: string;
+  host?: string;
+  allowedHosts?: string[];
   help?: boolean;
   multiTenant?: boolean;
   gatewayAuth?: string;
@@ -231,8 +265,8 @@ interface CliArgs {
   metricsTokens?: string[];
   metricsIncludePrincipal?: boolean;
   corsOrigins?: string[];
-  rateLimitRps?: number;
-  rateLimitBurst?: number;
+  rateLimitRps?: string;
+  rateLimitBurst?: string;
   jwtSecrets?: string[];
   jwtJwksUrl?: string;
   jwtIssuer?: string;
@@ -243,6 +277,14 @@ interface CliArgs {
   searchStrategy?: string;
 }
 
+function requireSize(flag: string, raw: string): number {
+  const parsed = parseSize(raw);
+  if (parsed === undefined) {
+    throw new ConfigError(`Invalid size for ${flag}: "${raw}" (use bytes or e.g. 64mb, 1gb).`);
+  }
+  return parsed;
+}
+
 function parseCliArgs(args: string[]): CliArgs {
   const result: CliArgs = {};
   const gatewayTokens: string[] = [];
@@ -251,56 +293,53 @@ function parseCliArgs(args: string[]): CliArgs {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    const nextArg = args[i + 1];
+    // Consume the flag's value. A missing value, or one that is itself a
+    // `--flag`, is a usage error rather than something to silently swallow.
+    const value = (): string => {
+      const next = args[i + 1];
+      if (next === undefined || next.startsWith('--')) {
+        throw new ConfigError(`Option ${arg} requires a value.`);
+      }
+      i++;
+      return next;
+    };
 
     switch (arg) {
       case '--url':
       case '-u':
-        result.url = nextArg;
-        i++;
+        result.url = value();
         break;
       case '--token':
       case '-t':
-        result.token = nextArg;
-        i++;
+        result.token = value();
         break;
       case '--public-url':
-        result.publicUrl = nextArg;
-        i++;
+        result.publicUrl = value();
         break;
       case '--transport':
-        result.transport = nextArg;
-        i++;
+        result.transport = value();
         break;
       case '--port':
       case '-p':
-        result.port = parseInt(nextArg, 10);
-        i++;
+        result.port = value();
         break;
       case '--multi-tenant':
         result.multiTenant = true;
         break;
       case '--gateway-auth':
-        result.gatewayAuth = nextArg;
-        i++;
+        result.gatewayAuth = value();
         break;
       case '--gateway-token':
-        if (nextArg) gatewayTokens.push(nextArg);
-        i++;
+        gatewayTokens.push(value());
         break;
       case '--trilium-url-allowlist':
-        result.urlAllowlist = splitCsv(nextArg);
-        i++;
+        result.urlAllowlist = splitCsv(value());
         break;
       case '--allow-private-urls':
         result.allowPrivateUrls = true;
         break;
       case '--max-post-bytes':
-        if (nextArg) {
-          const parsed = parseSize(nextArg);
-          if (parsed !== undefined) result.maxPostBytes = parsed;
-        }
-        i++;
+        result.maxPostBytes = requireSize(arg, value());
         break;
       case '--allow-local-file-read':
         result.allowLocalFileRead = true;
@@ -309,74 +348,57 @@ function parseCliArgs(args: string[]): CliArgs {
         result.allowLocalFileRead = false;
         break;
       case '--local-file-roots':
-        result.localFileRoots = splitCsv(nextArg);
-        i++;
+        result.localFileRoots = splitCsv(value());
         break;
       case '--content-url-allowlist':
-        result.contentUrlAllowlist = splitCsv(nextArg);
-        i++;
+        result.contentUrlAllowlist = splitCsv(value());
         break;
       case '--max-content-fetch-bytes':
-        if (nextArg) {
-          const parsed = parseSize(nextArg);
-          if (parsed !== undefined) result.maxContentFetchBytes = parsed;
-        }
-        i++;
+        result.maxContentFetchBytes = requireSize(arg, value());
         break;
       case '--metrics':
         result.metrics = true;
         break;
       case '--metrics-auth':
-        result.metricsAuth = nextArg;
-        i++;
+        result.metricsAuth = value();
         break;
       case '--metrics-token':
-        if (nextArg) metricsTokens.push(nextArg);
-        i++;
+        metricsTokens.push(value());
         break;
       case '--metrics-include-principal':
         result.metricsIncludePrincipal = true;
         break;
       case '--cors-origin':
-        if (nextArg) {
-          result.corsOrigins ??= [];
-          result.corsOrigins.push(...splitCsv(nextArg));
-        }
-        i++;
+        result.corsOrigins ??= [];
+        result.corsOrigins.push(...splitCsv(value()));
         break;
       case '--rate-limit-rps':
-        if (nextArg) {
-          const n = Number(nextArg);
-          if (Number.isFinite(n) && n >= 0) result.rateLimitRps = n;
-        }
-        i++;
+        result.rateLimitRps = value();
         break;
       case '--rate-limit-burst':
-        if (nextArg) {
-          const n = parseInt(nextArg, 10);
-          if (Number.isInteger(n) && n >= 0) result.rateLimitBurst = n;
-        }
-        i++;
+        result.rateLimitBurst = value();
+        break;
+      case '--host':
+        result.host = value();
+        break;
+      case '--allowed-hosts':
+        result.allowedHosts ??= [];
+        result.allowedHosts.push(...splitCsv(value()));
         break;
       case '--jwt-secret':
-        if (nextArg) jwtSecrets.push(nextArg);
-        i++;
+        jwtSecrets.push(value());
         break;
       case '--jwt-jwks-url':
-        result.jwtJwksUrl = nextArg;
-        i++;
+        result.jwtJwksUrl = value();
         break;
       case '--jwt-issuer':
-        result.jwtIssuer = nextArg;
-        i++;
+        result.jwtIssuer = value();
         break;
       case '--jwt-audience':
-        result.jwtAudience = nextArg;
-        i++;
+        result.jwtAudience = value();
         break;
       case '--jwt-principal-claim':
-        result.jwtPrincipalClaim = nextArg;
-        i++;
+        result.jwtPrincipalClaim = value();
         break;
       case '--request-timeout': {
         const ms = parseDuration(nextArg);
@@ -431,9 +453,17 @@ function loadConfigFile(): ConfigFile {
     if (existsSync(configPath)) {
       try {
         const content = readFileSync(configPath, 'utf-8');
-        return JSON.parse(content) as ConfigFile;
-      } catch {
-        // Ignore parse errors, continue to next file
+        const parsed: unknown = JSON.parse(content);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('top-level value must be a JSON object');
+        }
+        return parsed as ConfigFile;
+      } catch (err) {
+        // Don't silently swallow: an operator who wrote a config file expects
+        // it to apply. Warn and fall through to the next candidate.
+        console.error(
+          `Warning: ignoring config file ${configPath}: ${err instanceof Error ? err.message : String(err)}`
+        );
       }
     }
   }
@@ -457,6 +487,11 @@ Options:
                                      addresses (e.g. internal ETAPI host vs. public domain).
   --transport <type>                 Transport type: stdio or http (default: stdio)
   -p, --port <port>                  HTTP server port when using http transport (default: 3000)
+  --host <addr>                      Interface to bind the HTTP transport to (default: 127.0.0.1).
+                                     Use 0.0.0.0 to listen on all interfaces (the Docker image
+                                     does). On loopback, the Host header must be a loopback name.
+  --allowed-hosts <hosts>            Extra Host header values accepted while bound to loopback
+                                     (comma-separated, e.g. a same-host reverse proxy's name).
 
 Multi-tenant HTTP options (require --transport http):
   --multi-tenant                     Each SSE client supplies its own Trilium URL + token
@@ -470,7 +505,7 @@ Multi-tenant HTTP options (require --transport http):
                                      (default: blocked in multi-tenant mode to prevent SSRF)
   --max-post-bytes <size>            Max size of a single MCP JSON-RPC POST body on the SSE
                                      transport. Accepts raw bytes or suffixed values
-                                     (e.g. 500mb, 1gb). Default: 500mb.
+                                     (e.g. 64mb, 1gb). Default: 64mb.
 
 Content input (file paths / URLs in attachment and image tool inputs):
   --allow-local-file-read            Permit tool inputs that name local file paths.
@@ -499,6 +534,9 @@ Metrics (require --transport http):
 CORS (require --transport http):
   --cors-origin <origin>             Allowed CORS origin. Repeatable, or supply a comma-
                                      separated list. Use '*' for wildcard. Off by default.
+                                     Also the Origin allowlist: requests with any other Origin
+                                     header are rejected (403), except loopback origins when
+                                     the server itself is bound to loopback.
 
 Rate limiting (require --transport http):
   --rate-limit-rps <rps>             Sustained refill rate per IP and per gateway token, in
@@ -531,12 +569,14 @@ Environment Variables:
                                      TRILIUM_URL with /etapi stripped)
   TRILIUM_TRANSPORT                  stdio or http
   TRILIUM_HTTP_PORT                  Port for HTTP transport
+  TRILIUM_HTTP_HOST                  Bind address for HTTP transport (default: 127.0.0.1)
+  TRILIUM_ALLOWED_HOSTS              Extra accepted Host header values when bound to loopback
   TRILIUM_MULTI_TENANT               "true" to enable multi-tenant mode
-  TRILIUM_GATEWAY_AUTH               none or bearer
+  TRILIUM_GATEWAY_AUTH               none, bearer, or jwt
   TRILIUM_GATEWAY_TOKENS             Comma-separated accepted bearer tokens
   TRILIUM_URL_ALLOWLIST              Comma-separated allowed hostnames for client URLs
   TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
-  TRILIUM_MAX_POST_BYTES             Max SSE POST body size (raw bytes or e.g. 500mb, 1gb)
+  TRILIUM_MAX_POST_BYTES             Max MCP POST body size (raw bytes or e.g. 64mb, 1gb)
   TRILIUM_ALLOW_LOCAL_FILE_READ      "true"/"false" to permit local file path content inputs
   TRILIUM_LOCAL_FILE_ROOTS           Comma-separated directories content may be read from
   TRILIUM_CONTENT_URL_ALLOWLIST      Comma-separated hostnames for http(s) content fetches
@@ -582,10 +622,47 @@ function emptyToUndefined(value: string | undefined): string | undefined {
   return value.length > 0 ? value : undefined;
 }
 
-function parseNumber(value: string | undefined): number | undefined {
-  if (value === undefined || value === '') return undefined;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : undefined;
+/** Case-insensitive, trimmed enum parse; throws listing the valid values. */
+function parseEnumValue<T extends string>(raw: unknown, valid: readonly T[], what: string): T {
+  const normalized = String(raw).trim().toLowerCase();
+  const match = valid.find((v) => v === normalized);
+  if (!match) {
+    throw new ConfigError(`Invalid ${what}: "${String(raw)}". Valid values: ${valid.join(', ')}.`);
+  }
+  return match;
+}
+
+function validatePort(input: { value: unknown; source: string }): number {
+  const { value, source } = input;
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && /^\s*\d+\s*$/.test(value)
+        ? Number(value)
+        : NaN;
+  if (!Number.isInteger(n) || n < 0 || n > 65535 || (n === 0 && source !== 'default')) {
+    // Port 0 (ephemeral) is only meaningful programmatically, never from config.
+    throw new ConfigError(
+      `Invalid port from ${source}: "${String(value)}". Must be an integer between 1 and 65535.`
+    );
+  }
+  return n;
+}
+
+function validateNonNegative(raw: unknown, what: string, integer: boolean): number {
+  if (raw === undefined) return 0;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number(raw.trim()) : NaN;
+  if (
+    (typeof raw === 'string' && raw.trim() === '') ||
+    !Number.isFinite(n) ||
+    n < 0 ||
+    (integer && !Number.isInteger(n))
+  ) {
+    throw new ConfigError(
+      `Invalid ${what}: "${String(raw)}". Must be ${integer ? 'an integer' : 'a number'} >= 0.`
+    );
+  }
+  return n;
 }
 
 function parseBoolean(value: string | undefined): boolean | undefined {
@@ -596,7 +673,7 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
-const DEFAULT_MAX_POST_BYTES = 500 * 1024 * 1024;
+const DEFAULT_MAX_POST_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
@@ -656,11 +733,27 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
   const transport: 'stdio' | 'http' = transportValue === 'http' ? 'http' : 'stdio';
 
-  const httpPort =
-    cli.port ??
-    (process.env.TRILIUM_HTTP_PORT ? parseInt(process.env.TRILIUM_HTTP_PORT, 10) : undefined) ??
-    file.httpPort ??
-    3000;
+  const httpPort = validatePort(
+    cli.port !== undefined
+      ? { value: cli.port, source: '--port' }
+      : emptyToUndefined(process.env.TRILIUM_HTTP_PORT) !== undefined
+        ? { value: process.env.TRILIUM_HTTP_PORT, source: 'TRILIUM_HTTP_PORT' }
+        : file.httpPort !== undefined
+          ? { value: file.httpPort, source: 'config file httpPort' }
+          : { value: 3000, source: 'default' }
+  );
+
+  const httpHost =
+    cli.host ??
+    emptyToUndefined(process.env.TRILIUM_HTTP_HOST) ??
+    file.httpHost ??
+    DEFAULT_HTTP_HOST;
+
+  const allowedHosts =
+    cli.allowedHosts ??
+    (process.env.TRILIUM_ALLOWED_HOSTS ? splitCsv(process.env.TRILIUM_ALLOWED_HOSTS) : undefined) ??
+    file.allowedHosts ??
+    [];
 
   const multiTenant =
     cli.multiTenant ?? parseBoolean(process.env.TRILIUM_MULTI_TENANT) ?? file.multiTenant ?? false;
@@ -674,14 +767,19 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     [];
 
   const gatewayAuthRaw =
-    cli.gatewayAuth ?? process.env.TRILIUM_GATEWAY_AUTH ?? file.gatewayAuth ?? undefined;
-  let gatewayAuth: GatewayAuthMode;
-  if (gatewayAuthRaw === 'bearer' || gatewayAuthRaw === 'none' || gatewayAuthRaw === 'jwt') {
-    gatewayAuth = gatewayAuthRaw;
-  } else {
-    // Default: require bearer when multi-tenant is on, otherwise keep legacy unauth behavior
-    gatewayAuth = multiTenant ? 'bearer' : 'none';
-  }
+    cli.gatewayAuth ??
+    emptyToUndefined(process.env.TRILIUM_GATEWAY_AUTH) ??
+    file.gatewayAuth ??
+    undefined;
+  // Unset → default: require bearer when multi-tenant is on, otherwise keep
+  // legacy unauth behavior. A set-but-unknown value is an error: silently
+  // defaulting a typo like "berer" to `none` would disable auth.
+  const gatewayAuth: GatewayAuthMode =
+    gatewayAuthRaw === undefined
+      ? multiTenant
+        ? 'bearer'
+        : 'none'
+      : parseEnumValue(gatewayAuthRaw, GATEWAY_AUTH_MODES, 'gateway auth mode');
 
   const urlAllowlist =
     cli.urlAllowlist ??
@@ -755,14 +853,19 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.corsOrigins ??
     [];
 
-  const rateLimitRps =
-    cli.rateLimitRps ?? parseNumber(process.env.TRILIUM_RATE_LIMIT_RPS) ?? file.rateLimitRps ?? 0;
+  const rateLimitRps = validateNonNegative(
+    cli.rateLimitRps ?? emptyToUndefined(process.env.TRILIUM_RATE_LIMIT_RPS) ?? file.rateLimitRps,
+    'rate-limit rps',
+    false
+  );
 
-  const rateLimitBurst =
+  const rateLimitBurst = validateNonNegative(
     cli.rateLimitBurst ??
-    parseNumber(process.env.TRILIUM_RATE_LIMIT_BURST) ??
-    file.rateLimitBurst ??
-    0;
+      emptyToUndefined(process.env.TRILIUM_RATE_LIMIT_BURST) ??
+      file.rateLimitBurst,
+    'rate-limit burst',
+    true
+  );
 
   const jwtSecrets =
     cli.jwtSecrets ??
@@ -808,13 +911,14 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     searchStrategyRaw === 'fast' || searchStrategyRaw === 'full' ? searchStrategyRaw : 'auto';
 
   const metricsAuthRaw =
-    cli.metricsAuth ?? process.env.TRILIUM_METRICS_AUTH ?? file.metricsAuth ?? undefined;
-  let metricsAuth: MetricsAuthMode;
-  if (metricsAuthRaw === 'gateway' || metricsAuthRaw === 'bearer' || metricsAuthRaw === 'none') {
-    metricsAuth = metricsAuthRaw;
-  } else {
-    metricsAuth = 'gateway';
-  }
+    cli.metricsAuth ??
+    emptyToUndefined(process.env.TRILIUM_METRICS_AUTH) ??
+    file.metricsAuth ??
+    undefined;
+  let metricsAuth: MetricsAuthMode =
+    metricsAuthRaw === undefined
+      ? 'gateway'
+      : parseEnumValue(metricsAuthRaw, METRICS_AUTH_MODES, 'metrics auth mode');
 
   // Single-tenant mode: require token (URL has a sensible default). Historical behavior.
   if (!multiTenant && !rawToken) {
@@ -860,6 +964,25 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
       'Error: --gateway-auth jwt requires at least one --jwt-secret (HS256) or --jwt-jwks-url (RS256/ES256).'
     );
     process.exit(1);
+  }
+
+  // JWKS without an audience accepts ANY token the identity provider issues
+  // for ANY client/application. Loud, but not fatal (existing deployments).
+  if (gatewayAuth === 'jwt' && jwtJwksUrl && !jwtAudience) {
+    console.error(
+      'WARNING: --gateway-auth jwt with --jwt-jwks-url but no --jwt-audience. Any token your ' +
+        'identity provider issues for ANY application will be accepted. Set --jwt-audience ' +
+        "(TRILIUM_JWT_AUDIENCE) to this server's client id / audience."
+    );
+  }
+
+  // Multi-tenant + unrestricted local reads would let every tenant read the
+  // server's entire filesystem via tool inputs.
+  if (multiTenant && allowLocalFileRead && localFileRoots.length === 0) {
+    throw new ConfigError(
+      '--multi-tenant with --allow-local-file-read requires --local-file-roots ' +
+        '(unrestricted local reads would expose the server filesystem to every tenant).'
+    );
   }
 
   // Metrics validation.
@@ -913,6 +1036,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     publicUrl,
     transport,
     httpPort,
+    httpHost,
+    allowedHosts,
     multiTenant,
     gatewayAuth,
     gatewayTokens,

@@ -15,8 +15,11 @@ import {
 import { DiffApplicationError } from './tools/diff.js';
 import { configureContentInput, ContentNormalizationError } from './tools/contentInput.js';
 import type { Config } from './config.js';
+import type { ToolHandlerResult } from './tools/schemas.js';
+import type { ToolContext } from './tools/context.js';
 import { deriveWebBaseUrl } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
+import { SERVER_VERSION } from './version.js';
 import { registerNoteTools, handleNoteTool } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool, configureSearch } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
@@ -28,6 +31,25 @@ import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js'
 import { startHttp } from './http/server.js';
 import { redactArgs, type Logger } from './utils/logger.js';
 import type { Metrics } from './http/metrics.js';
+
+type ToolHandler = (
+  client: TriliumClient,
+  name: string,
+  args: unknown,
+  ctx: ToolContext
+) => Promise<ToolHandlerResult>;
+
+/** Each handler returns null for names it does not own; the first non-null result wins. */
+const TOOL_HANDLERS: ToolHandler[] = [
+  handleNoteTool,
+  handleSearchTool,
+  handleOrganizationTool,
+  handleAttributeTool,
+  handleCalendarTool,
+  handleSystemTool,
+  handleAttachmentTool,
+  handleRevisionTool,
+];
 
 export interface McpServerContext {
   logger: Logger;
@@ -65,7 +87,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
   const server = new Server(
     {
       name: 'triliumnext-mcp',
-      version: '1.0.0',
+      version: SERVER_VERSION,
     },
     {
       capabilities: {
@@ -87,6 +109,8 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     ...registerOrganizationTools(), // organize_note
     ...registerSystemTools(), // create_revision, manage_system
   ];
+
+  const toolNames = new Set(allTools.map((t) => t.name));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     logger.info('list_tools', { session: sessionId, principal, count: allTools.length });
@@ -111,12 +135,20 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       message: outcome.message,
     });
     if (metrics) {
+      // Unknown names collapse to one label so arbitrary client input cannot
+      // blow up metric cardinality (the log line above keeps the raw name).
+      const label = toolNames.has(tool) ? tool : 'unknown';
       const okLabel = outcome.ok ? 'true' : 'false';
       const errorLabel = outcome.ok ? 'none' : (outcome.error ?? 'unknown');
-      metrics.toolCallsTotal.inc({ tool, ok: okLabel, error: errorLabel });
-      metrics.toolCallDuration.observe({ tool }, durationMs / 1000);
+      metrics.toolCallsTotal.inc({ tool: label, ok: okLabel, error: errorLabel });
+      metrics.toolCallDuration.observe({ tool: label }, durationMs / 1000);
       if (metrics.toolCallsByPrincipalTotal && principal) {
-        metrics.toolCallsByPrincipalTotal.inc({ principal, tool, ok: okLabel, error: errorLabel });
+        metrics.toolCallsByPrincipalTotal.inc({
+          principal,
+          tool: label,
+          ok: okLabel,
+          error: errorLabel,
+        });
       }
     }
   };
@@ -154,61 +186,22 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     });
 
     try {
-      let result: {
-        content: Array<
-          { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
-        >;
-      } | null = await handleNoteTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleSearchTool(client, name, args, { progress });
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleOrganizationTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleAttributeTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleCalendarTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleSystemTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleAttachmentTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleRevisionTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
+      for (const handle of TOOL_HANDLERS) {
+        const result = await handle(client, name, args, { progress });
+        if (result !== null) {
+          recordToolCall(name, t0, { ok: true });
+          return result;
+        }
       }
 
       recordToolCall(name, t0, { ok: false, error: 'unknown_tool' });
       return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+        content: [
+          {
+            type: 'text',
+            text: `Unknown tool: ${name}. Valid tools: ${[...toolNames].join(', ')}.`,
+          },
+        ],
         isError: true,
       };
     } catch (error) {

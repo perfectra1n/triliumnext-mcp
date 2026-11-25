@@ -5,7 +5,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { configureContentInput } from '../../src/tools/contentInput.js';
 import { registerNoteTools, handleNoteTool } from '../../src/tools/notes.js';
-import { registerSearchTools, handleSearchTool, configureSearch } from '../../src/tools/search.js';
+import {
+  registerSearchTools,
+  handleSearchTool,
+  compactSearchResult,
+  configureSearch,
+} from '../../src/tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from '../../src/tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from '../../src/tools/attributes.js';
 import {
@@ -154,7 +159,32 @@ describe('Note tools', () => {
       expect(byName['create_note'].annotations?.readOnlyHint).toBe(false);
       expect(byName['write_note'].annotations?.destructiveHint).toBe(true);
       expect(byName['delete_note'].annotations?.destructiveHint).toBe(true);
-      expect(byName['delete_note'].annotations?.idempotentHint).toBe(true);
+      // delete_note also undeletes, so repeating a call is not a no-op.
+      expect(byName['delete_note'].annotations?.idempotentHint).toBe(false);
+      for (const t of tools) {
+        expect(t.title).toBe(t.annotations?.title);
+        expect(typeof t.annotations?.openWorldHint).toBe('boolean');
+      }
+      expect(byName['create_note'].annotations?.openWorldHint).toBe(true);
+      expect(byName['write_note'].annotations?.openWorldHint).toBe(true);
+      expect(byName['get_note'].annotations?.openWorldHint).toBe(false);
+    });
+
+    it('rejects entity IDs that could rewrite the ETAPI path', async () => {
+      const client = createMockClient();
+      for (const noteId of ['../app-info', 'a/b', 'x?y', '']) {
+        await expect(handleNoteTool(client, 'get_note', { noteId })).rejects.toThrow();
+      }
+      await expect(
+        handleNoteTool(client, 'create_note', {
+          parentNoteId: 'root/x',
+          title: 'T',
+          type: 'text',
+          content: 'c',
+        })
+      ).rejects.toThrow();
+      expect(client.getNote).not.toHaveBeenCalled();
+      expect(client.createNote).not.toHaveBeenCalled();
     });
   });
 
@@ -373,7 +403,11 @@ describe('Note tools', () => {
   describe('write_note', () => {
     let client: TriliumClient;
     beforeEach(() => {
-      client = createMockClient();
+      client = createMockClient({
+        getNote: vi
+          .fn()
+          .mockResolvedValue({ noteId: 'n1', title: 'T', type: 'text', mime: 'text/html' }),
+      });
     });
 
     it('mode="metadata" calls updateNote with patch', async () => {
@@ -777,8 +811,6 @@ describe('search_notes fuzzy fallback', () => {
   const callArgs = (client: TriliumClient, n: number) => mockSearch(client).mock.calls[n][0];
   const parse = (result: { content: Array<{ type: 'text'; text: string }> } | null) =>
     JSON.parse((result?.content[0] as { text: string }).text);
-  const rawText = (result: { content: Array<{ type: 'text'; text: string }> } | null) =>
-    (result?.content[0] as { text: string }).text;
 
   it('does not retry when the exact search found something', async () => {
     const client = createMockClient();
@@ -788,8 +820,12 @@ describe('search_notes fuzzy fallback', () => {
     const result = await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' });
 
     expect(client.searchNotes).toHaveBeenCalledTimes(1);
-    // Byte-identical to the pre-feature response shape.
-    expect(rawText(result)).toBe(JSON.stringify(response, null, 2));
+    // The exact response, compacted, with truncation bookkeeping.
+    expect(parse(result)).toEqual({
+      results: response.results.map(compactSearchResult),
+      truncated: false,
+      returned: 1,
+    });
   });
 
   it('retries a zero-result multi-term query as a ranked OR search', async () => {
@@ -818,7 +854,7 @@ describe('search_notes fuzzy fallback', () => {
     });
 
     expect(client.searchNotes).toHaveBeenCalledTimes(1);
-    expect(rawText(result)).toBe(JSON.stringify(response, null, 2));
+    expect(parse(result)).toEqual({ results: [], truncated: false, returned: 0 });
     expect(parse(result)).not.toHaveProperty('searchMode');
   });
 
@@ -888,7 +924,7 @@ describe('search_notes fuzzy fallback', () => {
 
     const result = await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' });
 
-    expect(rawText(result)).toBe(JSON.stringify(exact, null, 2));
+    expect(parse(result)).toEqual({ results: [], truncated: false, returned: 0 });
   });
 
   it('orders fuzzy results by relevance without touching the note objects', async () => {
@@ -1093,6 +1129,9 @@ describe('Organization tools', () => {
     });
 
     it('action="reorder" updates each branch position', async () => {
+      (client.getBranch as ReturnType<typeof vi.fn>).mockImplementation((id: string) =>
+        Promise.resolve({ branchId: id, parentNoteId: 'p1' })
+      );
       (client.updateBranch as ReturnType<typeof vi.fn>).mockResolvedValue({ branchId: 'b1' });
 
       await handleOrganizationTool(client, 'organize_note', {
@@ -1406,14 +1445,14 @@ describe('System tools', () => {
   });
 
   describe('create_revision', () => {
-    it('creates a revision with default format', async () => {
+    it('creates a revision', async () => {
       await handleSystemTool(client, 'create_revision', { noteId: 'n1' });
-      expect(client.createRevision).toHaveBeenCalledWith('n1', 'html');
+      expect(client.createRevision).toHaveBeenCalledWith('n1');
     });
 
-    it('accepts format="markdown"', async () => {
+    it('ignores a legacy format argument', async () => {
       await handleSystemTool(client, 'create_revision', { noteId: 'n1', format: 'markdown' });
-      expect(client.createRevision).toHaveBeenCalledWith('n1', 'markdown');
+      expect(client.createRevision).toHaveBeenCalledWith('n1');
     });
 
     it('appends the note url to the success message', async () => {
@@ -1449,7 +1488,7 @@ describe('System tools', () => {
       ).rejects.toThrow();
     });
 
-    it('action="export" returns base64 ZIP', async () => {
+    it('action="export" returns the ZIP as an embedded resource', async () => {
       const data = new Uint8Array([80, 75]);
       (client.exportNote as ReturnType<typeof vi.fn>).mockResolvedValue(data.buffer);
 
@@ -1459,8 +1498,9 @@ describe('System tools', () => {
         format: 'markdown',
       });
       expect(client.exportNote).toHaveBeenCalledWith('root', 'markdown');
-      const parsed = JSON.parse((result?.content[0] as { text: string }).text);
-      expect(parsed.base64Data).toBeTruthy();
+      const resource = result?.content[1] as { type: string; resource: { blob: string } };
+      expect(resource.type).toBe('resource');
+      expect(resource.resource.blob).toBe(Buffer.from(data).toString('base64'));
     });
 
     it('action="export" requires noteId', async () => {
@@ -1526,6 +1566,10 @@ describe('Attachment tools', () => {
     expect(byName['get_attachment'].annotations?.readOnlyHint).toBe(true);
     expect(byName['write_attachment'].annotations?.destructiveHint).toBe(true);
     expect(byName['delete_attachment'].annotations?.destructiveHint).toBe(true);
+    expect(byName['create_attachment'].annotations?.openWorldHint).toBe(true);
+    expect(byName['write_attachment'].annotations?.openWorldHint).toBe(true);
+    expect(byName['get_attachment'].annotations?.openWorldHint).toBe(false);
+    expect(byName['delete_attachment'].annotations?.openWorldHint).toBe(false);
   });
 
   let client: TriliumClient;
@@ -1663,6 +1707,56 @@ describe('Attachment tools', () => {
       expect(sent.equals(Buffer.from('XYZ'))).toBe(true);
     });
 
+    it('returns non-image binaries as a base64 embedded resource', async () => {
+      const pdf = Buffer.from('%PDF-1.4 \x00\xff binary');
+      client = createMockClient({
+        getAttachment: vi.fn().mockResolvedValue({
+          attachmentId: 'a1',
+          mime: 'application/pdf',
+          contentLength: pdf.length,
+        }),
+        getAttachmentContentBinary: vi.fn().mockResolvedValue(pdf),
+      } as Partial<TriliumClient>);
+      const result = await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
+      expect(result?.content[0]).toEqual({
+        type: 'resource',
+        resource: {
+          uri: 'trilium://attachment/a1',
+          mimeType: 'application/pdf',
+          blob: pdf.toString('base64'),
+        },
+      });
+      expect(client.getAttachmentContent).not.toHaveBeenCalled();
+    });
+
+    it('returns metadata plus a notice for binaries over the 5 MB cap', async () => {
+      client = createMockClient({
+        getAttachment: vi.fn().mockResolvedValue({
+          attachmentId: 'a1',
+          mime: 'application/zip',
+          contentLength: 6 * 1024 * 1024,
+        }),
+        getAttachmentContentBinary: vi.fn(),
+      } as Partial<TriliumClient>);
+      const result = await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
+      const payload = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(payload.attachmentId).toBe('a1');
+      expect(payload.notice).toContain('exceeds');
+      expect(client.getAttachmentContentBinary).not.toHaveBeenCalled();
+    });
+
+    it('create_attachment without a derivable title fails with TITLE_REQUIRED', async () => {
+      await expect(
+        handleAttachmentTool(client, 'create_attachment', {
+          ownerId: 'n1',
+          role: 'file',
+          mime: 'text/plain',
+          content: 'hello',
+        })
+      ).rejects.toMatchObject({ code: 'TITLE_REQUIRED' });
+      expect(client.createAttachment).not.toHaveBeenCalled();
+    });
+
     it('caps oversized text attachment content with a steering notice', async () => {
       (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
         attachmentId: 'a1',
@@ -1732,7 +1826,27 @@ describe('Attachment tools', () => {
       ).rejects.toThrow();
     });
 
+    it('mode="edit" rejects binary attachments without writing', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'application/pdf',
+      });
+      await expect(
+        handleAttachmentTool(client, 'write_attachment', {
+          attachmentId: 'a1',
+          mode: 'edit',
+          changes: [{ old_string: 'a', new_string: 'b' }],
+        })
+      ).rejects.toThrow(/binary.*replace/);
+      expect(client.getAttachmentContent).not.toHaveBeenCalled();
+      expect(client.updateAttachmentContent).not.toHaveBeenCalled();
+    });
+
     it('mode="edit" applies search/replace', async () => {
+      (client.getAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'a1',
+        mime: 'text/plain',
+      });
       let stored = 'foo bar';
       (client.getAttachmentContent as ReturnType<typeof vi.fn>).mockImplementation(
         async () => stored
@@ -1970,7 +2084,6 @@ describe('Total tool surface', () => {
       ['get_note', 'includeImages', true],
       ['create_note', 'format', 'html'],
       ['write_note', 'format', 'html'],
-      ['create_revision', 'format', 'html'],
       ['manage_system', 'format', 'html'],
     ];
     for (const [toolName, param, expected] of expectations) {

@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
-import { defineTool } from './schemas.js';
-import { positionSchema, required } from './validators.js';
+import type { Attachment } from '../types/etapi.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
+import { entityIdSchema, positionSchema, required } from './validators.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 import { capWithNotice } from './contentLimits.js';
 import {
@@ -23,15 +24,16 @@ export { IMAGE_MIME_TYPES, isImageMimeType, isBinaryMimeType, parseDataUrl };
 // Schemas
 // ============================================================================
 
+/** get_attachment returns non-image binaries as an embedded resource up to this size. */
+const BINARY_RESOURCE_MAX_BYTES = 5 * 1024 * 1024;
+
+const ROLE_GUIDANCE =
+  '"image" for pictures embedded in the note, "file" for downloadable files (Trilium accepts other ' +
+  'values, but these are the two in normal use).';
+
 const createAttachmentSchema = z.object({
-  ownerId: z
-    .string()
-    .min(1, 'Owner note ID is required')
-    .describe('ID of the note that will own this attachment'),
-  role: z
-    .string()
-    .min(1, 'Role is required')
-    .describe('Role of the attachment (e.g., "file", "image")'),
+  ownerId: entityIdSchema.describe('ID of the note that will own this attachment'),
+  role: z.string().min(1, 'Role is required').describe(ROLE_GUIDANCE),
   mime: z
     .string()
     .min(1)
@@ -54,28 +56,20 @@ const createAttachmentSchema = z.object({
 
 const getAttachmentSchema = z
   .object({
-    attachmentId: z
-      .string()
+    attachmentId: entityIdSchema
+      .optional()
+      .describe('Fetch this one attachment (body included unless include_content=false).'),
+    noteId: entityIdSchema
       .optional()
       .describe(
-        'If provided, returns the single attachment with this ID (body included by default — pass include_content=false to skip the body).'
-      ),
-    noteId: z
-      .string()
-      .optional()
-      .describe(
-        'If provided, returns an array of all attachments for this note. ' +
-          'This listing path is metadata-only (title, mime, size, attachmentId) — use it first when you do not yet know which attachment you want.'
+        "List this note's attachments (metadata only: attachmentId, title, mime, contentLength)."
       ),
     include_content: z
       .boolean()
       .optional()
       .default(true)
       .describe(
-        'Only meaningful with "attachmentId". Defaults to true — returns the attachment body: ' +
-          'image attachments come back as MCP image blocks, text attachments as raw strings, other binary as base64-wrapped text. ' +
-          'Set to false when you specifically need only metadata (e.g., to check size/mime of a potentially large binary before fetching, or for an inventory pass). ' +
-          'Otherwise leave at the default — do not pre-emptively set false to "save tokens" if you actually need the content.'
+        'With attachmentId: include the body (default true). Pass false to check mime/size first.'
       ),
   })
   .check((ctx) => {
@@ -100,19 +94,16 @@ const getAttachmentSchema = z
 
 const writeAttachmentSchema = z
   .object({
-    attachmentId: z
-      .string()
-      .min(1, 'Attachment ID is required')
-      .describe('ID of the attachment to write to'),
+    attachmentId: entityIdSchema.describe('ID of the attachment to write to'),
     mode: z
       .enum(['metadata', 'replace', 'edit'])
       .describe(
         'Write mode. ' +
           '"metadata" — update role/mime/title/position only. ' +
           '"replace" — overwrite attachment content (accepts a file path, http(s) URL, data URL, base64, or raw text). ' +
-          '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to existing text content.'
+          '"edit" — apply search/replace blocks (changes) or a unified diff (patch) to text content.'
       ),
-    role: z.string().optional().describe('New role (metadata mode only).'),
+    role: z.string().optional().describe(`New role (metadata mode only): ${ROLE_GUIDANCE}`),
     mime: z.string().optional().describe('New MIME type (metadata mode only).'),
     title: z.string().optional().describe('New title/filename (metadata mode only).'),
     position: positionSchema.optional().describe('New position for ordering (metadata mode only).'),
@@ -124,12 +115,13 @@ const writeAttachmentSchema = z
       .array(searchReplaceBlockSchema)
       .optional()
       .describe(
-        '"edit" mode: array of {old_string, new_string} blocks applied sequentially to existing content.'
+        '"edit" mode: {old_string, new_string} blocks applied in order; each old_string must match the ' +
+          'stored text exactly once ("" inserts at the start).'
       ),
     patch: z
       .string()
       .optional()
-      .describe('"edit" mode: unified diff to apply to existing content.'),
+      .describe('"edit" mode: single-file unified diff (with @@ hunks) against the stored text.'),
   })
   .check((ctx) => {
     const { mode, role, mime, title, position, content, changes, patch } = ctx.value;
@@ -192,10 +184,7 @@ const writeAttachmentSchema = z
   });
 
 const deleteAttachmentSchema = z.object({
-  attachmentId: z
-    .string()
-    .min(1, 'Attachment ID is required')
-    .describe('ID of the attachment to delete'),
+  attachmentId: entityIdSchema.describe('ID of the attachment to delete'),
 });
 
 // ============================================================================
@@ -206,55 +195,51 @@ export function registerAttachmentTools(): Tool[] {
   return [
     defineTool(
       'get_attachment',
-      "Read an attachment or list a note's attachments. Two modes:\n" +
-        '- Pass "noteId" to list all attachments for that note (metadata only — title, mime, size, attachmentId).\n' +
-        '- Pass "attachmentId" to fetch one attachment. By default this returns the body: images come back as MCP image blocks, ' +
-        'text attachments as raw strings, other binary as base64-wrapped text.\n\n' +
-        'This is the canonical way to read attachment content — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
-        '(e.g. via curl, fetch, or shell). If you only want metadata for a specific attachmentId (e.g. to check size before paying for a large binary), pass include_content=false.',
+      "Read one attachment (attachmentId) or list a note's attachments (noteId, metadata only). " +
+        'Bodies come back by type: images as image blocks, text as a string (long text is truncated), ' +
+        `other binaries as a base64 embedded resource up to ${BINARY_RESOURCE_MAX_BYTES / 1024 / 1024} MB ` +
+        '(larger ones return metadata only).',
       getAttachmentSchema,
-      { title: 'Read attachment(s)', readOnlyHint: true }
+      { title: 'Read attachment(s)', readOnlyHint: true, openWorldHint: false }
     ),
     defineTool(
       'create_attachment',
-      'Create a new attachment on a note. Returns the created attachment metadata. ' +
-        `${CONTENT_SOURCE_GUIDANCE} ` +
-        'mime and title are optional — auto-detected/derived from the source ' +
-        '(magic bytes, data-URL header, or file extension); a path or URL basename becomes the title. ' +
-        'Simplest call: {ownerId, role: "image", content: "/tmp/screenshot.png"}.',
+      'Attach content to a note and return the attachment metadata. mime and title are auto-detected ' +
+        'from the source (a path or URL basename becomes the title); inline base64/text needs a title. ' +
+        'Example: {ownerId, role: "image", title: "dot.png", content: "data:image/png;base64,iVBORw0..."}.',
       createAttachmentSchema,
       {
         title: 'Create attachment',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
+        openWorldHint: true,
       }
     ),
     defineTool(
       'write_attachment',
-      'Update an attachment. Three modes via "mode":\n' +
-        '- "metadata": update role/mime/title/position (no content change)\n' +
-        '- "replace": overwrite the attachment body — accepts a local file path, http(s) URL, ' +
-        'data URL, base64 (binary types), or raw text (text types); the stored mime is kept\n' +
-        '- "edit": apply "changes" (search/replace blocks) or "patch" (unified diff) to existing text content\n\n' +
-        '"edit" mode only works for text content — it fetches existing content, applies the diff, and verifies the result.',
+      'Update an attachment: mode="metadata" changes role/mime/title/position; "replace" overwrites ' +
+        'the body (path, URL, data URL, base64 or text; the stored mime is kept); "edit" applies ' +
+        '"changes" or a "patch" to a text attachment (binary attachments must use "replace").',
       writeAttachmentSchema,
       {
         title: 'Write attachment',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
+        openWorldHint: true,
       }
     ),
     defineTool(
       'delete_attachment',
-      'Delete an attachment by ID. This permanently removes the attachment and its content.',
+      'Permanently delete an attachment and its content.',
       deleteAttachmentSchema,
       {
         title: 'Delete attachment',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: true,
+        openWorldHint: false,
       }
     ),
   ];
@@ -264,15 +249,31 @@ export function registerAttachmentTools(): Tool[] {
 // Dispatch
 // ============================================================================
 
+function tooLarge(attachment: Attachment, sizeBytes: number): ToolHandlerResult {
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          {
+            ...attachment,
+            notice:
+              `Content not returned: ${sizeBytes} bytes exceeds the ${BINARY_RESOURCE_MAX_BYTES}-byte ` +
+              'limit for binary attachments. Open it in Trilium instead.',
+          },
+          null,
+          2
+        ),
+      },
+    ],
+  };
+}
+
 export async function handleAttachmentTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{
-  content: Array<
-    { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
-  >;
-} | null> {
+): Promise<ToolHandlerResult> {
   switch (name) {
     case 'create_attachment': {
       const parsed = createAttachmentSchema.parse(args);
@@ -283,7 +284,7 @@ export async function handleAttachmentTool(
       const title = parsed.title ?? resolved.sourceName;
       if (!title) {
         throw new ContentNormalizationError(
-          'UNDETECTABLE_MIME',
+          'TITLE_REQUIRED',
           'A title is required when the content source has no filename (inline base64 or raw text).',
           'Provide a title (e.g. "screenshot.png"), or pass a file path or URL whose basename can serve as one.'
         );
@@ -341,6 +342,28 @@ export async function handleAttachmentTool(
               type: 'image',
               data: base64Content,
               mimeType: attachment.mime,
+            },
+          ],
+        };
+      }
+
+      if (isBinaryMimeType(attachment.mime)) {
+        if ((attachment.contentLength ?? 0) > BINARY_RESOURCE_MAX_BYTES) {
+          return tooLarge(attachment, attachment.contentLength);
+        }
+        const bytes = await client.getAttachmentContentBinary(attachmentId);
+        if (bytes.length > BINARY_RESOURCE_MAX_BYTES) {
+          return tooLarge(attachment, bytes.length);
+        }
+        return {
+          content: [
+            {
+              type: 'resource',
+              resource: {
+                uri: `trilium://attachment/${encodeURIComponent(attachmentId)}`,
+                mimeType: attachment.mime,
+                blob: bytes.toString('base64'),
+              },
             },
           ],
         };
@@ -404,6 +427,13 @@ export async function handleAttachmentTool(
       }
 
       // edit
+      const target = await client.getAttachment(parsed.attachmentId);
+      if (isBinaryMimeType(target.mime)) {
+        throw new Error(
+          `Attachment ${parsed.attachmentId} is binary (${target.mime}); mode="edit" only works on text ` +
+            'attachments. Use mode="replace" with a file path, URL, data URL or base64.'
+        );
+      }
       const existing = await client.getAttachmentContent(parsed.attachmentId);
       const finalContent = await resolveContent(existing, {
         changes: parsed.changes,
@@ -413,7 +443,7 @@ export async function handleAttachmentTool(
 
       if (parsed.changes !== undefined) {
         const readBack = await client.getAttachmentContent(parsed.attachmentId);
-        verifySearchReplaceResults(readBack, parsed.changes);
+        verifySearchReplaceResults(readBack, parsed.changes, finalContent);
       }
 
       return {

@@ -2,58 +2,48 @@ import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { TriliumClientError } from '../client/trilium.js';
-import { defineTool } from './schemas.js';
-import { exportFormatSchema, backupNameSchema, required } from './validators.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
+import { backupNameSchema, entityIdSchema, required } from './validators.js';
+
+/** Largest export ZIP returned inline; beyond this the response would swamp the client. */
+export const MAX_EXPORT_BYTES = 10 * 1024 * 1024;
+
+/** ETAPI GET /notes/{id}/export formats (etapi.openapi.yaml). */
+const EXPORT_FORMATS = ['html', 'markdown', 'share'] as const;
 
 const createRevisionSchema = z.object({
-  noteId: z
-    .string()
-    .min(1, 'Note ID is required')
-    .describe('ID of the note to create a revision for'),
-  format: exportFormatSchema
-    .default('html')
-    .describe(
-      'Format hint forwarded to the ETAPI revision endpoint (default: html). The revision always ' +
-        "snapshots the note's current stored content."
-    ),
+  noteId: entityIdSchema.describe('ID of the note to snapshot.'),
 });
 
 const manageSystemSchema = z
   .object({
     action: z
       .enum(['backup', 'export', 'import', 'app_info', 'metrics'])
-      .describe(
-        'System action to perform. ' +
-          '"backup" — create a full database backup (fields: backupName). ' +
-          '"export" — export a note and its subtree as a ZIP archive, returned base64-encoded (fields: noteId, format?). ' +
-          '"import" — import a ZIP archive (e.g. from a previous export) under a parent note (fields: noteId, data). ' +
-          '"app_info" — return Trilium instance info (version, database version) for diagnostics (no fields). ' +
-          '"metrics" — note/attachment/revision/attribute counts and note-type breakdowns (no fields).'
-      ),
+      .describe('System action to perform; see the tool description for each action.'),
     backupName: backupNameSchema
       .optional()
       .describe(
-        'Required for action="backup": identifier for the backup file (alphanumeric, hyphens, underscores).'
+        'action="backup": backup file identifier (letters, digits, - and _); writes backup-<name>.db.'
       ),
-    noteId: z
-      .string()
+    noteId: entityIdSchema
       .optional()
       .describe(
-        'Required for action="export": note to export (use "root" to export the entire database). ' +
-          'Required for action="import": parent note to import the ZIP under.'
+        'action="export": root of the subtree to export. action="import": parent note to import under.'
       ),
-    format: exportFormatSchema
+    format: z
+      .enum(EXPORT_FORMATS, {
+        message: `Invalid export format. Allowed values: ${EXPORT_FORMATS.join(', ')}`,
+      })
       .default('html')
       .describe(
-        'Optional for action="export": markdown is recommended for LLM processing (default: html).'
+        'action="export": "html" (default), "markdown", or "share" (static HTML site layout).'
       ),
     data: z
       .string()
       .regex(/^[A-Za-z0-9+/=\s]+$/, 'data must be base64-encoded')
       .optional()
       .describe(
-        'Required for action="import": the ZIP archive as base64. Intended for small archives — ' +
-          'base64 you can emit inline is the practical size limit.'
+        'action="import": the ZIP archive, base64-encoded. Only practical for small archives.'
       ),
   })
   .check((ctx) => {
@@ -100,37 +90,37 @@ export function registerSystemTools(): Tool[] {
   return [
     defineTool(
       'create_revision',
-      'Create a revision (snapshot) of a note. Useful before making significant edits to preserve the current state. ' +
-        'Revisions can be viewed and restored in Trilium. To read revisions later, use get_revisions. ' +
-        'The response includes a URL that opens the note in Trilium — give it to the user when you are done.',
+      "Snapshot a note's current content as a revision so later edits can be undone. List and read " +
+        'revisions with get_revisions; roll back with restore_revision.',
       createRevisionSchema,
       {
         title: 'Create revision snapshot',
         readOnlyHint: false,
         destructiveHint: false,
         idempotentHint: false,
+        openWorldHint: false,
       }
     ),
     defineTool(
       'manage_system',
-      'Trilium system operations. Five actions via "action":\n' +
-        '- "backup": create a full database backup file (backup-{backupName}.db) in Trilium\'s data directory. ' +
-        'Use before major operations for safety.\n' +
-        '- "export": export a note and its subtree as a ZIP archive, returned base64-encoded. ' +
-        'Use "root" as noteId to export the entire database. Format "markdown" is recommended for LLM processing.\n' +
-        '- "import": import a ZIP archive (typically from a previous export) under a parent note. ' +
-        'Pass the archive base64-encoded in "data". Returns the created note. Intended for small archives.\n' +
-        '- "app_info": return Trilium instance info (app version, database version, clipper protocol version) — ' +
-        'useful for diagnostics and version-dependent behavior.\n' +
-        '- "metrics": database statistics — total/active/deleted/protected note counts, attachment, revision, ' +
-        'branch and attribute counts, and per-type breakdowns. Counts only, no titles or content. ' +
-        'Requires a Trilium version that has /etapi/metrics.',
+      'Trilium system operations, selected by "action":\n' +
+        '- "app_info" (read-only): Trilium app/database/clipper versions.\n' +
+        '- "metrics" (read-only): note, attachment, revision, branch and attribute counts and per-type ' +
+        'breakdowns. Needs a Trilium version with /etapi/metrics.\n' +
+        '- "backup": write backup-<backupName>.db to Trilium\'s data directory, replacing a backup with ' +
+        'the same name.\n' +
+        '- "export": export a subtree as a ZIP (html, markdown or share format), returned as an embedded ' +
+        `resource for the user to save (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). You cannot read the ZIP ` +
+        'contents — to read notes use get_note.\n' +
+        '- "import": import a base64 ZIP (e.g. a previous export) under noteId; returns the created note.',
       manageSystemSchema,
       {
-        title: 'Backup, export, import, or app info',
+        title: 'Backup, export, import, app info, or metrics',
         readOnlyHint: false,
-        destructiveHint: false,
+        // backup overwrites a same-named file; import writes new notes.
+        destructiveHint: true,
         idempotentHint: false,
+        openWorldHint: false,
       }
     ),
   ];
@@ -140,19 +130,26 @@ export async function handleSystemTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<ToolHandlerResult> {
   switch (name) {
     case 'create_revision': {
       const parsed = createRevisionSchema.parse(args);
-      await client.createRevision(parsed.noteId, parsed.format ?? 'html');
+      await client.createRevision(parsed.noteId);
       const url = await client.getNoteUrl(parsed.noteId);
       return {
         content: [
           {
             type: 'text',
-            text:
-              `Revision created for note ${parsed.noteId}. The revision is now available in Trilium's note history. ` +
-              `View the note: ${url}`,
+            text: JSON.stringify(
+              {
+                success: true,
+                noteId: parsed.noteId,
+                note: 'Revision created. List it with get_revisions {noteId}.',
+                url,
+              },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -230,15 +227,21 @@ export async function handleSystemTool(
       // export
       const noteId = required(parsed.noteId, 'noteId');
       const format = parsed.format ?? 'html';
-      const data = await client.exportNote(noteId, format);
+      // The client's signature predates the spec's "share" format; the query
+      // value is forwarded verbatim.
+      const data = await client.exportNote(noteId, format as 'html' | 'markdown');
 
-      const bytes = new Uint8Array(data);
-      let binary = '';
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
+      if (data.byteLength > MAX_EXPORT_BYTES) {
+        throw new TriliumClientError(
+          413,
+          'EXPORT_TOO_LARGE',
+          `Export of '${noteId}' is ${data.byteLength} bytes, over the ${MAX_EXPORT_BYTES}-byte limit for ` +
+            'inline export. Export a smaller subtree (a child note), or have the user export from the ' +
+            'Trilium UI.'
+        );
       }
-      const base64 = btoa(binary);
 
+      const blob = Buffer.from(data).toString('base64');
       return {
         content: [
           {
@@ -249,12 +252,21 @@ export async function handleSystemTool(
                 noteId,
                 format,
                 sizeBytes: data.byteLength,
-                base64Data: base64,
-                note: 'This is a ZIP file encoded as base64. Decode and extract to access the exported notes.',
+                note:
+                  'The ZIP is attached as an embedded resource for the user to save; its contents are ' +
+                  'not readable here. Use get_note to read notes.',
               },
               null,
               2
             ),
+          },
+          {
+            type: 'resource',
+            resource: {
+              uri: `trilium://export/${noteId}.${format}.zip`,
+              mimeType: 'application/zip',
+              blob,
+            },
           },
         ],
       };
