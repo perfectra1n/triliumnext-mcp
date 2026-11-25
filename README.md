@@ -16,7 +16,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
   - [Quick start (Docker)](#quick-start-docker) / [(local)](#quick-start-local)
   - [HTTP endpoints](#http-endpoints) · [Error responses](#error-responses) · [Request body size limits](#request-body-size-limits)
   - [Connecting clients](#connecting-clients) — Claude Desktop, Claude Code, SDK
-  - [JWT / OIDC gateway auth](#jwt--oidc-gateway-auth) · [CORS](#cors) · [Rate limiting](#rate-limiting)
+  - [JWT / OIDC gateway auth](#jwt--oidc-gateway-auth) · [CORS](#cors) · [Rate limiting](#rate-limiting) · [Host header check](#host-header-check-dns-rebinding)
   - [StreamableHTTP transport](#streamablehttp-transport) — newer MCP transport alongside `/sse`
   - [Per-tenant audit + metrics](#per-tenant-audit--metrics)
   - [SSRF configuration](#ssrf-configuration) · [Reverse-proxy](#reverse-proxy-tls-termination)
@@ -85,21 +85,25 @@ Options:
 - `--public-url <url>` — user-facing Trilium web URL used for the clickable note links returned to the user. Defaults to `--url` with `/etapi` stripped. Set this only when the MCP server reaches Trilium at a different address than the user's browser does (e.g. an internal ETAPI host behind a public reverse-proxy domain).
 - `--transport <type>` — Transport type: `stdio` or `http` (default: `stdio`)
 - `-p, --port <port>` — HTTP server port when using http transport (default: `3000`)
-- `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `64mb`). See [Request body size limits](#request-body-size-limits).
+- `--host <addr>` — interface the HTTP transport binds to (default: `127.0.0.1`; env `TRILIUM_HTTP_HOST`). Use `0.0.0.0` (or `::`) to accept connections from other machines. **The Docker image sets `TRILIUM_HTTP_HOST=0.0.0.0`**, since a loopback bind is unreachable through a published container port. See [Host header check](#host-header-check-dns-rebinding).
+- `--allowed-hosts <hosts>` — extra `Host` header values (hostname, optional `:port`, comma-separated, repeatable; env `TRILIUM_ALLOWED_HOSTS`) accepted while bound to loopback. On a non-loopback bind, setting this turns the Host check on.
+- `--trusted-proxies <cidrs>` — reverse-proxy IPs/CIDRs whose `X-Forwarded-For` is trusted for rate limiting (env `TRILIUM_TRUSTED_PROXIES`). See [Rate limiting](#rate-limiting).
+- `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body (`/message` and `/mcp`). Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `64mb`). See [Request body size limits](#request-body-size-limits).
 - `-h, --help` — Show help message
 
 Content input options (see [Providing file content](#providing-file-content-paths-urls-base64)):
 - `--allow-local-file-read` / `--no-local-file-read` — permit tool inputs that name local file paths (default: on for stdio, off for `--transport http`)
 - `--local-file-roots <dirs>` — comma-separated directories content may be read from (default: unrestricted when reads are allowed)
 - `--content-url-allowlist <hosts>` — comma-separated hostnames permitted for http(s) content fetches (default: any public host)
+- `--content-allow-private-urls` — let content URL fetches reach private/loopback addresses. Default: off in multi-tenant mode; otherwise it follows `--allow-private-urls` (see [below](#providing-file-content-paths-urls-base64))
 - `--max-content-fetch-bytes <size>` — max content file read / URL download size (default: `50mb`)
 
 Multi-tenant HTTP options (see [Multi-tenant HTTP deployment](#multi-tenant-http-deployment) below):
 - `--multi-tenant` — each SSE client supplies its own Trilium URL + token
-- `--gateway-auth <mode>` — `none` or `bearer` (default: `bearer` when multi-tenant)
+- `--gateway-auth <mode>` — `none`, `bearer` or `jwt` (default: `bearer` when multi-tenant, `none` otherwise; see [JWT / OIDC gateway auth](#jwt--oidc-gateway-auth))
 - `--gateway-token <token>` — accepted bearer token (repeatable)
 - `--trilium-url-allowlist <hosts>` — comma-separated allowed hostnames for client URLs
-- `--allow-private-urls` — skip the private/loopback IP SSRF block
+- `--allow-private-urls` — skip the private/loopback IP SSRF block for client-supplied Trilium URLs (in multi-tenant mode it no longer opens up content URL fetches; use `--content-allow-private-urls` for that)
 
 ### Environment Variables
 
@@ -109,7 +113,10 @@ export TRILIUM_TOKEN=your-etapi-token
 export TRILIUM_PUBLIC_URL=https://trilium.example.com  # optional; web URL for note links (defaults to TRILIUM_URL without /etapi)
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
-export TRILIUM_MAX_POST_BYTES=64mb   # SSE POST body cap; see "Request body size limits"
+export TRILIUM_HTTP_HOST=127.0.0.1   # bind address; the Docker image sets 0.0.0.0
+export TRILIUM_ALLOWED_HOSTS=mcp.example.com  # extra Host values accepted on a loopback bind
+export TRILIUM_TRUSTED_PROXIES=127.0.0.1      # proxies whose X-Forwarded-For is trusted (rate limiting)
+export TRILIUM_MAX_POST_BYTES=64mb   # MCP POST body cap; see "Request body size limits"
 export TRILIUM_REQUEST_TIMEOUT=60s   # per-request ETAPI timeout (ms, or 90s / 2m); see "Reliability"
 export TRILIUM_BUSY_COOLDOWN=30s     # how long a timed-out Trilium is treated as busy
 export TRILIUM_SEARCH_STRATEGY=auto  # search_notes default: auto | fast | full
@@ -118,6 +125,7 @@ export TRILIUM_SEARCH_STRATEGY=auto  # search_notes default: auto | fast | full
 export TRILIUM_ALLOW_LOCAL_FILE_READ=true   # default: true for stdio, false for http
 export TRILIUM_LOCAL_FILE_ROOTS=/srv/uploads
 export TRILIUM_CONTENT_URL_ALLOWLIST=example.com
+export TRILIUM_CONTENT_ALLOW_PRIVATE_URLS=false  # default: false in multi-tenant, else TRILIUM_ALLOW_PRIVATE_URLS
 export TRILIUM_MAX_CONTENT_FETCH_BYTES=50mb
 
 # Multi-tenant (see section below):
@@ -127,6 +135,8 @@ export TRILIUM_GATEWAY_TOKENS=tok1,tok2
 export TRILIUM_URL_ALLOWLIST=notes.example.com,trilium.internal
 export TRILIUM_ALLOW_PRIVATE_URLS=false
 ```
+
+Invalid values are errors, not silent fallbacks: an unparseable size, duration, integer, boolean (`true`/`false`, `1`/`0`, `yes`/`no`) or enum value (`TRILIUM_SEARCH_STRATEGY`, `TRILIUM_TRANSPORT`, `TRILIUM_GATEWAY_AUTH`, `TRILIUM_METRICS_AUTH` — matched case-insensitively) stops startup with a message naming the variable. An empty variable counts as unset.
 
 ### Config File
 
@@ -151,13 +161,21 @@ For multi-tenant HTTP deployments, the same precedence applies (CLI > env > file
   "gatewayAuth": "bearer",
   "gatewayTokens": ["pick-a-long-random-token"],
   "urlAllowlist": ["notes.example.com", "trilium.internal"],
-  "allowPrivateUrls": false
+  "allowPrivateUrls": false,
+  "contentAllowPrivateUrls": false,
+  "trustedProxies": ["127.0.0.1"]
 }
 ```
 
+Config-file values are type-checked like everything else: numbers must be JSON numbers in range, booleans must be `true`/`false`, and lists must be arrays of strings (a comma-separated string is also accepted).
+
 ### Limits and tuning
 
-Every size cap, timeout, retry and search limit can be changed. Each setting follows the same precedence as everything else (CLI > env > config file > default). Sizes accept raw bytes or suffixed values (`512kb`, `5mb`, `1gb`); durations accept milliseconds or `500ms` / `90s` / `2m`. An unparseable CLI value is an error; an unparseable size/duration env var falls back to the default (like `TRILIUM_REQUEST_TIMEOUT`), and an invalid integer anywhere is an error. Config-file keys take plain numbers (bytes, milliseconds, or the integer).
+Every size cap, timeout, retry and search limit can be changed. Each setting follows the same precedence as everything else (CLI > env > config file > default). Sizes accept raw bytes or suffixed values (`512kb`, `5mb`, `1gb`); durations accept milliseconds or `500ms` / `90s` / `2m`. An unparseable or out-of-range value from any source (CLI, env or config file) is an error that names the setting. Config-file keys take plain numbers (bytes, milliseconds, or the integer).
+
+`0` is accepted only where it means something: the inline caps (`TRILIUM_MAX_INLINE_ATTACHMENT_BYTES`, `TRILIUM_MAX_NOTE_IMAGE_BYTES`, `TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES` — `0` = never inline), `TRILIUM_MAX_RETRIES` (`0` = no retries), `TRILIUM_SESSION_IDLE_TTL` (`0` = never expire), `TRILIUM_SEARCH_PREVIEW_MAX_RESULTS`, `TRILIUM_JWT_CLOCK_TOLERANCE` and the rate limits (`0` = off). Every other size and timeout must be greater than zero, and no duration may exceed what a timer can represent (~24.8 days; `TRILIUM_REQUEST_TIMEOUT` a fifth of that, since export/import get 5×).
+
+The inline caps `TRILIUM_MAX_INLINE_ATTACHMENT_BYTES`, `TRILIUM_MAX_NOTE_IMAGE_BYTES` and `TRILIUM_MAX_EXPORT_BYTES` can't exceed `TRILIUM_MAX_RESPONSE_BYTES` (those bodies are read through the same client, which refuses anything larger first). Setting one higher is a startup error; if you only lower `TRILIUM_MAX_RESPONSE_BYTES`, the caps you didn't set shrink to fit.
 
 Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are built from the configured value at startup.
 
@@ -166,14 +184,14 @@ Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are bu
 | Env var | CLI flag | Config-file key | Default | Meaning |
 |---------|----------|-----------------|---------|---------|
 | `TRILIUM_MAX_RESPONSE_BYTES` | `--max-response-bytes` | `maxResponseBytes` | `64mb` | Largest ETAPI response body buffered for any request. Larger bodies are refused from their `Content-Length`, or cut off mid-stream, instead of being read into memory (`RESPONSE_TOO_LARGE`). |
-| `TRILIUM_MAX_INLINE_ATTACHMENT_BYTES` | `--max-inline-attachment-bytes` | `maxInlineAttachmentBytes` | `5mb` | `get_attachment` returns image attachments as image blocks and other binaries as base64 resources up to this size; larger ones return metadata plus a notice telling the model to have the user open them in Trilium. Checked against the declared size before fetching and again on the bytes received. |
-| `TRILIUM_MAX_NOTE_IMAGE_BYTES` | `--max-note-image-bytes` | `maxNoteImageBytes` | `1mb` | `get_note` inlines each image embedded in the body (and the content of an image note) up to this size. |
-| `TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES` | `--max-note-images-total-bytes` | `maxNoteImagesTotalBytes` | `4mb` | Total embedded-image bytes `get_note` inlines per call; the rest are listed for `get_attachment`. |
-| `TRILIUM_MAX_EXPORT_BYTES` | `--max-export-bytes` | `maxExportBytes` | `10mb` | Largest export ZIP `manage_system` returns inline (enforced while downloading). |
+| `TRILIUM_MAX_INLINE_ATTACHMENT_BYTES` | `--max-inline-attachment-bytes` | `maxInlineAttachmentBytes` | `5mb` | `get_attachment` returns image attachments as image blocks and other binaries as base64 resources up to this size; larger ones return metadata plus a notice telling the model to have the user open them in Trilium. Checked against the declared size before fetching and again on the bytes received. `0` = never inline. |
+| `TRILIUM_MAX_NOTE_IMAGE_BYTES` | `--max-note-image-bytes` | `maxNoteImageBytes` | `1mb` | `get_note` inlines each image embedded in the body (and the content of an image note) up to this size. `0` = never. |
+| `TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES` | `--max-note-images-total-bytes` | `maxNoteImagesTotalBytes` | `4mb` | Total embedded-image bytes `get_note` inlines per call; the rest are listed for `get_attachment`. `0` = never. |
+| `TRILIUM_MAX_EXPORT_BYTES` | `--max-export-bytes` | `maxExportBytes` | `10mb` | Largest export ZIP `manage_system` returns inline (enforced while downloading). Must be > 0. |
 | `TRILIUM_CONTENT_CHAR_CAP` | `--content-char-cap` | `contentCharCap` | `50000` | Text characters returned per read: `get_note`'s default page, and the truncation point for revision and text-attachment bodies. |
 | `TRILIUM_CONTENT_MAX_CHARS_LIMIT` | `--content-max-chars-limit` | `contentMaxCharsLimit` | `500000` | Highest `content_max_chars` a `get_note` call may request. |
-| `TRILIUM_MAX_CONTENT_FETCH_BYTES` | `--max-content-fetch-bytes` | `maxContentFetchBytes` | `50mb` | Max content file read / URL download for attachment and image inputs (existing). |
-| `TRILIUM_MAX_POST_BYTES` | `--max-post-bytes` | `maxPostBytes` | `64mb` | Max MCP POST body on the HTTP transport (existing). |
+| `TRILIUM_MAX_CONTENT_FETCH_BYTES` | `--max-content-fetch-bytes` | `maxContentFetchBytes` | `50mb` | Max content file read / URL download for attachment and image inputs. Must be > 0. |
+| `TRILIUM_MAX_POST_BYTES` | `--max-post-bytes` | `maxPostBytes` | `64mb` | Max MCP POST body on the HTTP transport (`/message` and `/mcp`). Must be > 0. |
 
 **Timeouts and retries**
 
@@ -182,8 +200,8 @@ Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are bu
 | `TRILIUM_REQUEST_TIMEOUT` | `--request-timeout` | `requestTimeoutMs` | `60s` | Per-request ETAPI timeout; export, import and backup get 5× (existing). |
 | `TRILIUM_BUSY_COOLDOWN` | `--busy-cooldown` | `busyCooldownMs` | `30s` | How long a timed-out Trilium is treated as busy (existing). |
 | `TRILIUM_BUSY_PROBE_TIMEOUT` | `--busy-probe-timeout` | `busyProbeTimeoutMs` | `5s` | Timeout for non-search requests while a Trilium is marked busy. |
-| `TRILIUM_MAX_RETRIES` | `--max-retries` | `maxRetries` | `2` | Retries for idempotent requests on network errors and 502/503/504 (`0` disables). |
-| `TRILIUM_RETRY_DELAY` | `--retry-delay` | `retryDelayMs` | `250ms` | Base retry backoff, doubled on each attempt. |
+| `TRILIUM_MAX_RETRIES` | `--max-retries` | `maxRetries` | `2` | Retries for idempotent requests on network errors and 502/503/504 (`0` disables, max `10`). |
+| `TRILIUM_RETRY_DELAY` | `--retry-delay` | `retryDelayMs` | `250ms` | Base retry backoff, doubled on each attempt (max `60s`). |
 | `TRILIUM_CONTENT_FETCH_TIMEOUT` | `--content-fetch-timeout` | `contentFetchTimeoutMs` | `30s` | Timeout for each http(s) download of attachment/image content. |
 | `TRILIUM_PROGRESS_INTERVAL` | `--progress-interval` | `progressIntervalMs` | `10s` | Progress heartbeat cadence during a tool call that sent a `progressToken`. |
 
@@ -191,6 +209,7 @@ Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are bu
 
 | Env var | CLI flag | Config-file key | Default | Meaning |
 |---------|----------|-----------------|---------|---------|
+| `TRILIUM_SEARCH_STRATEGY` | `--search-strategy` | `searchStrategy` | `auto` | Default `search_notes` strategy: `auto` (titles and labels first, note bodies only if that finds too few), `fast` (never bodies) or `full` (always bodies). Case-insensitive. |
 | `TRILIUM_DEFAULT_SEARCH_LIMIT` | `--default-search-limit` | `defaultSearchLimit` | `50` | `search_notes` results when the call passes no `limit` (clamped to the maximum). |
 | `TRILIUM_MAX_SEARCH_LIMIT` | `--max-search-limit` | `maxSearchLimit` | `10000` | Highest `limit` a `search_notes` call may request; also caps the fuzzy recall window. |
 | `TRILIUM_SEARCH_FAST_MIN_RESULTS` | `--search-fast-min-results` | `searchFastMinResults` | `5` | Under `strategy: "auto"`, a title/label pass with at least this many hits (or `limit`, if smaller) skips the body search. |
@@ -215,7 +234,8 @@ Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are bu
 | `TRILIUM_MAX_SESSIONS` | `--max-sessions` | `maxSessions` | `1000` | Max concurrently open sessions across `/sse` and `/mcp`; more get `503 too_many_sessions`. |
 | `TRILIUM_VALIDATE_TIMEOUT` | `--validate-timeout` | `triliumValidateTimeoutMs` | `10s` | Timeout of the Trilium probe made when a session connects. |
 | `TRILIUM_JWT_CLOCK_TOLERANCE` | `--jwt-clock-tolerance` | `jwtClockToleranceSec` | `30` | Seconds of clock skew tolerated on JWT `exp`/`nbf`. |
-| `TRILIUM_RATE_LIMIT_RPS` / `TRILIUM_RATE_LIMIT_BURST` | `--rate-limit-rps` / `--rate-limit-burst` | `rateLimitRps` / `rateLimitBurst` | `0` (off) | Per-IP and per-token rate limit (existing; see [Rate limiting](#rate-limiting)). |
+| `TRILIUM_RATE_LIMIT_RPS` / `TRILIUM_RATE_LIMIT_BURST` | `--rate-limit-rps` / `--rate-limit-burst` | `rateLimitRps` / `rateLimitBurst` | `0` (off) | Per-IP and per-token rate limit (see [Rate limiting](#rate-limiting)). |
+| `TRILIUM_TRUSTED_PROXIES` | `--trusted-proxies` | `trustedProxies` | *(none)* | Proxy IPs/CIDRs whose `X-Forwarded-For` the rate limiter believes (see [Rate limiting](#rate-limiting)). |
 
 
 ## Logging
@@ -280,9 +300,12 @@ The `session` field is identical across `sse_connected`, every `tool_call` on th
 | `sse_connect_failed`    | error | `session`, `err`                                       | `server.connect(transport)` threw. |
 | `unauthorized`          | warn  | `remote`                                               | Gateway bearer check failed. |
 | `missing_trilium_credentials` | warn | `remote`                                          | Multi-tenant connect without `X-Trilium-Url`+`X-Trilium-Token`. |
-| `url_rejected`          | warn  | `reason`                                               | SSRF guard rejected the client URL. |
-| `trilium_auth_failed`   | warn  | `host`, `status`, `code`                               | Trilium returned 401/403 to the connect-time probe. |
-| `trilium_validate_timeout` | warn | `host`                                                | Probe exceeded 10 s. |
+| `url_rejected`          | warn  | `reason`, `stage?`, `detail?`                          | SSRF guard rejected the client URL — up front, or (`stage=connect`) when the address actually connected to was private. `detail` (resolved address) is log-only, never sent to the client. |
+| `trilium_auth_failed`   | warn  | `host`, `status?`, `code?`                             | Trilium returned an error to the connect-time probe. `status`/`code` are dropped when they aren't a valid HTTP status / short identifier (they can come from the remote body). |
+| `trilium_validate_timeout` | warn | `host`                                                | Probe exceeded `--validate-timeout` (default 10 s). |
+| `request_rejected`      | warn  | `reason`, `remote`, `path`, `host`, `origin`           | Host/Origin guard refused the request (`host_not_allowed`, `missing_host`, `origin_not_allowed`). `host`/`origin` are the client's headers, with non-printable characters replaced and truncated to 128 chars. |
+| `rate_limited`          | warn  | `remote`, `client?`, `path`, `reason`, `retry_after_s` | A rate-limit bucket was empty. `client` is the forwarded address the limiter keyed on, when it differs from `remote` (trusted proxy). |
+| `session_limit_reached` | warn  | `transport`, `open`, `pending`, `max`                  | `--max-sessions` reached (sessions still connecting count too); the client got `503 too_many_sessions`. |
 | `trilium_unreachable`   | warn  | `host`, `err`                                          | Trilium probe failed for any other reason. |
 | `allow_private_urls_enabled` | warn | *(none)*                                          | Operator started multi-tenant mode with `--allow-private-urls`. |
 | `request_handler_error` | error | `method`, `path`, `err`                                | Unhandled error in the HTTP handler chain. |
@@ -606,16 +629,16 @@ Trilium indexes a note's links (the `internalLink` relations behind backlinks an
 
 ### Reliability
 
-Every ETAPI request has a timeout (60s by default, set with `TRILIUM_REQUEST_TIMEOUT` / `--request-timeout`; export, import and backup get 5×). Idempotent requests (`GET`/`PUT`/`PATCH`/`DELETE`) are retried up to twice with exponential backoff on network errors and 502/503/504 responses. `POST` is never retried, because replaying `create-note` would duplicate notes. Timeouts are not retried either, since the request may still be running server-side. Failures surface as `TRILIUM_UNREACHABLE` (503) or `TRILIUM_TIMEOUT` (504), each with a suggested next step.
+Every ETAPI request has a timeout (60s by default, set with `TRILIUM_REQUEST_TIMEOUT` / `--request-timeout`; export, import and backup get 5×). Idempotent requests (`GET`/`PUT`/`PATCH`/`DELETE`) are retried up to `TRILIUM_MAX_RETRIES` / `--max-retries` times (default 2) with exponential backoff (`--retry-delay`, default 250ms, doubled per attempt) on network errors and 502/503/504 responses. `POST` is never retried, because replaying `create-note` would duplicate notes. Timeouts are not retried either, since the request may still be running server-side. Failures surface as `TRILIUM_UNREACHABLE` (503) or `TRILIUM_TIMEOUT` (504), each with a suggested next step.
 
 #### Slow searches
 
 Trilium runs its database queries on one thread, and a full-text search scans the text of every note and attachment with `LIKE '%…%'`. On a large instance that can take minutes, and Trilium answers nothing else meanwhile; aborting the HTTP request does not stop the scan. The server limits the damage:
 
-- **Fast search first.** `search_notes` defaults to `strategy: "auto"`: a plain-word query first matches titles and labels (milliseconds) and only searches note bodies when that finds fewer than 5 notes (or fewer than `limit`). Fast-pass responses carry `searchMode: "fast"`. Use `strategy: "full"` to always search bodies or `"fast"` to never, or change the default with `TRILIUM_SEARCH_STRATEGY` / `--search-strategy`. Queries using Trilium syntax (`#label`, `note.*`, `title:`, `OR`) and calls that set `fastSearch` run as written.
-- **Fail fast while Trilium is busy.** After a request times out, that Trilium host is marked busy for `TRILIUM_BUSY_COOLDOWN` (30s by default), across all sessions. Meanwhile any search that reads note bodies is refused at once with `TRILIUM_BUSY` (503) and a retry-after hint instead of queueing another scan, and other requests get a 5s timeout: the first one Trilium answers clears the flag. If the body search of an `auto` search fails this way, the title matches are returned with `partial: true`.
+- **Fast search first.** `search_notes` defaults to `strategy: "auto"`: a plain-word query first matches titles and labels (milliseconds) and only searches note bodies when that finds fewer than `TRILIUM_SEARCH_FAST_MIN_RESULTS` / `--search-fast-min-results` notes (default 5; or fewer than `limit`, if smaller). Fast-pass responses carry `searchMode: "fast"`. Use `strategy: "full"` to always search bodies or `"fast"` to never, or change the default with `TRILIUM_SEARCH_STRATEGY` / `--search-strategy`. Queries using Trilium syntax (`#label`, `note.*`, `title:`, `OR`) and calls that set `fastSearch` run as written.
+- **Fail fast while Trilium is busy.** After a request times out, that Trilium host is marked busy for `TRILIUM_BUSY_COOLDOWN` (30s by default), across all sessions. Meanwhile any search that reads note bodies is refused at once with `TRILIUM_BUSY` (503) and a retry-after hint instead of queueing another scan, and other requests get the shorter `TRILIUM_BUSY_PROBE_TIMEOUT` / `--busy-probe-timeout` (default 5s): the first one Trilium answers clears the flag. If the body search of an `auto` search fails this way, the title matches are returned with `partial: true`.
 - **One scan per question.** Identical searches already in flight on the same Trilium with the same token share one request.
-- **Progress.** When a client sends a `progressToken` with a tool call, the server sends a `notifications/progress` heartbeat every 10s while the call runs (plus a message when a search moves on to note bodies), so clients that reset their timeout on progress keep waiting instead of giving up.
+- **Progress.** When a client sends a `progressToken` with a tool call, the server sends a `notifications/progress` heartbeat every `TRILIUM_PROGRESS_INTERVAL` / `--progress-interval` (default 10s) while the call runs (plus a message when a search moves on to note bodies), so clients that reset their timeout on progress keep waiting instead of giving up.
 
 Some features need a recent Trilium: `manage_system` `"metrics"` and `get_special_note` `"week_first_day"` need a release with those ETAPI endpoints (0.105+), and `utcDateModified` on create/patch needs a release newer than 0.105. Older servers return clear `METRICS_UNSUPPORTED` / `PROPERTY_NOT_ALLOWED` errors.
 
@@ -698,7 +721,7 @@ Detection is verification-gated, so existing inline content can never be misread
 Security knobs (see [CLI Arguments](#cli-arguments)):
 
 - Local path reads are **enabled for stdio** (the server runs on your own machine) and **disabled for `--transport http`**, where a path would read the *server's* filesystem on behalf of a remote client. Override with `--allow-local-file-read` / `--no-local-file-read`, and optionally sandbox with `--local-file-roots /srv/uploads`.
-- URL fetches pass the same SSRF guard as multi-tenant Trilium URLs (private/loopback/metadata IPs blocked unless `--allow-private-urls`), re-checked on every redirect hop, with a `--max-content-fetch-bytes` cap (default 50 MB).
+- URL fetches pass an SSRF guard (private/loopback/metadata IPs blocked unless `--content-allow-private-urls`), re-checked on every redirect hop, with a `--max-content-fetch-bytes` cap (default 50 MB). Content URLs are chosen by the model, so they have their own switch: `--content-allow-private-urls` / `TRILIUM_CONTENT_ALLOW_PRIVATE_URLS` defaults to **off in multi-tenant mode** even when `--allow-private-urls` is on (that flag is for tenants' Trilium URLs). In single-tenant mode it defaults to the value of `--allow-private-urls`, which used to govern content fetches and keeps doing so unless you set the new flag explicitly.
 - Trilium applies its own image compression settings server-side; the MCP always uploads the original bytes untouched.
 
 ### Image Embedding
@@ -794,9 +817,9 @@ With `--multi-tenant`:
    - `X-Trilium-Url` — the client's Trilium base URL
    - `X-Trilium-Token` — the client's ETAPI token
 2. **A per-connection `TriliumClient` is created** — connections are isolated; one user's tool calls never hit another's Trilium.
-3. **Credentials are verified at connect time** by calling `/etapi/app-info` (with a 10s timeout). A bad token fails fast with a `401` on the SSE handshake, not with silent tool-call errors later.
+3. **Credentials are verified at connect time** by calling `/etapi/app-info` (with a `TRILIUM_VALIDATE_TIMEOUT` / `--validate-timeout` timeout, default 10s). A bad token fails fast with a `401` on the SSE handshake, not with silent tool-call errors later.
 4. **A gateway bearer token is required** (`--gateway-auth bearer`, enabled by default in multi-tenant mode). Clients authenticate to *you* with a shared secret you hand out.
-5. **Client-supplied URLs are SSRF-checked.** By default, hostnames that resolve to private/loopback/link-local IPs (including cloud metadata `169.254.169.254`) are rejected. Adjust with `--trilium-url-allowlist` or `--allow-private-urls`.
+5. **Client-supplied URLs are SSRF-checked.** By default, hostnames that resolve to private/loopback/link-local IPs (including cloud metadata `169.254.169.254`) are rejected. Adjust with `--trilium-url-allowlist` or `--allow-private-urls`. The check runs once up front for a clean `400 url_rejected`, and again on **every connection** the tenant's client opens (connect-time address check, redirects never followed), so a hostname that later re-resolves to a private address (DNS rebinding) is still refused.
 
 **Startup-supplied `TRILIUM_URL` / `TRILIUM_TOKEN` are rejected in multi-tenant mode.** The server will refuse to start if either is set alongside `--multi-tenant`. This prevents a subtle token-leak where a client sending only one header would cause the operator's default to be mixed with client-supplied values.
 
@@ -848,7 +871,7 @@ node dist/index.js \
 |--------|-------------|--------------------------|---------|
 | `GET`  | `/health`   | none                     | Liveness probe — returns `{"status":"ok"}`. |
 | `GET`  | `/sse`      | gateway + per-connection | Open an SSE stream. Server replies with an `endpoint` event containing `/message?sessionId=<uuid>`. |
-| `POST` | `/message`  | implicit via `sessionId` | Client sends JSON-RPC messages here. `Content-Type: application/json`, up to 1 MB. |
+| `POST` | `/message`  | gateway + `sessionId`    | Client sends JSON-RPC messages here (the caller must be the identity that opened the stream). `Content-Type: application/json`, up to `--max-post-bytes` (default 64 MB). |
 
 ### Connecting clients
 
@@ -1029,6 +1052,19 @@ Env: `TRILIUM_RATE_LIMIT_RPS`, `TRILIUM_RATE_LIMIT_BURST`. `/health` is never ra
 
 This is in-process, not a Redis-backed distributed limiter — multi-replica deployments should also limit at the reverse proxy, with this server's limits as defense-in-depth.
 
+**Which IP?** By default the per-IP axis keys on the TCP peer address. IPv6 clients are bucketed per `/64` (one end-user allocation), and the limiter tracks at most 10,000 buckets per axis, evicting the least recently used — eviction only ever hands a client a fresh, full bucket.
+
+**Behind a reverse proxy** the TCP peer is the proxy, so every client shares one bucket — and since the IP check runs *before* authentication, anonymous traffic can drain it and lock everyone out. Tell the server which proxies to believe:
+
+```bash
+--trusted-proxies 127.0.0.1            # same-host proxy
+--trusted-proxies 172.16.0.0/12,fd00::/8   # e.g. a Docker / Kubernetes network
+```
+
+Env `TRILIUM_TRUSTED_PROXIES` (comma-separated), config key `trustedProxies`. When a request's TCP peer is in this list, the server reads `X-Forwarded-For` from the right and uses the first address that is **not** a trusted proxy; everything to its left was written by the client and is ignored. Requests from untrusted peers keep using the peer address, and any `X-Forwarded-For` they send is ignored.
+
+Caveats: list **only** proxies you control, and make sure the proxy *appends* to `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`, Caddy and Traefik do this by default). If you trust an address that clients can reach directly, or a proxy that passes a client-supplied header through unmodified, clients can pick their own bucket. The setting only affects rate limiting; logs keep the TCP peer in `remote`.
+
 ### Per-tenant audit + metrics
 
 With `--gateway-auth jwt`, every audit log line carries the authenticated `principal` field — both `tool_call` and `mcp_session_opened`/`sse_connected` events. That gives you per-user tool usage in your log shipper without any extra work.
@@ -1055,7 +1091,9 @@ Cardinality scales as principals × tools × outcomes. Only enable when your pri
 |------|----------|
 | *(default)* | Reject any `X-Trilium-Url` whose hostname resolves to a private / loopback / link-local / CGNAT / multicast address. |
 | `--trilium-url-allowlist host1,host2` | Only hostnames matching the list (exact or suffix — `example.com` matches `a.example.com`) are accepted. Takes precedence over the private-IP block. |
-| `--allow-private-urls` | Disable the private-IP block entirely. Use only on trusted/homelab networks. |
+| `--allow-private-urls` | Disable the private-IP block entirely for tenant Trilium URLs. Use only on trusted/homelab networks. Content URLs fetched by tools keep their own switch (`--content-allow-private-urls`, off by default in multi-tenant mode). |
+
+The allowlist / private-IP policy is enforced twice: as a pre-flight DNS check when the session opens, and at connect time on every socket the tenant's Trilium client opens (the address actually connected to must pass; redirects are never followed). A hostname that resolves to a public address during the pre-flight and to a private one afterwards (DNS rebinding) is refused with `400 url_rejected` at connect, or a `TRILIUM_UNREACHABLE` tool error later.
 
 ### Error responses
 
@@ -1090,6 +1128,16 @@ Why this exists, and a few caveats worth knowing:
 - **Attachments are base64-encoded over JSON-RPC**, which inflates payload size by ~33%. A 100 MB binary becomes ~134 MB on the wire.
 - **413 is returned as soon as we can detect the overrun** — either from `Content-Length` upfront (no body drain) or mid-stream once accumulated bytes exceed the cap. Chunked uploads without `Content-Length` still get capped via the streaming check.
 - **Reverse proxies have their own limits.** Nginx defaults to `client_max_body_size 1m`; bump it (`client_max_body_size 600m;` or similar) or large requests die at the proxy with `413` before they reach this server. Caddy has no default cap.
+
+### Host header check (DNS rebinding)
+
+Every request except `/health` passes a Host/Origin guard before auth:
+
+- **Bound to loopback** (`127.0.0.1`, the default for `node dist/index.js`): the `Host` header must be a loopback name (`localhost`, `127.x.x.x`, `[::1]`), the bind address, or an `--allowed-hosts` / `TRILIUM_ALLOWED_HOSTS` entry. This stops a web page from reaching a local server via DNS rebinding.
+- **Bound to a non-loopback address** (`--host 0.0.0.0`, which the Docker image sets): no Host check, unless you set `--allowed-hosts`, which turns it on with your list (loopback names stay accepted, so the container `HEALTHCHECK` and local probes keep working).
+- **`Origin`**, when a browser sends one, must be on the `--cors-origin` list (or be a loopback origin while bound to loopback). Non-browser clients send no `Origin` and are unaffected.
+
+**Same-host reverse proxy:** if the proxy forwards the public `Host` (nginx `proxy_set_header Host $host;`, Caddy's default) to a server bound to `127.0.0.1`, every request is refused with `403 host_not_allowed` until you add the public name: `--allowed-hosts mcp.example.com`. Rejections are logged as `request_rejected` with the (sanitized) `host` and `origin`.
 
 ### Reverse-proxy (TLS termination)
 
@@ -1138,7 +1186,7 @@ Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Tril
 
 - **Gateway auth** (who can connect at all) is an operator-issued shared bearer token. Constant-time comparison, tokens stored as SHA-256 hashes at startup.
 - **Backend auth** (which Trilium to talk to) is each client's own ETAPI token. It's only ever used to construct that client's `TriliumClient`; it's never logged.
-- **Creds are validated at connect time** with a 10-second timeout, so a bad or slow Trilium target fails the SSE handshake instead of hanging the connection.
+- **Creds are validated at connect time** with a timeout (`--validate-timeout`, default 10s), so a bad or slow Trilium target fails the SSE handshake instead of hanging the connection.
 - **No TLS in-process.** Use a reverse proxy. The server listens on plain HTTP and expects to run behind one.
 - **Per-principal identity** is available via `--gateway-auth jwt` ([above](#jwt--oidc-gateway-auth)). When you need to attribute actions to specific users, prefer JWT over a shared bearer token — the authenticated principal threads automatically into audit logs and (opt-in) into per-principal metric labels.
 
@@ -1150,7 +1198,7 @@ Make sure the proxy **passes through** `Authorization`, `X-Trilium-Url`, `X-Tril
 
 **Connection returns `400 url_rejected` with `reason=private_address`.** You're pointing at a private/loopback IP (common in homelabs). Either add the hostname to `--trilium-url-allowlist` or pass `--allow-private-urls`.
 
-**Connection returns `504 trilium_validate_timeout`.** `getAppInfo` didn't respond within 10 seconds. Usually a DNS black hole, a firewall dropping packets, or Trilium is actually down.
+**Connection returns `504 trilium_validate_timeout`.** `getAppInfo` didn't respond within `--validate-timeout` (default 10 seconds). Usually a DNS black hole, a firewall dropping packets, or Trilium is actually down.
 
 **Connection succeeds but tool calls hang.** Reverse proxy is buffering SSE. Verify `proxy_buffering off` (nginx) / `flush_interval -1` (Caddy).
 
@@ -1198,6 +1246,8 @@ Build the Docker image:
 ```bash
 docker build -t triliumnext-mcp .
 ```
+
+The image sets `TRILIUM_HTTP_HOST=0.0.0.0` so the HTTP transport is reachable through a published port (outside a container the default bind is `127.0.0.1`). With no `TRILIUM_ALLOWED_HOSTS`, a non-loopback bind does not check the `Host` header, so a reverse proxy can forward any public name; set `TRILIUM_ALLOWED_HOSTS` to opt in to the check (see [Host header check](#host-header-check-dns-rebinding)). If rate limiting is on behind a proxy, also set `TRILIUM_TRUSTED_PROXIES` (see [Rate limiting](#rate-limiting)).
 
 ## Getting an ETAPI Token
 

@@ -64,11 +64,28 @@ export function isBareFulltextSegment(tokens: string[]): boolean {
  * Multiple tokens: `(note.content *=* term1 AND note.content *=* term2)`
  */
 function wrapFulltextSegment(tokens: string[]): string {
-  if (tokens.length === 1) {
-    return `note.content *=* ${tokens[0]}`;
+  // Inside a rewritten expression bare words are no longer fulltext, so the
+  // connectives must be translated rather than wrapped as search terms:
+  // `AND` is implied between conditions (dropped) and `NOT x` negates the
+  // next term. A trailing NOT has nothing to negate and stays a literal word.
+  const conditions: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const lower = tokens[i].toLowerCase();
+    if (lower === 'and') continue;
+    if (lower === 'not' && i + 1 < tokens.length && !isConnective(tokens[i + 1])) {
+      conditions.push(`not(note.content *=* ${tokens[++i]})`);
+      continue;
+    }
+    conditions.push(`note.content *=* ${tokens[i]}`);
   }
-  const wrapped = tokens.map((t) => `note.content *=* ${t}`).join(' AND ');
-  return `(${wrapped})`;
+  if (conditions.length === 0) return tokens.join(' ');
+  if (conditions.length === 1) return conditions[0];
+  return `(${conditions.join(' AND ')})`;
+}
+
+function isConnective(token: string): boolean {
+  const lower = token.toLowerCase();
+  return lower === 'and' || lower === 'not' || lower === 'or';
 }
 
 const QUOTED_TOKEN = /^"(?:[^"\\]|\\.)*"$/;

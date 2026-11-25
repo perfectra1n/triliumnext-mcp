@@ -855,3 +855,74 @@ describe('content input policy config', () => {
     expect(config!.maxContentFetchBytes).toBe(1024 * 1024);
   });
 });
+
+describe('trusted proxies, content private URLs and strict env parsing', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('TRILIUM_')) delete process.env[key];
+    }
+    process.env.TRILIUM_TOKEN = 'token';
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('reads trusted proxies from CLI (repeatable) and env, and validates them', () => {
+    expect(loadConfig([])!.trustedProxies).toEqual([]);
+    process.env.TRILIUM_TRUSTED_PROXIES = '10.0.0.0/8, fd00::/8';
+    expect(loadConfig([])!.trustedProxies).toEqual(['10.0.0.0/8', 'fd00::/8']);
+    expect(
+      loadConfig(['--trusted-proxies', '172.16.0.1', '--trusted-proxies', '127.0.0.1'])!
+        .trustedProxies
+    ).toEqual(['172.16.0.1', '127.0.0.1']);
+    expect(() => loadConfig(['--trusted-proxies', 'proxy.internal'])).toThrow(ConfigError);
+    expect(() => loadConfig(['--trusted-proxies', '10.0.0.0/40'])).toThrow(/trusted proxy/);
+  });
+
+  it('defaults content private URLs to off, independent of --allow-private-urls in multi-tenant mode', () => {
+    const mt = ['--transport', 'http', '--multi-tenant', '--gateway-auth', 'none'];
+    delete process.env.TRILIUM_TOKEN;
+    expect(loadConfig(mt)!.contentAllowPrivateUrls).toBe(false);
+    const both = loadConfig([...mt, '--allow-private-urls'])!;
+    expect(both.allowPrivateUrls).toBe(true);
+    expect(both.contentAllowPrivateUrls).toBe(false);
+    expect(loadConfig([...mt, '--content-allow-private-urls'])!.contentAllowPrivateUrls).toBe(true);
+    process.env.TRILIUM_CONTENT_ALLOW_PRIVATE_URLS = 'true';
+    const envOnly = loadConfig(mt)!;
+    expect(envOnly.contentAllowPrivateUrls).toBe(true);
+    expect(envOnly.allowPrivateUrls).toBe(false);
+  });
+
+  it('keeps --allow-private-urls governing content fetches in single-tenant mode (backward compatible)', () => {
+    expect(loadConfig([])!.contentAllowPrivateUrls).toBe(false);
+    expect(loadConfig(['--allow-private-urls'])!.contentAllowPrivateUrls).toBe(true);
+    process.env.TRILIUM_CONTENT_ALLOW_PRIVATE_URLS = 'false';
+    expect(loadConfig(['--allow-private-urls'])!.contentAllowPrivateUrls).toBe(false);
+  });
+
+  it.each([
+    ['TRILIUM_ALLOW_PRIVATE_URLS', 'ture'],
+    ['TRILIUM_CONTENT_ALLOW_PRIVATE_URLS', 'maybe'],
+    ['TRILIUM_MULTI_TENANT', 'on'],
+    ['TRILIUM_METRICS', 'enabled'],
+  ])('rejects an unparseable boolean %s=%s', (env, raw) => {
+    process.env[env] = raw;
+    expect(() => loadConfig([])).toThrow(new RegExp(env));
+  });
+
+  it('treats an empty boolean env value as unset', () => {
+    process.env.TRILIUM_ALLOW_PRIVATE_URLS = '';
+    expect(loadConfig([])!.allowPrivateUrls).toBe(false);
+  });
+
+  it('parses the transport case-insensitively and rejects unknown values', () => {
+    process.env.TRILIUM_TRANSPORT = 'HTTP';
+    expect(loadConfig([])!.transport).toBe('http');
+    process.env.TRILIUM_TRANSPORT = 'websocket';
+    expect(() => loadConfig([])).toThrow(/Invalid transport/);
+  });
+});

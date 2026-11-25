@@ -1,6 +1,10 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import { TriliumResponseTooLargeError, type TriliumClient } from '../client/trilium.js';
+import {
+  TriliumClientError,
+  TriliumResponseTooLargeError,
+  type TriliumClient,
+} from '../client/trilium.js';
 import type { Attachment, NoteType, PatchNoteDef } from '../types/etapi.js';
 import { defineTool, type ToolContentBlock, type ToolHandlerResult } from './schemas.js';
 import {
@@ -16,11 +20,13 @@ import { marked } from 'marked';
 import TurndownService from 'turndown';
 import {
   isImageMimeType,
-  isBinaryMimeType,
   isBinaryNote,
   resolveContentInput,
+  getContentInputPolicy,
+  ContentNormalizationError,
   CONTENT_SOURCE_GUIDANCE,
 } from './contentInput.js';
+import { createAttachmentWithContent, OrphanedAttachmentError } from './attachments.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
 import { base64DecodedLength, formatMegabytes, getContentCharCap } from './contentLimits.js';
 import {
@@ -44,19 +50,27 @@ const imageEntrySchema = z.object({
     ),
 });
 
+/**
+ * Hard bound on images (and, separately, files) per create_note/write_note
+ * call. Their combined size is also capped; see stageAttachments.
+ */
+export const MAX_ATTACHMENTS_PER_CALL = 50;
+
 const imagesFieldSchema = z
   .array(imageEntrySchema)
+  .max(MAX_ATTACHMENTS_PER_CALL, `At most ${MAX_ATTACHMENTS_PER_CALL} images per call`)
   .optional()
   .describe(
     'Images to upload as attachments of this note and embed. Reference entry N from the content with ' +
       '<img src="image:N"> (HTML, double quotes) or ![alt](image:N) (markdown); N indexes THIS array only, ' +
       'not attachments from earlier calls. Unreferenced images are appended at the end; an unresolved ' +
       'placeholder fails the call. To embed an existing attachment use its real URL: ' +
-      '<img src="api/attachments/{attachmentId}/image/{filename}">.'
+      '<img src="api/attachments/{attachmentId}/image/{filename}">. Images and files together may ' +
+      "total at most the server's per-input content limit; add more with create_attachment."
   );
 
 const fileEntrySchema = z.object({
-  data: z.string().describe(`The file. ${CONTENT_SOURCE_GUIDANCE}`),
+  data: z.string().describe('The file, in any of the forms images[].data accepts.'),
   mime: z
     .string()
     .optional()
@@ -71,6 +85,7 @@ const fileEntrySchema = z.object({
 
 const filesFieldSchema = z
   .array(fileEntrySchema)
+  .max(MAX_ATTACHMENTS_PER_CALL, `At most ${MAX_ATTACHMENTS_PER_CALL} files per call`)
   .optional()
   .describe(
     'Files to upload as attachments of this note and link as downloads. Reference entry N with ' +
@@ -109,31 +124,67 @@ interface StagedAttachment {
 /**
  * Resolve every image/file input (paths, URLs, base64...) to bytes up front,
  * so a bad input fails the call before anything is created in Trilium.
+ *
+ * Inputs are resolved one at a time, and their combined size is bounded by the
+ * same limit as a single input (TRILIUM_MAX_CONTENT_FETCH_BYTES): each fetch
+ * may only use what is left of that budget, so one call can never buffer more
+ * than one maximum-size input's worth of attachments.
  */
 async function stageAttachments(
   images: EntryInput[] | undefined,
   files: EntryInput[] | undefined
 ): Promise<StagedAttachment[]> {
-  const stage = (entries: EntryInput[] | undefined, role: 'image' | 'file') =>
-    (entries ?? []).map(async (entry, index): Promise<StagedAttachment> => {
-      const resolved = await resolveContentInput(entry.data, {
-        mime: entry.mime,
-        filename: entry.filename,
-      });
-      return {
-        role,
-        index,
-        title:
-          entry.filename ??
-          resolved.sourceName ??
-          defaultAttachmentName(role, index, resolved.mime),
-        mime: resolved.mime,
-        // Images always go up as raw bytes; files follow their MIME type.
-        isBinary: role === 'image' || resolved.isBinary,
-        buffer: resolved.buffer,
-      };
+  const policy = getContentInputPolicy();
+  const totalMax = policy.maxBytes;
+  const entries = [
+    ...(images ?? []).map((entry, index) => ({ entry, index, role: 'image' as const })),
+    ...(files ?? []).map((entry, index) => ({ entry, index, role: 'file' as const })),
+  ];
+  const staged: StagedAttachment[] = [];
+  let totalBytes = 0;
+  for (const { entry, index, role } of entries) {
+    const remaining = totalMax - totalBytes;
+    const overBudget = (): ContentNormalizationError =>
+      new ContentNormalizationError(
+        'INPUT_TOO_LARGE',
+        `${role}:${index} does not fit: the images/files of one call may total at most ` +
+          `${totalMax} bytes, and ${totalBytes} bytes are already used by earlier entries. Nothing was written.`,
+        'Upload fewer or smaller attachments per call (add the rest with create_attachment), or raise ' +
+          '--max-content-fetch-bytes.'
+      );
+    if (remaining <= 0) throw overBudget();
+    let resolved: Awaited<ReturnType<typeof resolveContentInput>>;
+    try {
+      resolved = await resolveContentInput(
+        entry.data,
+        { mime: entry.mime, filename: entry.filename },
+        remaining < policy.maxBytes ? { ...policy, maxBytes: remaining } : undefined
+      );
+    } catch (error) {
+      // Over the shrunken per-call budget but within the per-input limit:
+      // explain the real reason instead of quoting the shrunken limit.
+      if (
+        error instanceof ContentNormalizationError &&
+        error.code === 'INPUT_TOO_LARGE' &&
+        remaining < policy.maxBytes
+      ) {
+        throw overBudget();
+      }
+      throw error;
+    }
+    totalBytes += resolved.buffer.length;
+    staged.push({
+      role,
+      index,
+      title:
+        entry.filename ?? resolved.sourceName ?? defaultAttachmentName(role, index, resolved.mime),
+      mime: resolved.mime,
+      // Images always go up as raw bytes; files follow their MIME type.
+      isBinary: role === 'image' || resolved.isBinary,
+      buffer: resolved.buffer,
     });
-  return Promise.all([...stage(images, 'image'), ...stage(files, 'file')]);
+  }
+  return staged;
 }
 
 interface UploadedAttachment {
@@ -141,11 +192,18 @@ interface UploadedAttachment {
   attachment: Attachment;
 }
 
+interface AttachmentUploadFailure {
+  staged: StagedAttachment;
+  error: string;
+  /** Set when an empty attachment was left behind and could not be deleted. */
+  orphanedAttachmentId?: string;
+}
+
 /** Thrown when some staged attachments could not be uploaded. */
 class AttachmentUploadError extends Error {
   constructor(
     public readonly uploaded: UploadedAttachment[],
-    public readonly failures: Array<{ staged: StagedAttachment; error: string }>
+    public readonly failures: AttachmentUploadFailure[]
   ) {
     super(
       `${failures.length} attachment upload(s) failed: ` +
@@ -162,32 +220,31 @@ async function uploadStaged(
   ownerId: string,
   staged: StagedAttachment[]
 ): Promise<UploadedAttachment[]> {
-  const results = await Promise.allSettled(
-    staged.map(async (item): Promise<UploadedAttachment> => {
-      const attachment = await client.createAttachment({
+  const uploaded: UploadedAttachment[] = [];
+  const failures: AttachmentUploadFailure[] = [];
+  // One at a time: Trilium serializes writes anyway, and a burst of parallel
+  // uploads only competes with other clients for its single database.
+  for (const item of staged) {
+    try {
+      const attachment = await createAttachmentWithContent(client, {
         ownerId,
         role: item.role,
         mime: item.mime,
         title: item.title,
-        content: item.isBinary ? '' : item.buffer.toString('utf8'),
+        isBinary: item.isBinary,
+        buffer: item.buffer,
       });
-      if (item.isBinary) {
-        await client.updateAttachmentContentBinary(attachment.attachmentId, item.buffer);
-      }
-      return { staged: item, attachment };
-    })
-  );
-  const uploaded: UploadedAttachment[] = [];
-  const failures: Array<{ staged: StagedAttachment; error: string }> = [];
-  results.forEach((r, i) => {
-    if (r.status === 'fulfilled') uploaded.push(r.value);
-    else {
+      uploaded.push({ staged: item, attachment });
+    } catch (error) {
       failures.push({
-        staged: staged[i],
-        error: r.reason instanceof Error ? r.reason.message : String(r.reason),
+        staged: item,
+        error: error instanceof Error ? error.message : String(error),
+        ...(error instanceof OrphanedAttachmentError
+          ? { orphanedAttachmentId: error.attachmentId }
+          : {}),
       });
     }
-  });
+  }
   if (failures.length > 0) throw new AttachmentUploadError(uploaded, failures);
   return uploaded;
 }
@@ -292,9 +349,6 @@ const INTERNAL_LINK_GUIDANCE =
   '(markdown): the server rewrites it into a real Trilium reference link and rejects unknown IDs; empty ' +
   'link text becomes the target title. Hand-written #root/... anchors are stored as inert links.';
 
-export const NOTE_URL_GUIDANCE =
-  'Returns a "url" that opens the note in Trilium; give it to the user.';
-
 const EDIT_CHANGES_GUIDANCE =
   '"edit" mode: search/replace blocks applied in order to the STORED content — HTML for text notes, ' +
   'so read it with get_note format="html" first (markdown from get_note will not match). Each ' +
@@ -320,7 +374,8 @@ const createNoteSchema = z.object({
     .describe(
       'Note body. Text notes: HTML, or markdown with format="markdown"; code blocks as ' +
         '<pre><code class="language-X">...</code></pre> (class on <code>). Code/mermaid/canvas notes: the raw ' +
-        `source. Binary notes (file/image with a binary mime): ${CONTENT_SOURCE_GUIDANCE} ` +
+        'source. Binary notes (file/image with a binary mime): a path, URL, data URL or base64, in ' +
+        'the forms images[].data accepts. ' +
         INTERNAL_LINK_GUIDANCE
     ),
   format: z
@@ -432,7 +487,8 @@ function buildGetNoteSchema() {
         'Return images embedded in the note body as image blocks — only on the first page ' +
           `(content_start=0), at most ~${formatMegabytes(limits.noteImageMaxBytes)} each and ` +
           `~${formatMegabytes(limits.noteImagesTotalMaxBytes)} total; larger ones are listed for ` +
-          'get_attachment. Costly; pass false when you only need text.'
+          'get_attachment. Also controls whether an image NOTE (type image) returns its picture. ' +
+          'Costly; pass false when you only need text.'
       ),
     content_start: z
       .number()
@@ -462,15 +518,18 @@ function buildGetNoteSchema() {
       .describe(
         'Add "paths" to the metadata: for every place the note sits in the tree (one per parent, clones ' +
           'included), the noteId path and a human-readable title breadcrumb like "root > Projects > Plan". ' +
-          'Use it to tell the user WHERE a note lives.'
+          `Use it to tell the user WHERE a note lives. At most ${limits.maxPaths} paths; ` +
+          'pathsTruncated:true marks a note with more placements.'
       ),
     include_backlinks: z
       .boolean()
       .default(false)
       .describe(
         'Add "backlinks" to the metadata: notes whose content links to (or mentions the ID of) this note, ' +
-          `with noteId and title (max ${limits.maxBacklinks}). Relations without a link in the content ` +
-          '(e.g. ~author) are not included.'
+          `with noteId and title (max ${limits.maxBacklinks}; backlinksTruncated:true when there are more). ` +
+          'Relations without a link in the content (e.g. ~author) are not included. This is a slow ' +
+          'full-text scan of every note body; if Trilium is busy or it times out, the note is still ' +
+          'returned, with backlinksError instead of backlinks.'
       ),
   });
 }
@@ -689,11 +748,11 @@ export function configureNoteTools(options: Partial<NoteToolLimits>): void {
 
 type NoteMeta = Awaited<ReturnType<TriliumClient['getNote']>>;
 
-/** One breadcrumb per tree placement (clones have several). */
+/** One breadcrumb per tree placement (clones have several), at most maxPaths. */
 async function buildNotePaths(
   client: TriliumClient,
   note: NoteMeta
-): Promise<Array<{ path: string; breadcrumb: string }>> {
+): Promise<{ paths: Array<{ path: string; breadcrumb: string }>; truncated: boolean }> {
   const titles = new Map<string, string>([[note.noteId, note.title]]);
   const titleOf = async (id: string): Promise<string> => {
     const cached = titles.get(id);
@@ -703,32 +762,63 @@ async function buildNotePaths(
     return title;
   };
 
-  const parents =
-    note.noteId === 'root' ? [undefined] : note.parentNoteIds.slice(0, limits.maxPaths);
-  return Promise.all(
+  const allParents = note.noteId === 'root' ? [undefined] : note.parentNoteIds;
+  const parents = allParents.slice(0, limits.maxPaths);
+  const paths = await Promise.all(
     parents.map(async (parentId) => {
       const path = await client.getNotePath(note.noteId, parentId);
       const crumbs = await Promise.all(path.split('/').map(titleOf));
       return { path, breadcrumb: crumbs.join(' > ') };
     })
   );
+  return { paths, truncated: allParents.length > parents.length };
 }
 
 async function findBacklinks(
   client: TriliumClient,
   noteId: string
-): Promise<Array<{ noteId: string; title: string }>> {
+): Promise<{ backlinks: Array<{ noteId: string; title: string }>; truncated: boolean }> {
   // Trilium has no "any relation pointing here" query, but every in-content link
   // carries the target's noteId (href/data-note-path), so a content scan for the
   // ID finds links regardless of whether Trilium has indexed them as relations.
+  // Over-fetch by two: the note itself may be among the hits.
   const response = await client.searchNotes({
     search: `note.content *=* "${noteId}"`,
-    limit: limits.maxBacklinks + 1,
+    limit: limits.maxBacklinks + 2,
   });
-  return response.results
-    .filter((n) => n.noteId !== noteId)
-    .slice(0, limits.maxBacklinks)
-    .map((n) => ({ noteId: n.noteId, title: n.title }));
+  const others = response.results.filter((n) => n.noteId !== noteId);
+  return {
+    backlinks: others
+      .slice(0, limits.maxBacklinks)
+      .map((n) => ({ noteId: n.noteId, title: n.title })),
+    truncated: others.length > limits.maxBacklinks,
+  };
+}
+
+/**
+ * The backlink scan reads every note body, so on a large Trilium it can time
+ * out or find Trilium busy. That must not cost the caller the note itself.
+ */
+async function findBacklinksOrError(
+  client: TriliumClient,
+  noteId: string
+): Promise<Record<string, unknown>> {
+  try {
+    const { backlinks, truncated } = await findBacklinks(client, noteId);
+    return { backlinks, ...(truncated ? { backlinksTruncated: true } : {}) };
+  } catch (error) {
+    if (
+      error instanceof TriliumClientError &&
+      (error.code === 'TRILIUM_BUSY' || error.code === 'TRILIUM_TIMEOUT')
+    ) {
+      return {
+        backlinksError:
+          `The backlink scan (a full-text search over all note bodies) did not finish: ${error.message} ` +
+          'The rest of the note is complete; retry include_backlinks later if you still need it.',
+      };
+    }
+    throw error;
+  }
 }
 
 // ============================================================================
@@ -746,7 +836,7 @@ export function registerNoteTools(): Tool[] {
         'default), then any images embedded in the body. Bodies over ' +
         `${getContentCharCap()} characters are paged via content_start/content_max_chars. ` +
         'Pass include_content=false for metadata only, include_path=true for breadcrumbs of where the ' +
-        'note lives, include_backlinks=true for notes linking to it.',
+        'note lives, include_backlinks=true for notes linking to it (a slow scan of all note bodies).',
       getNoteSchema,
       { title: 'Read note', readOnlyHint: true, openWorldHint: false }
     ),
@@ -820,22 +910,35 @@ const describeUploads = (uploaded: UploadedAttachment[]) =>
     title: u.attachment.title,
   }));
 
+/** Attachments a failed upload batch left behind as empty records (delete failed too). */
+const describeOrphans = (error: unknown) =>
+  error instanceof AttachmentUploadError
+    ? error.failures
+        .filter((f) => f.orphanedAttachmentId !== undefined)
+        .map((f) => ({
+          placeholder: `${f.staged.role}:${f.staged.index}`,
+          attachmentId: f.orphanedAttachmentId,
+        }))
+    : [];
+
 async function createNote(client: TriliumClient, args: unknown): Promise<ToolHandlerResult> {
   const parsed = createNoteSchema.parse(args);
-  const isBinary = parsed.mime ? isBinaryMimeType(parsed.mime) : false;
+  // Same rule Trilium uses: code/text/... notes are strings whatever their
+  // mime ("application/javascript;env=frontend"); only file/image-like notes
+  // with a binary mime carry bytes.
+  const isBinary = isBinaryNote(parsed.type, parsed.mime);
   const isText = parsed.type === 'text';
 
   // Resolve every input BEFORE creating anything, so a bad path/URL/base64
   // fails the call without leaving a half-built note behind. Binary content
   // is normalized before any format conversion (markdown would corrupt it).
-  const [binaryContent, staged] = await Promise.all([
-    isBinary
-      ? resolveContentInput(parsed.content, { mime: parsed.mime, filename: parsed.title }).then(
-          (r) => r.buffer
-        )
-      : Promise.resolve(null),
-    stageAttachments(parsed.images, parsed.files),
-  ]);
+  // Sequential, so the body and the attachments are never all buffered at once
+  // mid-fetch.
+  const binaryContent = isBinary
+    ? (await resolveContentInput(parsed.content, { mime: parsed.mime, filename: parsed.title }))
+        .buffer
+    : null;
+  const staged = await stageAttachments(parsed.images, parsed.files);
 
   let content = '';
   if (!isBinary) {
@@ -889,22 +992,30 @@ async function createNote(client: TriliumClient, args: unknown): Promise<ToolHan
     ],
   });
 
+  // Any write after the create stamps "now" as the modified date.
+  let wroteAfterCreate = false;
   try {
     if (binaryContent && binaryContent.length > 0) {
+      wroteAfterCreate = true;
       await client.updateNoteContentBinary(noteId, binaryContent);
     }
   } catch (error) {
     return partialFailure('uploading its binary content', error);
   }
 
-  let warning: string | undefined;
+  const warnings: string[] = [];
   if (staged.length > 0) {
     let uploaded: UploadedAttachment[];
+    wroteAfterCreate = true;
     try {
       uploaded = await uploadStaged(client, noteId, staged);
     } catch (error) {
       const done = error instanceof AttachmentUploadError ? describeUploads(error.uploaded) : [];
-      return partialFailure('uploading attachments', error, { uploadedAttachments: done });
+      const orphans = describeOrphans(error);
+      return partialFailure('uploading attachments', error, {
+        uploadedAttachments: done,
+        ...(orphans.length > 0 ? { orphanedAttachments: orphans } : {}),
+      });
     }
     // For a binary note the body IS the blob — writing HTML would overwrite it.
     if (!isBinary) {
@@ -921,18 +1032,30 @@ async function createNote(client: TriliumClient, args: unknown): Promise<ToolHan
   } else if (isText && needsLinkIndexing(content)) {
     // Re-save so Trilium indexes the links (backlinks, note map); see needsLinkIndexing.
     try {
+      wroteAfterCreate = true;
       await client.updateNoteContent(noteId, content);
-      if (parsed.utcDateModified) {
-        // The re-save stamped "now" — put the requested modified date back.
-        await client.updateNote(noteId, { utcDateModified: parsed.utcDateModified });
-      }
     } catch (error) {
-      warning =
+      warnings.push(
         'Note created, but re-saving it so Trilium indexes its links failed ' +
-        `(${error instanceof Error ? error.message : String(error)}). The links work, but may not ` +
-        'appear in backlinks/note map until the note is next edited. Do NOT re-create the note.';
+          `(${error instanceof Error ? error.message : String(error)}). The links work, but may not ` +
+          'appear in backlinks/note map until the note is next edited. Do NOT re-create the note.'
+      );
     }
   }
+
+  if (wroteAfterCreate && parsed.utcDateModified) {
+    // The follow-up writes stamped "now" — put the requested modified date back.
+    try {
+      await client.updateNote(noteId, { utcDateModified: parsed.utcDateModified });
+    } catch (error) {
+      warnings.push(
+        `Note created, but restoring utcDateModified=${parsed.utcDateModified} after the content ` +
+          `upload failed (${error instanceof Error ? error.message : String(error)}). Set it with ` +
+          'write_note {mode:"metadata", utcDateModified}. Do NOT re-create the note.'
+      );
+    }
+  }
+  const warning = warnings.length > 0 ? warnings.join(' ') : undefined;
 
   const url = await urlFor();
   return textResult({
@@ -954,18 +1077,24 @@ async function getBinaryNoteContent(
   meta: Record<string, unknown>,
   includeImages: boolean
 ): Promise<ToolHandlerResult> {
-  const notice = (reason: string): ToolHandlerResult => ({
+  const notice = (
+    reason: string,
+    next = 'Do not retry; have the user open the note in Trilium.'
+  ): ToolHandlerResult => ({
     content: [
       { type: 'text', text: JSON.stringify({ ...meta, contentInfo: { binary: true } }, null, 2) },
-      {
-        type: 'text',
-        text: `**Content not returned:** ${reason} Do not retry; have the user open the note in Trilium.`,
-      },
+      { type: 'text', text: `**Content not returned:** ${reason} ${next}` },
     ],
   });
   const kind = `binary ${note.type} note (${note.mime || 'no mime'})`;
-  if (!isImageMimeType(note.mime) || !includeImages) {
+  if (!isImageMimeType(note.mime)) {
     return notice(`this is a ${kind}, so its content is not readable as text.`);
+  }
+  if (!includeImages) {
+    return notice(
+      `this is an ${kind} and includeImages=false was passed.`,
+      'Call get_note again with includeImages=true to see the image.'
+    );
   }
   const maxBytes = limits.noteImageMaxBytes;
   let bytes: Buffer;
@@ -1004,12 +1133,12 @@ async function getNote(client: TriliumClient, args: unknown): Promise<ToolHandle
   const note = await client.getNote(parsed.noteId);
   const [paths, backlinks] = await Promise.all([
     parsed.include_path ? buildNotePaths(client, note) : undefined,
-    parsed.include_backlinks ? findBacklinks(client, note.noteId) : undefined,
+    parsed.include_backlinks ? findBacklinksOrError(client, note.noteId) : undefined,
   ]);
   const meta = {
     ...note,
-    ...(paths ? { paths } : {}),
-    ...(backlinks ? { backlinks } : {}),
+    ...(paths ? { paths: paths.paths, ...(paths.truncated ? { pathsTruncated: true } : {}) } : {}),
+    ...(backlinks ?? {}),
   };
 
   if (!parsed.include_content) {
@@ -1196,17 +1325,18 @@ async function writeNote(client: TriliumClient, args: unknown): Promise<ToolHand
     finalContent = await resolveNoteLinks(client, finalContent);
   }
 
+  let uploaded: UploadedAttachment[] = [];
   if (staged.length > 0) {
     assertPlaceholdersResolvable(
       finalContent,
       parsed.images?.length ?? 0,
       parsed.files?.length ?? 0
     );
-    let uploaded: UploadedAttachment[];
     try {
       uploaded = await uploadStaged(client, parsed.noteId, staged);
     } catch (error) {
       const done = error instanceof AttachmentUploadError ? describeUploads(error.uploaded) : [];
+      const orphans = describeOrphans(error);
       return {
         isError: true,
         content: [
@@ -1221,6 +1351,7 @@ async function writeNote(client: TriliumClient, args: unknown): Promise<ToolHand
                   'delete_attachment) and fix the failing input.',
                 noteId: parsed.noteId,
                 uploadedAttachments: done,
+                ...(orphans.length > 0 ? { orphanedAttachments: orphans } : {}),
               },
               null,
               2
@@ -1233,7 +1364,35 @@ async function writeNote(client: TriliumClient, args: unknown): Promise<ToolHand
   }
 
   assertPlaceholdersResolved(finalContent);
-  await client.updateNoteContent(parsed.noteId, finalContent);
+  try {
+    await client.updateNoteContent(parsed.noteId, finalContent);
+  } catch (error) {
+    if (uploaded.length === 0) throw error;
+    // The attachments exist now even though the content does not reference
+    // them; say so, or a retry would upload every one of them again.
+    return {
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              error:
+                `Writing the note content failed: ${error instanceof Error ? error.message : String(error)}. ` +
+                'The attachments listed in uploadedAttachments WERE created on the note but are not ' +
+                'referenced by its content. Do not re-send images/files: retry the write referencing ' +
+                'them by their real URLs (api/attachments/{attachmentId}/image/{title} or ' +
+                '.../download), or delete them with delete_attachment.',
+              noteId: parsed.noteId,
+              uploadedAttachments: describeUploads(uploaded),
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
 
   if (parsed.mode === 'edit' && appliedChanges !== undefined) {
     const readBack = await client.getNoteContent(parsed.noteId);

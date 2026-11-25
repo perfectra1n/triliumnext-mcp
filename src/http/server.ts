@@ -11,13 +11,31 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import type { Server as McpServer } from '@modelcontextprotocol/sdk/server/index.js';
 import { randomUUID } from 'node:crypto';
 
-import { normalizeServerUrl, deriveWebBaseUrl, DEFAULT_HTTP_HOST, type Config } from '../config.js';
-import { TriliumClient, TriliumClientError, clientOptionsFromConfig } from '../client/trilium.js';
+import {
+  normalizeServerUrl,
+  deriveWebBaseUrl,
+  DEFAULT_HTTP_HOST,
+  TUNABLE_DEFAULTS,
+  type Config,
+} from '../config.js';
+import {
+  TriliumClient,
+  TriliumClientError,
+  clientOptionsFromConfig,
+  type FetchLike,
+} from '../client/trilium.js';
 import { buildMcpServer } from '../server.js';
 import { GatewayAuth } from './auth.js';
 import { JwtAuth } from './jwtAuth.js';
 import { GatewayPolicy } from './gatewayPolicy.js';
-import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
+import {
+  assertUrlIsSafe,
+  createGuardedFetch,
+  findUrlGuardError,
+  UrlGuardError,
+  type BaseLookup,
+  type GuardedFetch,
+} from './urlGuard.js';
 import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
 import { MetricsAuth } from './metricsAuth.js';
 import { CorsPolicy } from './cors.js';
@@ -30,20 +48,23 @@ import type { Logger } from '../utils/logger.js';
  *  so to honor anything larger we must read+parse the body here and pass it
  *  to the SDK as `parsedBody` (which short-circuits its size-limited read). */
 
+// Defaults come from config.ts's TUNABLE_DEFAULTS (single source of truth);
+// re-exported under these names for embedders and tests.
+
 /** Default keep-alive ping cadence for SSE streams (TRILIUM_SSE_KEEPALIVE);
  *  prevents idle proxies from closing the connection while the client is just
  *  waiting for server events. */
-export const DEFAULT_SSE_KEEPALIVE_INTERVAL_MS = 30_000;
+export const DEFAULT_SSE_KEEPALIVE_INTERVAL_MS = TUNABLE_DEFAULTS.sseKeepaliveMs;
 
 /** Default ceiling on the validation probe during connect
  *  (TRILIUM_VALIDATE_TIMEOUT). Without this, a client pointing X-Trilium-Url at
  *  a black-hole host could park a connection indefinitely. */
-export const DEFAULT_TRILIUM_VALIDATE_TIMEOUT_MS = 10_000;
+export const DEFAULT_TRILIUM_VALIDATE_TIMEOUT_MS = TUNABLE_DEFAULTS.triliumValidateTimeoutMs;
 
 /** Default idle TTL for StreamableHTTP sessions (no requests for this long → closed). */
-export const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
+export const DEFAULT_SESSION_IDLE_TTL_MS = TUNABLE_DEFAULTS.sessionIdleTtlMs;
 /** Default cap on concurrently open sessions (SSE + StreamableHTTP). */
-export const DEFAULT_MAX_SESSIONS = 1000;
+export const DEFAULT_MAX_SESSIONS = TUNABLE_DEFAULTS.maxSessions;
 
 /** `realm` advertised in `WWW-Authenticate` on gateway 401s. */
 const AUTH_REALM = 'triliumnext-mcp';
@@ -82,6 +103,11 @@ export interface HttpServerOptions {
   maxSessions?: number;
   /** How often the idle sweep runs. Default min(60s, ttl/2). */
   sweepIntervalMs?: number;
+  /**
+   * Resolver used by the connect-time SSRF guard on multi-tenant Trilium
+   * connections (tests inject one to simulate DNS rebinding). Default: dns.lookup.
+   */
+  tenantLookup?: BaseLookup;
 }
 
 interface Ctx {
@@ -94,8 +120,20 @@ interface Ctx {
   metrics: Metrics | null;
   metricsAuth: MetricsAuth | null;
   maxSessions: number;
+  /**
+   * Sessions admitted past the cap check but not yet registered in a session
+   * map (still validating creds / connecting). Counted against `maxSessions`
+   * so concurrent connects cannot overshoot the cap.
+   */
+  pendingSessions: number;
   sseKeepaliveMs: number;
   validateTimeoutMs: number;
+  /**
+   * Multi-tenant only: one shared fetch whose connections are re-checked
+   * against the URL guard at connect time (DNS-rebinding safe). Null in
+   * single-tenant mode, where the operator chose the Trilium URL.
+   */
+  tenantFetch: GuardedFetch | null;
 }
 
 /** Log-safe session id: first 8 chars only (the full id is a bearer capability for SSE). */
@@ -156,7 +194,17 @@ export async function startHttp(
   const rateLimiter = new RateLimiter({
     rps: config.rateLimitRps,
     burst: config.rateLimitBurst,
+    trustedProxies: config.trustedProxies ?? [],
   });
+  // Created once and shared: it owns one undici dispatcher (connection pool).
+  // The client already sends redirect: 'manual'; the guarded fetch defaults to
+  // it as well, and every connection (any hop) passes the address check.
+  const tenantFetch = config.multiTenant
+    ? createGuardedFetch(
+        { allowlist: config.urlAllowlist, allowPrivate: config.allowPrivateUrls },
+        { baseLookup: options.tenantLookup }
+      )
+    : null;
 
   const ctx: Ctx = {
     config,
@@ -168,8 +216,10 @@ export async function startHttp(
     metrics,
     metricsAuth,
     maxSessions,
+    pendingSessions: 0,
     sseKeepaliveMs: config.sseKeepaliveMs ?? DEFAULT_SSE_KEEPALIVE_INTERVAL_MS,
     validateTimeoutMs: config.triliumValidateTimeoutMs ?? DEFAULT_TRILIUM_VALIDATE_TIMEOUT_MS,
+    tenantFetch,
   };
 
   if (config.allowPrivateUrls && config.multiTenant) {
@@ -215,7 +265,13 @@ export async function startHttp(
         allowedHosts: config.allowedHosts ?? [],
       });
       if (!originCheck.ok) {
-        logger.warn('request_rejected', { reason: originCheck.reason, remote, path });
+        logger.warn('request_rejected', {
+          reason: originCheck.reason,
+          remote,
+          path: logSafe(path),
+          host: logSafe(req.headers.host),
+          origin: logSafe(req.headers.origin),
+        });
         respondJson(res, 403, { error: originCheck.reason });
         return;
       }
@@ -234,7 +290,7 @@ export async function startHttp(
     if (rateLimiter.enabled && req.method !== 'OPTIONS' && path !== '/health') {
       const decision = rateLimiter.checkIp(req);
       if (!decision.allowed) {
-        respondRateLimited(req, res, logger, path, decision);
+        respondRateLimited(req, res, ctx, path, decision);
         return;
       }
     }
@@ -419,7 +475,7 @@ async function authorizeOrReject(
     const credential = gatewayPolicy.gatewayMode === 'none' ? null : undefined;
     const decision = rateLimiter.checkToken(req, credential);
     if (!decision.allowed) {
-      respondRateLimited(req, res, logger, (req.url ?? '/').split('?')[0], decision);
+      respondRateLimited(req, res, ctx, (req.url ?? '/').split('?')[0], decision);
       return null;
     }
   }
@@ -434,14 +490,18 @@ async function authorizeOrReject(
 function respondRateLimited(
   req: IncomingMessage,
   res: ServerResponse,
-  logger: Logger,
+  ctx: Ctx,
   path: string,
   decision: RateLimitDecision
 ): void {
   const retryAfter = decision.retryAfter ?? 1;
-  logger.warn('rate_limited', {
-    remote: req.socket.remoteAddress,
-    path,
+  const remote = req.socket.remoteAddress;
+  const client = ctx.rateLimiter.clientAddress(req);
+  ctx.logger.warn('rate_limited', {
+    remote,
+    // The address the limiter keyed on, when a trusted proxy forwarded it.
+    client: client !== remote ? client : undefined,
+    path: logSafe(path),
     reason: decision.reason,
     retry_after_s: retryAfter,
   });
@@ -454,16 +514,36 @@ function respondRateLimited(
 }
 
 /**
- * Enforce the cap on concurrently open sessions (both transports). Writes a
- * 503 and returns false when full.
+ * Enforce the cap on concurrently open sessions (both transports), counting
+ * admissions still in flight so concurrent connects can't all pass the check
+ * before any registers. Returns a release function (idempotent) the caller
+ * must invoke once the attempt has registered its session or failed — or
+ * null, after writing a 503, when full.
  */
-function admitNewSession(res: ServerResponse, ctx: Ctx, transport: TransportKind): boolean {
+function admitNewSession(
+  res: ServerResponse,
+  ctx: Ctx,
+  transport: TransportKind
+): (() => void) | null {
   const open = ctx.sessions.size + ctx.streamableSessions.size;
-  if (open < ctx.maxSessions) return true;
-  ctx.logger.warn('session_limit_reached', { transport, open, max: ctx.maxSessions });
+  if (open + ctx.pendingSessions < ctx.maxSessions) {
+    ctx.pendingSessions += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      ctx.pendingSessions -= 1;
+    };
+  }
+  ctx.logger.warn('session_limit_reached', {
+    transport,
+    open,
+    pending: ctx.pendingSessions,
+    max: ctx.maxSessions,
+  });
   ctx.metrics?.sseConnectFailuresTotal.inc({ reason: 'session_limit' });
   respondJson(res, 503, { error: 'too_many_sessions' }, { 'Retry-After': '30' });
-  return false;
+  return null;
 }
 
 /**
@@ -513,13 +593,9 @@ async function handleStreamable(
   res: ServerResponse,
   ctx: Ctx
 ): Promise<void> {
-  const { config, streamableSessions, logger, metrics } = ctx;
+  const { config, streamableSessions, logger } = ctx;
   const method = req.method ?? 'GET';
   const sessionId = firstHeader(req.headers['mcp-session-id']);
-
-  const recordFailure = (reason: string): void => {
-    metrics?.sseConnectFailuresTotal.inc({ reason });
-  };
 
   // 1. Gateway auth gate (+ per-credential rate limit) — every method.
   const auth = await authorizeOrReject(req, res, ctx, 'streamable');
@@ -611,7 +687,28 @@ async function handleStreamable(
     respondJson(res, 400, { error: 'missing_session_id' });
     return;
   }
-  if (!admitNewSession(res, ctx, 'streamable')) return;
+  const release = admitNewSession(res, ctx, 'streamable');
+  if (!release) return;
+  try {
+    await initStreamableSession(req, res, ctx, parsedBody, principal, identity);
+  } finally {
+    // By now the session is either registered (counted in the map) or failed.
+    release();
+  }
+}
+
+async function initStreamableSession(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: Ctx,
+  parsedBody: unknown,
+  principal: string | null,
+  identity: string
+): Promise<void> {
+  const { config, streamableSessions, logger, metrics } = ctx;
+  const recordFailure = (reason: string): void => {
+    metrics?.sseConnectFailuresTotal.inc({ reason });
+  };
 
   // 3b. Resolve backend creds (single- vs multi-tenant), same rules as /sse.
   let clientUrlRaw: string;
@@ -652,46 +749,9 @@ async function handleStreamable(
     clientToken = config.triliumToken;
   }
 
-  const triliumUrl = normalizeServerUrl(clientUrlRaw);
-  const triliumHost = safeHostname(triliumUrl);
-  // Single-tenant may override the user-facing note-link base via publicUrl; in
-  // multi-tenant mode each connection's link base is derived from its own URL.
-  const webBaseUrl =
-    !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
-  const client = new TriliumClient(
-    triliumUrl,
-    clientToken,
-    webBaseUrl,
-    clientOptionsFromConfig(config)
-  );
-  try {
-    await withTimeout(client.getAppInfo(), ctx.validateTimeoutMs);
-  } catch (err) {
-    if (err instanceof TriliumClientError) {
-      const status = err.status === 401 || err.status === 403 ? 401 : 502;
-      logger.warn('trilium_auth_failed', { host: triliumHost, status: err.status, code: err.code });
-      recordFailure('trilium_auth_failed');
-      respondJson(res, status, {
-        error: 'trilium_auth_failed',
-        status: err.status,
-        code: err.code,
-      });
-      return;
-    }
-    if (err instanceof Error && err.message === 'timeout') {
-      logger.warn('trilium_validate_timeout', { host: triliumHost });
-      recordFailure('trilium_validate_timeout');
-      respondJson(res, 504, { error: 'trilium_validate_timeout' });
-      return;
-    }
-    logger.warn('trilium_unreachable', {
-      host: triliumHost,
-      err: err instanceof Error ? err.message : String(err),
-    });
-    recordFailure('trilium_unreachable');
-    respondJson(res, 502, { error: 'trilium_unreachable' });
-    return;
-  }
+  const connected = await connectTrilium(res, ctx, clientUrlRaw, clientToken, recordFailure);
+  if (!connected) return;
+  const { client, triliumHost } = connected;
 
   // 3c. Build a fresh MCP server + transport for this new session. We don't
   // know the session id yet — it's generated by the transport on init — so
@@ -780,6 +840,123 @@ async function handleStreamable(
   }
 }
 
+/**
+ * Build the TriliumClient for a new session and probe it (bounded by the
+ * validate timeout). Writes the error response and returns null on failure.
+ *
+ * Multi-tenant clients use the shared connect-time-guarded fetch, so a tenant
+ * hostname that passed `assertUrlIsSafe` but later rebinds to a private
+ * address is refused when the socket is opened — here and on every later
+ * tool call.
+ */
+async function connectTrilium(
+  res: ServerResponse,
+  ctx: Ctx,
+  clientUrlRaw: string,
+  clientToken: string,
+  recordFailure: (reason: string) => void
+): Promise<{ client: TriliumClient; triliumHost: string } | null> {
+  const { config, logger } = ctx;
+  const triliumUrl = normalizeServerUrl(clientUrlRaw);
+  const triliumHost = safeHostname(triliumUrl);
+  // Single-tenant may override the user-facing note-link base via publicUrl; in
+  // multi-tenant mode each connection's link base is derived from its own URL.
+  const webBaseUrl =
+    !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
+
+  // Remember a guard block so the probe can answer `url_rejected` instead of
+  // a generic "unreachable" (the client wraps network errors).
+  let guardBlock: UrlGuardError | null = null;
+  const tenantFetch = ctx.tenantFetch;
+  const fetchImpl: FetchLike | undefined = tenantFetch
+    ? async (input, init) => {
+        try {
+          return await tenantFetch(input, init);
+        } catch (err) {
+          guardBlock ??= findUrlGuardError(err);
+          throw err;
+        }
+      }
+    : undefined;
+  const client = new TriliumClient(triliumUrl, clientToken, webBaseUrl, {
+    ...clientOptionsFromConfig(config),
+    ...(fetchImpl ? { fetchImpl } : {}),
+  });
+
+  try {
+    await withTimeout(client.getAppInfo(), ctx.validateTimeoutMs);
+    return { client, triliumHost };
+  } catch (err) {
+    const blocked = guardBlock as UrlGuardError | null;
+    if (blocked) {
+      // `detail` (resolved address) is operator-only; the client gets the reason.
+      logger.warn('url_rejected', {
+        reason: blocked.reason,
+        detail: blocked.detail,
+        stage: 'connect',
+      });
+      recordFailure('url_rejected');
+      respondJson(res, 400, { error: 'url_rejected', reason: blocked.reason });
+      return null;
+    }
+    if (err instanceof TriliumClientError) {
+      const status = err.status === 401 || err.status === 403 ? 401 : 502;
+      // Both values can originate from the remote server: bound them before
+      // reflecting them into our response and logs.
+      const upstreamStatus = safeStatus(err.status);
+      const upstreamCode = safeCode(err.code);
+      logger.warn('trilium_auth_failed', {
+        host: triliumHost,
+        status: upstreamStatus,
+        code: upstreamCode,
+      });
+      recordFailure('trilium_auth_failed');
+      respondJson(res, status, {
+        error: 'trilium_auth_failed',
+        status: upstreamStatus,
+        code: upstreamCode,
+      });
+      return null;
+    }
+    if (err instanceof Error && err.message === 'timeout') {
+      logger.warn('trilium_validate_timeout', { host: triliumHost });
+      recordFailure('trilium_validate_timeout');
+      respondJson(res, 504, { error: 'trilium_validate_timeout' });
+      return null;
+    }
+    logger.warn('trilium_unreachable', {
+      host: triliumHost,
+      err: err instanceof Error ? err.message : String(err),
+    });
+    recordFailure('trilium_unreachable');
+    respondJson(res, 502, { error: 'trilium_unreachable' });
+    return null;
+  }
+}
+
+/** An HTTP status code, or undefined when the value is not one. */
+export function safeStatus(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 100 && value <= 599
+    ? value
+    : undefined;
+}
+
+/** A short identifier-like error code, or undefined (never echo arbitrary remote text). */
+export function safeCode(value: unknown): string | undefined {
+  return typeof value === 'string' && /^[A-Za-z0-9_.-]{1,64}$/.test(value) ? value : undefined;
+}
+
+/**
+ * Make a client-controlled header/path value safe for a log line: first
+ * value only, non-printable-ASCII replaced with `?`, truncated to `max` chars.
+ */
+export function logSafe(value: string | string[] | undefined, max = 128): string | undefined {
+  if (value === undefined) return undefined;
+  const v = Array.isArray(value) ? (value[0] ?? '') : value;
+  const clean = v.replace(/[^\x20-\x7e]/g, '?');
+  return clean.length > max ? `${clean.slice(0, max)}...` : clean;
+}
+
 function handleMetrics(
   req: IncomingMessage,
   res: ServerResponse,
@@ -808,16 +985,30 @@ async function handleSseConnect(
   res: ServerResponse,
   ctx: Ctx
 ): Promise<void> {
+  // 1. Gateway auth gate (+ per-credential rate limit), then the session cap.
+  const auth = await authorizeOrReject(req, res, ctx, 'sse');
+  if (!auth) return;
+  const release = admitNewSession(res, ctx, 'sse');
+  if (!release) return;
+  try {
+    await initSseSession(req, res, ctx, auth.principal, auth.identity);
+  } finally {
+    // The session is registered (or the attempt failed) once this returns.
+    release();
+  }
+}
+
+async function initSseSession(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: Ctx,
+  principal: string | null,
+  identity: string
+): Promise<void> {
   const { config, sessions, logger, metrics } = ctx;
   const recordFailure = (reason: string): void => {
     metrics?.sseConnectFailuresTotal.inc({ reason });
   };
-
-  // 1. Gateway auth gate (+ per-credential rate limit), then the session cap.
-  const auth = await authorizeOrReject(req, res, ctx, 'sse');
-  if (!auth) return;
-  const { principal, identity } = auth;
-  if (!admitNewSession(res, ctx, 'sse')) return;
 
   // 2. Resolve backend creds. In multi-tenant mode, require BOTH X-Trilium-Url
   // and X-Trilium-Token from the client as an atomic pair — no fallback to
@@ -867,46 +1058,9 @@ async function handleSseConnect(
 
   // 4. Build the client and validate creds BEFORE we let the SSE transport
   // write response headers (once start() runs, we can't return a clean JSON error).
-  const triliumUrl = normalizeServerUrl(clientUrlRaw);
-  const triliumHost = safeHostname(triliumUrl);
-  // Single-tenant may override the user-facing note-link base via publicUrl; in
-  // multi-tenant mode each connection's link base is derived from its own URL.
-  const webBaseUrl =
-    !config.multiTenant && config.publicUrl ? config.publicUrl : deriveWebBaseUrl(triliumUrl);
-  const client = new TriliumClient(
-    triliumUrl,
-    clientToken,
-    webBaseUrl,
-    clientOptionsFromConfig(config)
-  );
-  try {
-    await withTimeout(client.getAppInfo(), ctx.validateTimeoutMs);
-  } catch (err) {
-    if (err instanceof TriliumClientError) {
-      const status = err.status === 401 || err.status === 403 ? 401 : 502;
-      logger.warn('trilium_auth_failed', { host: triliumHost, status: err.status, code: err.code });
-      recordFailure('trilium_auth_failed');
-      respondJson(res, status, {
-        error: 'trilium_auth_failed',
-        status: err.status,
-        code: err.code,
-      });
-      return;
-    }
-    if (err instanceof Error && err.message === 'timeout') {
-      logger.warn('trilium_validate_timeout', { host: triliumHost });
-      recordFailure('trilium_validate_timeout');
-      respondJson(res, 504, { error: 'trilium_validate_timeout' });
-      return;
-    }
-    logger.warn('trilium_unreachable', {
-      host: triliumHost,
-      err: err instanceof Error ? err.message : String(err),
-    });
-    recordFailure('trilium_unreachable');
-    respondJson(res, 502, { error: 'trilium_unreachable' });
-    return;
-  }
+  const connected = await connectTrilium(res, ctx, clientUrlRaw, clientToken, recordFailure);
+  if (!connected) return;
+  const { client, triliumHost } = connected;
 
   // 5. Create the per-connection MCP Server + SSE transport.
   const transport = new SSEServerTransport('/message', res);

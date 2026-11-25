@@ -165,7 +165,8 @@ function buildSearchNotesSchema() {
       .default('auto')
       .describe(
         '"auto" (default): a plain multi-word query with zero results is retried as a ranked OR over its ' +
-          'words. "off": exact only. "force": skip the exact attempt.'
+          'words. "off": exact only. "force": skip the exact attempt. The automatic retry never runs ' +
+          'with strategy:"fast" (it would search note bodies).'
       ),
   });
 }
@@ -293,7 +294,7 @@ Syntax:
 - \`id:abc123\` — direct lookup by note ID. A lone 12-character alphanumeric token containing a digit is also tried as an ID first.
 - Properties: note.title, note.dateCreated, note.dateModified, note.parents.title, note.ancestors.title.
 
-Scope a subtree with ancestorNoteId + ancestorDepth. If a plain multi-word query finds nothing, it is retried as a ranked OR (see fuzzy); the response then has searchMode:"fuzzy" and termsMatchedInTitleOrAttributes. Plain-word queries match titles/labels first and search bodies only when that finds too few (strategy); TRILIUM_BUSY means wait the suggested time before retrying.`,
+Scope a subtree with ancestorNoteId + ancestorDepth. If a plain multi-word query finds nothing, it is retried as a ranked OR (see fuzzy); the response then has searchMode:"fuzzy" and termsMatchedInTitleOrAttributes. partial:true means part of the search did not finish; read the note field.`,
       searchNotesSchema,
       { title: 'Search notes', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
@@ -333,7 +334,8 @@ export function htmlToPreviewText(html: string): string {
 
 /**
  * Add `contentPreview` to the leading results in place. Best-effort: a preview
- * that fails to load is simply omitted — it must never fail the search.
+ * that fails to load is marked `contentPreviewError: true` — it must never
+ * fail the search.
  */
 async function attachPreviews(
   client: TriliumClient,
@@ -351,7 +353,9 @@ async function attachPreviews(
       const text = n.type === 'text' ? htmlToPreviewText(raw) : raw.trim();
       n.contentPreview = text.length > chars ? `${text.slice(0, chars)}…` : text;
     } catch {
-      // Omit the preview for this note.
+      // Never fail the search over a preview, but flag the gap so an empty
+      // preview is not mistaken for an empty note.
+      n.contentPreviewError = true;
     }
   });
 }
@@ -379,6 +383,7 @@ export function compactSearchResult(note: Record<string, unknown>): Record<strin
     parentNoteIds: note.parentNoteIds,
     attributes,
     ...(note.contentPreview !== undefined ? { contentPreview: note.contentPreview } : {}),
+    ...(note.contentPreviewError === true ? { contentPreviewError: true } : {}),
   };
 }
 
@@ -399,7 +404,9 @@ async function finalizeSearchResult(
     returned: shaped.length,
   };
   if (payload.truncated === true && payload.searchMode !== 'fuzzy') {
-    payload.note = 'More notes matched. Narrow the query or raise limit to see them.';
+    const more = 'More notes matched. Narrow the query or raise limit to see them.';
+    // Keep an existing note (fast-search or partial-result explanation).
+    payload.note = typeof payload.note === 'string' ? `${payload.note} ${more}` : more;
   }
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }] };
 }
@@ -506,6 +513,14 @@ function resolveStrategy(
   return plain ? 'auto' : 'full';
 }
 
+/** Trilium was too slow or busy to answer; the request itself was fine. */
+function isSlowTriliumError(error: unknown): error is TriliumClientError {
+  return (
+    error instanceof TriliumClientError &&
+    (error.code === 'TRILIUM_BUSY' || error.code === 'TRILIUM_TIMEOUT')
+  );
+}
+
 const FAST_NOTE =
   'Matched note titles and labels only (fast search). Pass strategy:"full" to also search ' +
   'note bodies; that is slower, and Trilium answers nothing else while it runs.';
@@ -544,10 +559,7 @@ async function runExactSearch(
   try {
     return await client.searchNotes(params);
   } catch (error) {
-    const slow =
-      error instanceof TriliumClientError &&
-      (error.code === 'TRILIUM_BUSY' || error.code === 'TRILIUM_TIMEOUT');
-    if (!slow || fast.results.length === 0) throw error;
+    if (!isSlowTriliumError(error) || fast.results.length === 0) throw error;
     return {
       ...fast,
       searchMode: 'fast',
@@ -617,10 +629,19 @@ async function runSearchWithFallback(
 
   try {
     return await runFuzzySearch(client, parsed, extractFuzzyTerms(originalQuery), false);
-  } catch {
-    // Best-effort retry. A failed rewrite must never turn a successful-but-empty
-    // search into a tool error.
-    return exact as unknown as Record<string, unknown>;
+  } catch (error) {
+    // A slow or busy Trilium must not turn a successful-but-empty search into a
+    // tool error — but the caller has to know the retry never ran. Anything
+    // else (bad syntax from the rewrite, auth, ...) is a real failure.
+    if (!isSlowTriliumError(error)) throw error;
+    return {
+      ...exact,
+      fuzzyAttempted: true,
+      partial: true,
+      note:
+        `No notes matched all terms, and the fuzzy OR retry did not finish (${error.message}). ` +
+        'Zero results here does NOT mean nothing matches: retry later, or search for fewer words.',
+    };
   }
 }
 

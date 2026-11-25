@@ -919,13 +919,18 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       // Attach a 1x1 PNG pixel
       const pngBase64 =
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-      await client.createAttachment({
+      const attachment = await client.createAttachment({
         ownerId: noteId,
         role: 'image',
         mime: 'image/png',
         title: 'pixel.png',
         content: pngBase64,
       });
+      // get_note inlines only images the body actually embeds.
+      await client.updateNoteContent(
+        noteId,
+        `<p>Note with an attached image</p><img src="api/attachments/${attachment.attachmentId}/image/pixel.png">`
+      );
 
       // include_content=true ensures we exercise the embedded-image block path
       const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });

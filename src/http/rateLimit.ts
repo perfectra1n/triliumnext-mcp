@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { extractBearerToken } from './auth.js';
+import { addressKey, resolveClientIp, TrustedProxies } from './clientIp.js';
 
 /**
  * Token-bucket rate limiter, keyed by remote IP and (separately) by gateway
@@ -22,6 +23,12 @@ import { extractBearerToken } from './auth.js';
  *  - The server checks the IP axis before auth (`checkIp`) and the token
  *    axis only AFTER a successful auth (`checkToken`), so unauthenticated
  *    garbage tokens cannot create per-token buckets.
+ *  - The IP axis keys on the socket peer unless that peer is a configured
+ *    trusted proxy, in which case the right-most untrusted `X-Forwarded-For`
+ *    entry is used (see `resolveClientIp`). IPv6 clients are keyed by /64.
+ *  - Each bucket map is capped at `maxBuckets` entries; when full, the least
+ *    recently used bucket is evicted. Eviction only ever resets a client to a
+ *    full bucket (fail-open), never blocks one.
  */
 
 interface Bucket {
@@ -45,13 +52,25 @@ export interface RateLimitOptions {
   now?: () => number;
   /** Idle bucket eviction threshold; defaults to 5 minutes. */
   idleSweepMs?: number;
+  /**
+   * Proxy addresses / CIDRs whose `X-Forwarded-For` is believed. Empty
+   * (default) keys every request on its socket peer address.
+   */
+  trustedProxies?: readonly string[];
+  /** Hard cap on buckets per axis (LRU eviction). Default {@link DEFAULT_MAX_BUCKETS}. */
+  maxBuckets?: number;
 }
+
+/** Default cap on tracked buckets per axis (IP, token). */
+export const DEFAULT_MAX_BUCKETS = 10_000;
 
 export class RateLimiter {
   private readonly rps: number;
   private readonly burst: number;
   private readonly now: () => number;
   private readonly idleSweepMs: number;
+  private readonly maxBuckets: number;
+  private readonly trusted: TrustedProxies;
   private readonly ipBuckets = new Map<string, Bucket>();
   private readonly tokenBuckets = new Map<string, Bucket>();
   private lastSweep = 0;
@@ -61,6 +80,16 @@ export class RateLimiter {
     this.burst = opts.burst;
     this.now = opts.now ?? (() => performance.now());
     this.idleSweepMs = opts.idleSweepMs ?? 5 * 60 * 1000;
+    this.maxBuckets = Math.max(1, opts.maxBuckets ?? DEFAULT_MAX_BUCKETS);
+    this.trusted = new TrustedProxies(opts.trustedProxies ?? []);
+  }
+
+  /**
+   * The address a request is attributed to (trusted-proxy aware). Exposed so
+   * logs can name the same client the limiter keyed on.
+   */
+  clientAddress(req: IncomingMessage): string {
+    return resolveClientIp(req, this.trusted);
   }
 
   get enabled(): boolean {
@@ -76,7 +105,7 @@ export class RateLimiter {
     const t = this.now();
     this.maybeSweep(t);
 
-    const ipBucket = this.takeOrCreate(this.ipBuckets, ipKeyOf(req), t);
+    const ipBucket = this.takeOrCreate(this.ipBuckets, this.ipKeyOf(req), t);
     if (ipBucket.tokens < 1) {
       return { allowed: false, reason: 'ip', retryAfter: this.retryAfterSec(ipBucket) };
     }
@@ -101,7 +130,7 @@ export class RateLimiter {
     if (!this.enabled) return { allowed: true };
     const t = this.now();
     this.maybeSweep(t);
-    const b = this.takeOrCreate(this.ipBuckets, ipKeyOf(req), t);
+    const b = this.takeOrCreate(this.ipBuckets, this.ipKeyOf(req), t);
     if (b.tokens < 1) return { allowed: false, reason: 'ip', retryAfter: this.retryAfterSec(b) };
     b.tokens -= 1;
     return { allowed: true };
@@ -137,16 +166,29 @@ export class RateLimiter {
   private takeOrCreate(map: Map<string, Bucket>, key: string, t: number): Bucket {
     let b = map.get(key);
     if (!b) {
+      // Map iteration order is insertion order, and touched buckets are
+      // re-inserted below, so the first key is the least recently used.
+      while (map.size >= this.maxBuckets) {
+        const oldest = map.keys().next().value;
+        if (oldest === undefined) break;
+        map.delete(oldest);
+      }
       b = { tokens: this.burst, lastRefill: t };
       map.set(key, b);
       return b;
     }
+    map.delete(key);
+    map.set(key, b);
     const elapsedSec = (t - b.lastRefill) / 1000;
     if (elapsedSec > 0) {
       b.tokens = Math.min(this.burst, b.tokens + elapsedSec * this.rps);
       b.lastRefill = t;
     }
     return b;
+  }
+
+  private ipKeyOf(req: IncomingMessage): string {
+    return addressKey(this.clientAddress(req));
   }
 
   private retryAfterSec(b: Bucket): number {
@@ -175,10 +217,6 @@ export class RateLimiter {
       }
     }
   }
-}
-
-function ipKeyOf(req: IncomingMessage): string {
-  return req.socket.remoteAddress ?? 'unknown';
 }
 
 function fingerprint(token: string): string {

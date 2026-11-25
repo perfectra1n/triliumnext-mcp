@@ -104,7 +104,8 @@ function privateAddressError(host: string, addr: string): UrlGuardError {
   return new UrlGuardError(
     'private_address',
     `Host ${host} resolves to a private, loopback, or otherwise non-public address. ` +
-      'Use --allow-private-urls or an allowlist to permit it.',
+      'Use an allowlist, or --allow-private-urls (Trilium URLs) / ' +
+      '--content-allow-private-urls (content URLs), to permit it.',
     `${host} -> ${addr}`
   );
 }

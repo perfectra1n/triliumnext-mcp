@@ -964,21 +964,23 @@ describe('MCP Transport Integration Tests', () => {
       }
     });
 
-    it('manage_system export returns a base64 ZIP for a subtree', async () => {
+    it('manage_system export returns the ZIP as an embedded resource', async () => {
       const noteId = await makeNote('SSE export source', '<p>exported body</p>');
       try {
         const response = await client.callTool({
           name: 'manage_system',
           arguments: { action: 'export', noteId, format: 'markdown' },
         });
-        const result = parseJsonResponse<{
-          action: string;
-          base64Data: string;
-          sizeBytes: number;
-        }>(response);
+        const result = parseJsonResponse<{ action: string; sizeBytes: number }>(response);
         expect(result.action).toBe('export');
         expect(result.sizeBytes).toBeGreaterThan(0);
-        expect(result.base64Data.length).toBeGreaterThan(0);
+        const resource = (
+          response.content as Array<{ type: string; resource?: { mimeType: string; blob: string } }>
+        ).find((b) => b.type === 'resource');
+        expect(resource?.resource?.mimeType).toBe('application/zip');
+        const zip = Buffer.from(resource!.resource!.blob, 'base64');
+        expect(zip.length).toBe(result.sizeBytes);
+        expect(zip.subarray(0, 2).toString('latin1')).toBe('PK');
       } finally {
         await deleteNote(noteId);
       }

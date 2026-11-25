@@ -153,3 +153,44 @@ describe('RateLimiter — split pre/post-auth axes and sweeping', () => {
     expect(rl.check(req('1.1.1.1')).allowed).toBe(false);
   });
 });
+
+describe('RateLimiter bucket bounds', () => {
+  it('shares one bucket per IPv6 /64', () => {
+    const rl = new RateLimiter({ rps: 0.001, burst: 1, now: () => 0 });
+    expect(rl.checkIp(req('2001:db8:0:1::1')).allowed).toBe(true);
+    expect(rl.checkIp(req('2001:db8:0:1::ffff')).allowed).toBe(false);
+    expect(rl.checkIp(req('2001:db8:0:2::1')).allowed).toBe(true);
+    expect(rl.inspect().ips).toBe(2);
+  });
+
+  it('caps the number of IP buckets, evicting the least recently used', () => {
+    const rl = new RateLimiter({ rps: 0.001, burst: 1, maxBuckets: 3, now: () => 0 });
+    for (const ip of ['1.0.0.1', '1.0.0.2', '1.0.0.3']) rl.checkIp(req(ip));
+    // 1.0.0.1 is touched again, so 1.0.0.2 is now the oldest.
+    expect(rl.checkIp(req('1.0.0.1')).allowed).toBe(false);
+    rl.checkIp(req('1.0.0.4'));
+    expect(rl.inspect().ips).toBe(3);
+    // 1.0.0.1 survived (still empty); 1.0.0.2 was evicted (fresh, full bucket).
+    expect(rl.checkIp(req('1.0.0.1')).allowed).toBe(false);
+    expect(rl.checkIp(req('1.0.0.2')).allowed).toBe(true);
+    expect(rl.inspect().ips).toBe(3);
+  });
+
+  it('keys on the forwarded client only behind a trusted proxy', () => {
+    const rl = new RateLimiter({
+      rps: 0.001,
+      burst: 1,
+      now: () => 0,
+      trustedProxies: ['10.0.0.0/8'],
+    });
+    const viaProxy = (xff: string): IncomingMessage =>
+      ({
+        socket: { remoteAddress: '10.0.0.1' },
+        headers: { 'x-forwarded-for': xff },
+      }) as unknown as IncomingMessage;
+    expect(rl.checkIp(viaProxy('198.51.100.1')).allowed).toBe(true);
+    expect(rl.checkIp(viaProxy('198.51.100.2')).allowed).toBe(true);
+    expect(rl.checkIp(viaProxy('spoof, 198.51.100.1')).allowed).toBe(false);
+    expect(rl.clientAddress(viaProxy('198.51.100.2'))).toBe('198.51.100.2');
+  });
+});

@@ -17,7 +17,7 @@ import { configureContentInput, ContentNormalizationError } from './tools/conten
 import type { Config } from './config.js';
 import type { ToolHandlerResult } from './tools/schemas.js';
 import type { ToolContext } from './tools/context.js';
-import { deriveWebBaseUrl } from './config.js';
+import { deriveWebBaseUrl, TUNABLE_DEFAULTS } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
 import { SERVER_VERSION } from './version.js';
 import { registerNoteTools, handleNoteTool, configureNoteTools } from './tools/notes.js';
@@ -73,8 +73,6 @@ export interface McpServerContext {
   progressIntervalMs?: number;
 }
 
-const DEFAULT_PROGRESS_INTERVAL_MS = 10_000;
-
 /**
  * Builds a fully-configured MCP Server bound to the given Trilium client.
  * One instance per logical connection: in multi-tenant SSE mode each SSE
@@ -87,7 +85,7 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     sessionId,
     metrics,
     principal,
-    progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
+    progressIntervalMs = TUNABLE_DEFAULTS.progressIntervalMs,
   } = ctx;
   const server = new Server(
     {
@@ -266,8 +264,6 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
   logger.info('server_started', { transport: 'stdio' });
 }
 
-const DEFAULT_CONTENT_FETCH_TIMEOUT_MS = 30_000;
-
 /**
  * Apply the process-wide tool settings from config. Must run before any
  * buildMcpServer call: tool descriptions and schemas interpolate these limits
@@ -279,9 +275,15 @@ export function configureTools(config: Config): void {
   configureContentInput({
     allowLocalFileRead: config.allowLocalFileRead,
     localFileRoots: config.localFileRoots,
-    urlGuard: { allowlist: config.contentUrlAllowlist, allowPrivate: config.allowPrivateUrls },
+    // Content URLs are LLM-chosen, so they have their own private-network
+    // switch; the fallback mirrors loadConfig for embedders that omit it.
+    urlGuard: {
+      allowlist: config.contentUrlAllowlist,
+      allowPrivate:
+        config.contentAllowPrivateUrls ?? (config.multiTenant ? false : config.allowPrivateUrls),
+    },
     maxBytes: config.maxContentFetchBytes,
-    fetchTimeoutMs: config.contentFetchTimeoutMs ?? DEFAULT_CONTENT_FETCH_TIMEOUT_MS,
+    fetchTimeoutMs: config.contentFetchTimeoutMs ?? TUNABLE_DEFAULTS.contentFetchTimeoutMs,
   });
   // Before configureNoteTools: get_note's schema defaults to the char cap.
   configureContentLimits({ contentCharCap: config.contentCharCap });

@@ -31,14 +31,22 @@ services:
     environment:
       - TRILIUM_TRANSPORT=http
       - TRILIUM_HTTP_PORT=3000
+      # The image already sets this; repeated here so the compose file is
+      # self-explanatory (the default bind is 127.0.0.1, unreachable via ports:).
+      - TRILIUM_HTTP_HOST=0.0.0.0
       - TRILIUM_MULTI_TENANT=true
       - TRILIUM_GATEWAY_AUTH=bearer
       - TRILIUM_GATEWAY_TOKENS=${MCP_GATEWAY_TOKEN}
       # Optional — comma-separated hostnames allowed in X-Trilium-Url.
       # Takes precedence over the private-IP block.
       # - TRILIUM_URL_ALLOWLIST=notes.example.com,trilium.internal
-      # Uncomment if you need to allow private IPs (homelab only):
+      # Uncomment if you need to allow private IPs (homelab only). This covers
+      # tenant Trilium URLs only; LLM-supplied content URLs stay restricted
+      # unless TRILIUM_CONTENT_ALLOW_PRIVATE_URLS=true is also set.
       # - TRILIUM_ALLOW_PRIVATE_URLS=true
+      # Behind a reverse proxy with rate limiting on, trust its X-Forwarded-For
+      # (otherwise every client shares the proxy's rate-limit bucket):
+      # - TRILIUM_TRUSTED_PROXIES=172.16.0.0/12
       # Prometheus /metrics endpoint (opt-in). By default it reuses the
       # gateway bearer above, so Prometheus must send the same Authorization
       # header as MCP clients. Switch to TRILIUM_METRICS_AUTH=bearer +

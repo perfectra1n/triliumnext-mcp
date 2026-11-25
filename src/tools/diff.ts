@@ -16,10 +16,20 @@ export const searchReplaceBlockSchema = z.object({
 export type SearchReplaceBlock = z.infer<typeof searchReplaceBlockSchema>;
 
 /**
+ * Why a diff failed. Error formatting switches on this rather than on the
+ * message, which echoes user-supplied old_string/new_string text.
+ */
+export type DiffFailureKind =
+  'not_found' | 'ambiguous' | 'patch_parse' | 'patch_apply' | 'verification' | 'no_mode';
+
+/**
  * Custom error class for diff application failures.
  */
 export class DiffApplicationError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly kind: DiffFailureKind
+  ) {
     super(message);
     this.name = 'DiffApplicationError';
   }
@@ -51,7 +61,8 @@ export function applySearchReplace(content: string, changes: SearchReplaceBlock[
     if (firstIndex === -1) {
       throw new DiffApplicationError(
         `Search/replace failed (nothing was written): could not find old_string in the stored content. ` +
-          `Search string: "${preview(old_string, 100)}"`
+          `Search string: "${preview(old_string, 100)}"`,
+        'not_found'
       );
     }
 
@@ -59,7 +70,8 @@ export function applySearchReplace(content: string, changes: SearchReplaceBlock[
     if (secondIndex !== -1) {
       throw new DiffApplicationError(
         `Search/replace failed (nothing was written): old_string is ambiguous — it appears more than once. ` +
-          `Search string: "${preview(old_string, 100)}"`
+          `Search string: "${preview(old_string, 100)}"`,
+        'ambiguous'
       );
     }
 
@@ -84,14 +96,16 @@ export function applyUnifiedDiff(content: string, patch: string): string {
     throw new DiffApplicationError(
       `Unified diff failed: the patch could not be parsed (${reason}). ` +
         'Provide a single-file unified diff with @@ hunk headers, or use "changes" ' +
-        '(search/replace blocks), which is more reliable for Trilium HTML.'
+        '(search/replace blocks), which is more reliable for Trilium HTML.',
+      'patch_parse'
     );
   }
   if (result === false) {
     throw new DiffApplicationError(
       'Unified diff failed: the patch could not be applied to the current content (nothing was written). ' +
         'Re-read the note with get_note (format="html") and rebuild the patch, or use "changes" ' +
-        'instead — Trilium HTML is often a single long line, which makes line-based hunks fragile.'
+        'instead — Trilium HTML is often a single long line, which makes line-based hunks fragile.',
+      'patch_apply'
     );
   }
   return result;
@@ -134,7 +148,8 @@ export function verifySearchReplaceResults(
         problems.join('\n') +
         '\n\nTrilium probably normalized or sanitized the HTML. Do not re-apply the same edit: ' +
         'call get_note (format="html") to see what was actually saved, then make any follow-up ' +
-        'edit against that content.'
+        'edit against that content.',
+      'verification'
     );
   }
 }
@@ -162,7 +177,8 @@ export async function resolveContent(
     resolved = applyUnifiedDiff(existingContent, input.patch);
   } else {
     throw new DiffApplicationError(
-      'No content mode specified: provide one of "content", "changes", or "patch".'
+      'No content mode specified: provide one of "content", "changes", or "patch".',
+      'no_mode'
     );
   }
 

@@ -94,10 +94,14 @@ export interface TriliumClientOptions {
   maxResponseBytes?: number;
   /**
    * fetch implementation used for every request (default: the global `fetch`,
-   * resolved per call). Lets the host inject an SSRF-guarded fetch.
+   * resolved per call). Lets the host inject an SSRF-guarded fetch (the HTTP
+   * transport does so for multi-tenant clients).
    */
-  fetchImpl?: typeof fetch;
+  fetchImpl?: FetchLike;
 }
+
+/** The subset of `fetch` the client uses: always a string URL plus init. */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
@@ -221,7 +225,7 @@ export class TriliumClient {
   private readonly maxResponseBytes: number;
   /** In-flight requests are only shared between callers holding the same token. */
   private readonly dedupeScope: string;
-  private readonly fetchImpl?: typeof fetch;
+  private readonly fetchImpl?: FetchLike;
 
   /**
    * @param baseUrl  ETAPI base URL (e.g. `http://host:port/etapi`).

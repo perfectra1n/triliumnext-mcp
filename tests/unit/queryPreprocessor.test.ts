@@ -128,6 +128,42 @@ describe('preprocessSearchQuery', () => {
     });
   });
 
+  describe('AND / NOT connectives inside OR segments', () => {
+    it('drops AND instead of searching for the word "AND"', () => {
+      expect(preprocessSearchQuery('meeting AND notes or agenda')).toEqual({
+        type: 'search',
+        query: '(note.content *=* meeting AND note.content *=* notes) OR note.content *=* agenda',
+      });
+    });
+
+    it('turns NOT x into a negated condition', () => {
+      expect(preprocessSearchQuery('meeting NOT draft or agenda')).toEqual({
+        type: 'search',
+        query:
+          '(note.content *=* meeting AND not(note.content *=* draft)) OR note.content *=* agenda',
+      });
+    });
+
+    it('is case-insensitive', () => {
+      expect(preprocessSearchQuery('a and b or c')).toEqual({
+        type: 'search',
+        query: '(note.content *=* a AND note.content *=* b) OR note.content *=* c',
+      });
+    });
+
+    it('keeps a trailing NOT as a literal word', () => {
+      expect(preprocessSearchQuery('agenda or do not')).toEqual({
+        type: 'search',
+        query: 'note.content *=* agenda OR (note.content *=* do AND note.content *=* not)',
+      });
+    });
+
+    it('never wraps a connective as a search term', () => {
+      const { query } = preprocessSearchQuery('x AND y NOT z or w');
+      expect(query).not.toMatch(/\*=\* (AND|NOT)\b/i);
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle extra whitespace around OR', () => {
       const result = preprocessSearchQuery('meeting   OR   project');

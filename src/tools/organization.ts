@@ -20,8 +20,8 @@ const organizeNoteSchema = z
     fromParentNoteId: entityIdSchema
       .optional()
       .describe(
-        '"move" only: the parent to move the note away from. Required when the note has several ' +
-          'parents (is cloned); ignored otherwise.'
+        '"move" only: the parent to move the note away from. Required when the note has two or more ' +
+          'parents besides newParentNoteId; optional otherwise.'
       ),
     parentNoteId: entityIdSchema
       .optional()
@@ -127,7 +127,10 @@ export function registerOrganizationTools(): Tool[] {
       'organize_note',
       'Reorganize the note tree. Actions:\n' +
         '- "move": place the note under newParentNoteId and remove its old placement (the new branch is ' +
-        'created first). A cloned note needs fromParentNoteId; moving onto a current parent is a no-op.\n' +
+        'created first). If the note has several placements other than newParentNoteId, fromParentNoteId ' +
+        'must say which to remove. If newParentNoteId is already a parent: with no other placement nothing ' +
+        'changes; with exactly one other placement, that one is REMOVED (the note collapses onto ' +
+        'newParentNoteId) — use "clone" instead to keep both.\n' +
         '- "clone": add a placement under parentNoteId without removing any (same note, new branch).\n' +
         '- "reorder": set notePosition on child branches of parentNoteId; every branch must belong to it.\n' +
         '- "unlink": remove one branch. If it is the note\'s last branch, the note itself is deleted.\n' +

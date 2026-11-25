@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { loadConfig, parseDuration } from '../../src/config.js';
+import { loadConfig, parseDuration, ConfigError } from '../../src/config.js';
 
 describe('backend timeout and search config', () => {
   const originalEnv = process.env;
@@ -48,12 +48,25 @@ describe('backend timeout and search config', () => {
     expect(config?.searchStrategy).toBe('fast');
   });
 
-  it('falls back to defaults for invalid values', () => {
+  it('rejects invalid env values instead of silently using the default', () => {
     process.env.TRILIUM_REQUEST_TIMEOUT = 'soon';
+    expect(() => loadConfig([])).toThrow(ConfigError);
+    expect(() => loadConfig([])).toThrow(/TRILIUM_REQUEST_TIMEOUT/);
+    delete process.env.TRILIUM_REQUEST_TIMEOUT;
+
+    process.env.TRILIUM_BUSY_COOLDOWN = '0';
+    expect(() => loadConfig([])).toThrow(/TRILIUM_BUSY_COOLDOWN/);
+    delete process.env.TRILIUM_BUSY_COOLDOWN;
+
     process.env.TRILIUM_SEARCH_STRATEGY = 'thorough';
-    const config = loadConfig([]);
-    expect(config?.requestTimeoutMs).toBe(60_000);
-    expect(config?.searchStrategy).toBe('auto');
+    expect(() => loadConfig([])).toThrow(/Invalid search strategy: "thorough"/);
+    expect(() => loadConfig(['--search-strategy', 'thorough'])).toThrow(ConfigError);
+  });
+
+  it('reads the search strategy case-insensitively', () => {
+    process.env.TRILIUM_SEARCH_STRATEGY = ' FULL ';
+    expect(loadConfig([])?.searchStrategy).toBe('full');
+    expect(loadConfig(['--search-strategy', 'Fast'])?.searchStrategy).toBe('fast');
   });
 });
 

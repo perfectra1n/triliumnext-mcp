@@ -31,21 +31,48 @@ export function isImageMimeType(mime: string): boolean {
 }
 
 /**
- * MIME types that TriliumNext treats as text (string) content.
- * Mirrors TriliumNext's isStringNote() logic in services/utils.ts.
+ * MIME types handled as text (string) content. A superset of TriliumNext's
+ * isStringNote() list (services/utils.ts): it adds common text-based
+ * application/* types (XML, YAML, TypeScript, shell, ...), whose UTF-8 bytes
+ * round-trip identically whether Trilium stores them as a string or a blob,
+ * so they can be read, edited and diffed as text instead of base64.
  */
 const TEXT_MIME_EXACT = new Set([
   'application/javascript',
   'application/x-javascript',
+  'application/ecmascript',
+  'application/typescript',
+  'application/x-typescript',
   'application/json',
+  'application/ld+json',
   'application/x-sql',
+  'application/sql',
+  'application/xml',
+  'application/xhtml+xml',
+  'application/x-yaml',
+  'application/yaml',
+  'application/toml',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-httpd-php',
+  'application/x-perl',
+  'application/x-python',
+  'application/x-ruby',
+  'application/graphql',
   'image/svg+xml',
 ]);
 
+/**
+ * Whether content of this MIME type is binary. Parameters are ignored, so
+ * Trilium's script mimes ("application/javascript;env=frontend") and
+ * "text/plain; charset=utf-8" classify by their base type. Structured-text
+ * suffixes (+json, +xml, +yaml) count as text.
+ */
 export function isBinaryMimeType(mime: string): boolean {
-  const lower = mime.toLowerCase();
+  const lower = mime.split(';')[0].trim().toLowerCase();
   if (lower.startsWith('text/')) return false;
   if (TEXT_MIME_EXACT.has(lower)) return false;
+  if (/\+(json|xml|yaml)$/.test(lower)) return false;
   return true;
 }
 
@@ -215,6 +242,11 @@ export function configureContentInput(policy: ContentInputPolicy): void {
   activePolicy = policy;
 }
 
+/** The active content-input policy (for callers that derive a tighter per-call budget). */
+export function getContentInputPolicy(): ContentInputPolicy {
+  return activePolicy;
+}
+
 // ============================================================================
 // Public API
 // ============================================================================
@@ -257,8 +289,9 @@ export async function resolveContentInput(
 
   // 1. Data URL — unambiguous prefix.
   if (raw.startsWith('data:')) {
-    // Cheap pre-check before decoding: decoded size is <= the payload length.
-    assertEncodedWithinLimit(raw, policy.maxBytes, 'data URL');
+    // Cheap pre-check before decoding: decoded size is <= the payload length
+    // (measured after the comma, so the "data:...;base64," header is not counted).
+    assertEncodedWithinLimit(raw.slice(raw.indexOf(',') + 1), policy.maxBytes, 'data URL');
     const parsed = parseDataUrl(raw);
     if (parsed) {
       assertWithinLimit(parsed.buffer.length, policy.maxBytes, 'data URL');
@@ -501,7 +534,7 @@ function urlBlocked(err: UrlGuardError, url: URL, policy: ContentInputPolicy): n
   throw new ContentNormalizationError(
     'URL_BLOCKED',
     `URL rejected (${err.reason}): ${url.href}`,
-    'Use a public URL, add the host to --content-url-allowlist, or (for private/homelab hosts) start the server with --allow-private-urls.'
+    'Use a public URL, add the host to --content-url-allowlist, or (for private/homelab hosts) start the server with --content-allow-private-urls.'
   );
 }
 

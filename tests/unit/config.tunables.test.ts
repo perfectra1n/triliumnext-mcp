@@ -1,4 +1,7 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { loadConfig, TUNABLE_DEFAULTS, ConfigError, type Config } from '../../src/config.js';
 import {
   DEFAULT_BUSY_PROBE_TIMEOUT_MS,
@@ -97,8 +100,8 @@ const SETTINGS: Array<[keyof Config, string, string, Kind, string, number]> = [
     'TRILIUM_MAX_EXPORT_BYTES',
     '--max-export-bytes',
     'size',
-    '1gb',
-    1024 * 1024 * 1024,
+    '20mb',
+    20 * 1024 * 1024,
   ],
   ['contentCharCap', 'TRILIUM_CONTENT_CHAR_CAP', '--content-char-cap', 'int', '20000', 20000],
   [
@@ -183,6 +186,38 @@ const SETTINGS: Array<[keyof Config, string, string, Kind, string, number]> = [
 
 const INVALID: Record<Kind, string> = { size: 'lots', duration: 'soon', int: '2.5' };
 
+// Hermetic: loadConfig reads ./trilium-mcp.json and ~/.trilium-mcp.json, so a
+// developer's own config file must not leak into these tests (or into the
+// module state the last describe restores). Point cwd and HOME at an empty
+// directory for the whole file; tests that need a config file write it there.
+const originalCwd = process.cwd();
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+let hermeticDir: string;
+
+beforeAll(() => {
+  hermeticDir = mkdtempSync(join(tmpdir(), 'trilium-mcp-tunables-home-'));
+  process.chdir(hermeticDir);
+});
+
+afterAll(() => {
+  process.chdir(originalCwd);
+  rmSync(hermeticDir, { recursive: true, force: true });
+});
+
+/** Point HOME (os.homedir()) at the hermetic dir; call after replacing process.env. */
+function isolateHome(): void {
+  process.env.HOME = hermeticDir;
+  process.env.USERPROFILE = hermeticDir;
+}
+
+afterAll(() => {
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
+  if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+  else process.env.USERPROFILE = originalUserProfile;
+});
+
 describe('numeric tunables', () => {
   const originalEnv = process.env;
 
@@ -192,6 +227,7 @@ describe('numeric tunables', () => {
       if (key.startsWith('TRILIUM_')) delete process.env[key];
     }
     process.env.TRILIUM_TOKEN = 'token';
+    isolateHome();
   });
 
   afterEach(() => {
@@ -256,12 +292,70 @@ describe('numeric tunables', () => {
     expect(() => loadConfig([flag])).toThrow(/requires a value/);
   });
 
-  it('falls back to the default for an invalid size/duration env value, like its neighbours', () => {
-    process.env.TRILIUM_MAX_RESPONSE_BYTES = 'lots';
-    process.env.TRILIUM_SSE_KEEPALIVE = 'soon';
+  it.each(SETTINGS)('%s: an unparseable %s is a ConfigError naming it', (_field, env, _f, kind) => {
+    process.env[env] = INVALID[kind];
+    expect(() => loadConfig([])).toThrow(ConfigError);
+    expect(() => loadConfig([])).toThrow(new RegExp(env));
+  });
+
+  it('treats an empty env value as unset', () => {
+    process.env.TRILIUM_MAX_RESPONSE_BYTES = '';
+    process.env.TRILIUM_SSE_KEEPALIVE = '';
     const config = loadConfig([])!;
     expect(config.maxResponseBytes).toBe(TUNABLE_DEFAULTS.maxResponseBytes);
     expect(config.sseKeepaliveMs).toBe(TUNABLE_DEFAULTS.sseKeepaliveMs);
+  });
+
+  it.each([
+    ['--max-response-bytes', 'TRILIUM_MAX_RESPONSE_BYTES'],
+    ['--max-post-bytes', 'TRILIUM_MAX_POST_BYTES'],
+    ['--max-content-fetch-bytes', 'TRILIUM_MAX_CONTENT_FETCH_BYTES'],
+    ['--max-export-bytes', 'TRILIUM_MAX_EXPORT_BYTES'],
+  ])('rejects a zero %s (and %s=0)', (flag, env) => {
+    expect(() => loadConfig([flag, '0'])).toThrow(/>= 1/);
+    process.env[env] = '0';
+    expect(() => loadConfig([])).toThrow(new RegExp(env));
+  });
+
+  it.each(['TRILIUM_REQUEST_TIMEOUT', 'TRILIUM_BUSY_COOLDOWN', 'TRILIUM_VALIDATE_TIMEOUT'])(
+    'rejects a zero duration in %s',
+    (env) => {
+      process.env[env] = '0';
+      expect(() => loadConfig([])).toThrow(new RegExp(env));
+    }
+  );
+
+  it('rejects durations setTimeout cannot represent', () => {
+    expect(() => loadConfig(['--sse-keepalive', '100000m'])).toThrow(/between 1 and/);
+    // Export/import get 5x the request timeout, so its ceiling is a fifth.
+    expect(() => loadConfig(['--request-timeout', '10000m'])).toThrow(/--request-timeout/);
+  });
+
+  it('caps retries and the retry backoff', () => {
+    expect(loadConfig(['--max-retries', '10'])!.maxRetries).toBe(10);
+    expect(() => loadConfig(['--max-retries', '11'])).toThrow(/between 0 and 10/);
+    expect(loadConfig(['--retry-delay', '60s'])!.retryDelayMs).toBe(60_000);
+    expect(() => loadConfig(['--retry-delay', '61s'])).toThrow(/--retry-delay/);
+  });
+
+  it('rejects inline caps larger than --max-response-bytes', () => {
+    expect(() => loadConfig(['--max-response-bytes', '8mb', '--max-export-bytes', '9mb'])).toThrow(
+      /TRILIUM_MAX_EXPORT_BYTES.*--max-response-bytes/
+    );
+    expect(() =>
+      loadConfig(['--max-response-bytes', '1mb', '--max-inline-attachment-bytes', '2mb'])
+    ).toThrow(/TRILIUM_MAX_INLINE_ATTACHMENT_BYTES/);
+    expect(() =>
+      loadConfig(['--max-response-bytes', '512kb', '--max-note-image-bytes', '1mb'])
+    ).toThrow(/TRILIUM_MAX_NOTE_IMAGE_BYTES/);
+  });
+
+  it('shrinks unset inline caps to fit a lowered --max-response-bytes', () => {
+    const config = loadConfig(['--max-response-bytes', '2mb'])!;
+    expect(config.maxResponseBytes).toBe(2 * 1024 * 1024);
+    expect(config.maxExportBytes).toBe(2 * 1024 * 1024);
+    expect(config.maxInlineAttachmentBytes).toBe(2 * 1024 * 1024);
+    expect(config.maxNoteImageBytes).toBe(TUNABLE_DEFAULTS.maxNoteImageBytes);
   });
 
   it.each(['abc', '-1', '2.5', ' '])('rejects an invalid integer env value %j', (raw) => {
@@ -283,14 +377,15 @@ describe('numeric tunables', () => {
     expect(() => loadConfig(['--sse-keepalive', '0'])).toThrow(/Invalid duration/);
   });
 
-  it('accepts 0 bytes for size caps (inline nothing)', () => {
+  it('accepts 0 bytes for the inline caps (inline nothing)', () => {
     expect(loadConfig(['--max-inline-attachment-bytes', '0'])!.maxInlineAttachmentBytes).toBe(0);
+    expect(loadConfig(['--max-note-image-bytes', '0'])!.maxNoteImageBytes).toBe(0);
+    expect(loadConfig(['--max-note-images-total-bytes', '0'])!.maxNoteImagesTotalBytes).toBe(0);
   });
 });
 
 describe('numeric tunables from the config file', () => {
   const originalEnv = process.env;
-  const originalCwd = process.cwd();
   let dir: string;
 
   beforeEach(async () => {
@@ -303,11 +398,12 @@ describe('numeric tunables from the config file', () => {
       if (key.startsWith('TRILIUM_')) delete process.env[key];
     }
     process.env.TRILIUM_TOKEN = 't';
+    isolateHome();
     process.chdir(dir);
   });
 
   afterEach(async () => {
-    process.chdir(originalCwd);
+    process.chdir(hermeticDir);
     process.env = originalEnv;
     const { rm } = await import('node:fs/promises');
     await rm(dir, { recursive: true, force: true });
@@ -330,6 +426,40 @@ describe('numeric tunables from the config file', () => {
     expect(config.maxSessions).toBe(8);
   });
 
+  it('validates the pre-existing numeric keys like the new ones', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    const cases: Array<[Record<string, unknown>, RegExp]> = [
+      [{ requestTimeoutMs: '60s' }, /TRILIUM_REQUEST_TIMEOUT/],
+      [{ requestTimeoutMs: 0 }, /TRILIUM_REQUEST_TIMEOUT/],
+      [{ busyCooldownMs: -1 }, /TRILIUM_BUSY_COOLDOWN/],
+      [{ maxPostBytes: '1mb' }, /TRILIUM_MAX_POST_BYTES/],
+      [{ maxPostBytes: 0 }, /TRILIUM_MAX_POST_BYTES/],
+      [{ maxContentFetchBytes: -5 }, /TRILIUM_MAX_CONTENT_FETCH_BYTES/],
+      [{ rateLimitRps: -1 }, /rate-limit rps/],
+      [{ rateLimitBurst: 1.5 }, /rate-limit burst/],
+      [{ httpPort: 70000 }, /httpPort/],
+      [{ searchStrategy: 'thorough' }, /search strategy/],
+      [{ allowPrivateUrls: 'false' }, /allowPrivateUrls/],
+      [{ corsOrigins: [1] }, /corsOrigins/],
+    ];
+    for (const [file, error] of cases) {
+      await writeFile('trilium-mcp.json', JSON.stringify(file));
+      expect(() => loadConfig([]), JSON.stringify(file)).toThrow(error);
+    }
+    await writeFile(
+      'trilium-mcp.json',
+      JSON.stringify({
+        requestTimeoutMs: 1234,
+        maxPostBytes: 4096,
+        corsOrigins: 'https://a.example',
+      })
+    );
+    const config = loadConfig([])!;
+    expect(config.requestTimeoutMs).toBe(1234);
+    expect(config.maxPostBytes).toBe(4096);
+    expect(config.corsOrigins).toEqual(['https://a.example']);
+  });
+
   it('rejects a non-numeric or negative file value', async () => {
     const { writeFile } = await import('node:fs/promises');
     await writeFile('trilium-mcp.json', JSON.stringify({ maxExportBytes: '10mb' }));
@@ -348,10 +478,13 @@ describe('configured limits reach tool schemas and descriptions', () => {
       if (key.startsWith('TRILIUM_')) delete process.env[key];
     }
     process.env.TRILIUM_TOKEN = 'token';
+    isolateHome();
   });
 
   afterEach(() => {
-    // Restore every module to its defaults for the other test files.
+    // Restore every module to its defaults for the other test files. The
+    // file-level cwd/HOME isolation guarantees no config file is picked up.
+    process.env = { TRILIUM_TOKEN: 'token', HOME: hermeticDir, USERPROFILE: hermeticDir };
     configureTools(loadConfig([])!);
     process.env = originalEnv;
   });

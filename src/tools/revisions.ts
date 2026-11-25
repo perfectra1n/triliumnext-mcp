@@ -6,6 +6,7 @@ import type { PatchNoteDef } from '../types/etapi.js';
 import { defineTool, type ToolHandlerResult } from './schemas.js';
 import { entityIdSchema, required } from './validators.js';
 import { capWithNotice } from './contentLimits.js';
+import { isBinaryNote } from './contentInput.js';
 
 const getRevisionsSchema = z
   .object({
@@ -66,7 +67,8 @@ export function registerRevisionTools(): Tool[] {
       'get_revisions',
       'Read note revisions (content snapshots of one note). Pass noteId to list its revisions ' +
         '(metadata: revisionId, title, type, dates, content length), or revisionId to read one ' +
-        "revision's body. For a change log across many notes use get_note_history instead.",
+        "revision's body (file/image revisions return metadata only). For a change log across many " +
+        'notes use get_note_history instead.',
       getRevisionsSchema,
       { title: 'Get revisions', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
@@ -106,20 +108,44 @@ export async function handleRevisionTool(
   }
 
   const revisionId = required(parsed.revisionId, 'revisionId');
-  if (parsed.include_content) {
-    const content = await client.getRevisionContent(revisionId);
-    const capped = capWithNotice(
-      content,
-      'revision',
-      'Restore the revision in Trilium or read the live note with get_note (which supports paging via content_start).'
-    );
-    return { content: [{ type: 'text', text: capped }] };
+  const revision = await client.getRevision(revisionId);
+  if (!parsed.include_content) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify(revision, null, 2) }],
+    };
   }
 
-  const revision = await client.getRevision(revisionId);
-  return {
-    content: [{ type: 'text', text: JSON.stringify(revision, null, 2) }],
-  };
+  if (isBinaryNote(revision.type, revision.mime)) {
+    // Decoding an image/file blob as text would only return mojibake.
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              ...revision,
+              notice:
+                `Content not returned: this revision is a binary ${revision.type} body ` +
+                `(${revision.mime || 'no mime'}), which is not readable as text. To bring it back, ` +
+                'use restore_revision.',
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  const content = await client.getRevisionContent(revisionId);
+  const capped = capWithNotice(
+    content,
+    'revision',
+    'Revisions cannot be paged. To read the rest, restore_revision it (the current state is ' +
+      'snapshotted first, so this is reversible) and page through it with get_note content_start, ' +
+      'or ask the user to view the revision in Trilium.'
+  );
+  return { content: [{ type: 'text', text: capped }] };
 }
 
 async function restoreRevision(

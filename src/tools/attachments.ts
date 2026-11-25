@@ -21,6 +21,75 @@ import {
 export { IMAGE_MIME_TYPES, isImageMimeType, isBinaryMimeType, parseDataUrl };
 
 // ============================================================================
+// Shared upload helper
+// ============================================================================
+
+/**
+ * A binary attachment's record was created but its content upload failed,
+ * and the empty attachment could not be deleted either. Carries the ID so the
+ * caller can tell the user (or the model) what was left behind.
+ */
+export class OrphanedAttachmentError extends Error {
+  constructor(
+    public readonly attachmentId: string,
+    uploadError: unknown,
+    deleteError: unknown
+  ) {
+    super(
+      `uploading the content failed (${errorText(uploadError)}), and the empty attachment ` +
+        `${attachmentId} it left behind could not be deleted (${errorText(deleteError)}). ` +
+        `Delete it with delete_attachment {attachmentId:"${attachmentId}"} or retry with ` +
+        `write_attachment {attachmentId:"${attachmentId}", mode:"replace"}.`
+    );
+    this.name = 'OrphanedAttachmentError';
+  }
+}
+
+const errorText = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/**
+ * Create an attachment with its content. Binary content needs two requests
+ * (create with an empty body, then upload the bytes); if the upload fails the
+ * empty attachment is deleted again (best effort) so a retry does not leave a
+ * duplicate behind. When that delete also fails, an
+ * {@link OrphanedAttachmentError} names the leftover attachment.
+ */
+export async function createAttachmentWithContent(
+  client: TriliumClient,
+  def: {
+    ownerId: string;
+    role: string;
+    mime: string;
+    title: string;
+    position?: number;
+    isBinary: boolean;
+    buffer: Buffer;
+  }
+): Promise<Attachment> {
+  const attachment = await client.createAttachment({
+    ownerId: def.ownerId,
+    role: def.role,
+    mime: def.mime,
+    title: def.title,
+    content: def.isBinary ? '' : def.buffer.toString('utf8'),
+    ...(def.position !== undefined ? { position: def.position } : {}),
+  });
+  if (!def.isBinary) return attachment;
+  try {
+    await client.updateAttachmentContentBinary(attachment.attachmentId, def.buffer);
+  } catch (uploadError) {
+    try {
+      await client.deleteAttachment(attachment.attachmentId);
+    } catch (deleteError) {
+      throw new OrphanedAttachmentError(attachment.attachmentId, uploadError, deleteError);
+    }
+    throw uploadError;
+  }
+  return attachment;
+}
+
+// ============================================================================
 // Schemas
 // ============================================================================
 
@@ -120,7 +189,10 @@ const writeAttachmentSchema = z
     content: z
       .string()
       .optional()
-      .describe(`New content for "replace" mode. ${CONTENT_SOURCE_GUIDANCE}`),
+      .describe(
+        'New content for "replace" mode, in any form create_attachment content accepts (URL, data ' +
+          'URL, base64, raw text, or a server-side file path when permitted).'
+      ),
     changes: z
       .array(searchReplaceBlockSchema)
       .optional()
@@ -301,28 +373,38 @@ export async function handleAttachmentTool(
           'Provide a title (e.g. "screenshot.png"), or pass a file path or URL whose basename can serve as one.'
         );
       }
-      if (resolved.isBinary) {
-        const result = await client.createAttachment({
+      let result: Attachment;
+      try {
+        result = await createAttachmentWithContent(client, {
           ownerId: parsed.ownerId,
           role: parsed.role,
           mime: resolved.mime,
           title,
-          content: '',
           position: parsed.position,
+          isBinary: resolved.isBinary,
+          buffer: resolved.buffer,
         });
-        await client.updateAttachmentContentBinary(result.attachmentId, resolved.buffer);
-        return {
-          content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-        };
+      } catch (error) {
+        if (error instanceof OrphanedAttachmentError) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: 'text',
+                text: JSON.stringify(
+                  {
+                    error: `The attachment was created, but ${error.message}`,
+                    attachmentId: error.attachmentId,
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+        throw error;
       }
-      const result = await client.createAttachment({
-        ownerId: parsed.ownerId,
-        role: parsed.role,
-        mime: resolved.mime,
-        title,
-        content: resolved.buffer.toString('utf8'),
-        position: parsed.position,
-      });
       return {
         content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
       };
@@ -359,13 +441,10 @@ export async function handleAttachmentTool(
         }
         let encoded: string;
         try {
-          if (isImage) {
-            encoded = await client.getAttachmentContentAsBase64(attachmentId, maxBytes);
-          } else {
-            encoded = (await client.getAttachmentContentBinary(attachmentId, maxBytes)).toString(
-              'base64'
-            );
-          }
+          // Attachments created through ETAPI with a base64 string body are
+          // stored as that text; this returns those as-is instead of encoding
+          // them a second time (the cap still bounds the stored bytes).
+          encoded = await client.getAttachmentContentAsBase64(attachmentId, maxBytes);
         } catch (error) {
           if (error instanceof TriliumResponseTooLargeError) {
             return tooLarge(attachment, error.sizeBytes, true);

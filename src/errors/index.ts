@@ -1,6 +1,6 @@
 import { ZodError, type ZodIssue } from 'zod';
 import { TriliumClientError } from '../client/trilium.js';
-import { DiffApplicationError } from '../tools/diff.js';
+import { DiffApplicationError, type DiffFailureKind } from '../tools/diff.js';
 import { ContentNormalizationError } from '../tools/contentInput.js';
 
 /**
@@ -19,8 +19,6 @@ export interface StructuredError {
  */
 const AUTH_GUIDANCE =
   'Authentication with Trilium failed (invalid or missing ETAPI token). This is a server configuration problem — do not retry; tell the user.';
-
-const GENERIC_GUIDANCE = 'See the error message above.';
 
 const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   NOTE_NOT_FOUND:
@@ -44,12 +42,16 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   TRILIUM_UNREACHABLE:
     'The MCP server could not connect to Trilium (it already retried). Check that Trilium is running and that TRILIUM_URL points at its /etapi endpoint.',
   TRILIUM_TIMEOUT:
-    'Trilium accepted the connection but did not answer in time, usually because a slow full-text search is holding its database. The operation may still complete server-side — re-read the note before retrying a write. For a short while, further calls to this Trilium fail fast with TRILIUM_BUSY.',
+    'Trilium accepted the connection but did not answer in time, usually because a slow full-text search is holding its database. The operation may still have completed server-side, so never blindly retry a write: after a create_note timeout, first search_notes for the title under the same parent (ancestorNoteId, ancestorDepth:"eq1") and only create the note if it is missing, or you will make a duplicate; after other writes, re-read the note first. For a short while, further calls to this Trilium fail fast with TRILIUM_BUSY.',
   TRILIUM_BUSY:
     'Trilium is still busy with an earlier slow request (usually a full-text search) and is not answering. Wait the time given in the message, then retry. Avoid strategy:"full" searches until it recovers: they would queue behind the slow one.',
   ETAPI_TOKEN_INVALID: AUTH_GUIDANCE,
   RESPONSE_TOO_LARGE:
     'The content is larger than this server is configured to load, so it was not read. Do not retry; have the user open it in Trilium (or ask the operator to raise TRILIUM_MAX_RESPONSE_BYTES).',
+  METRICS_UNSUPPORTED:
+    'This Trilium has no metrics endpoint; retrying will not help. Use manage_system {action:"app_info"} for version information, or tell the user metrics need a newer Trilium.',
+  EXPORT_TOO_LARGE:
+    'The export is over the inline size limit. Do not retry the same note: export a smaller subtree (pick a child with get_note_tree), or have the user export from the Trilium UI.',
 };
 
 /**
@@ -68,14 +70,14 @@ const STATUS_CODE_GUIDANCE: Record<number, string> = {
  * Format a TriliumClientError into a structured error with actionable guidance
  */
 export function formatTriliumError(error: TriliumClientError): StructuredError {
-  const suggestion =
-    TRILIUM_ERROR_GUIDANCE[error.code] ?? STATUS_CODE_GUIDANCE[error.status] ?? GENERIC_GUIDANCE;
+  // No filler: when there is nothing specific to say, the message stands alone.
+  const suggestion = TRILIUM_ERROR_GUIDANCE[error.code] ?? STATUS_CODE_GUIDANCE[error.status];
 
   return {
     message: error.message,
     status: error.status,
     code: error.code,
-    suggestion,
+    ...(suggestion !== undefined ? { suggestion } : {}),
   };
 }
 
@@ -163,24 +165,30 @@ export function formatDiffError(error: DiffApplicationError): StructuredError {
   return {
     message: error.message,
     code: 'DIFF_APPLICATION_FAILED',
-    suggestion: diffSuggestion(error.message),
+    suggestion: diffSuggestion(error.kind),
   };
 }
 
-function diffSuggestion(message: string): string {
-  if (message.includes('ambiguous')) {
-    return 'old_string matches more than once. Add surrounding context so old_string is unique.';
+function diffSuggestion(kind: DiffFailureKind): string {
+  switch (kind) {
+    case 'ambiguous':
+      return 'old_string matches more than once. Add surrounding context so old_string is unique.';
+    case 'not_found':
+      return (
+        'old_string was not found. Edits match the stored HTML, not rendered text: re-read with ' +
+        'get_note format="html" and copy the exact substring.'
+      );
+    case 'verification':
+      return 'Trilium normalized the saved HTML. Re-read with get_note format="html" before editing again.';
+    case 'patch_parse':
+    case 'patch_apply':
+      return (
+        'Re-read the note with get_note format="html" and rebuild the patch, or switch to "changes" ' +
+        '(search/replace blocks), which is more reliable on single-line Trilium HTML.'
+      );
+    case 'no_mode':
+      return 'Provide exactly one of "content", "changes" or "patch".';
   }
-  if (message.includes('could not find')) {
-    return (
-      'old_string was not found. Edits match the stored HTML, not rendered text: re-read with ' +
-      'get_note format="html" and copy the exact substring.'
-    );
-  }
-  if (message.includes('read-back verification')) {
-    return 'Trilium normalized the saved HTML. Re-read with get_note format="html" before editing again.';
-  }
-  return 'Re-read the note with get_note format="html" and retry with changes based on the current content.';
 }
 
 /**
@@ -201,10 +209,7 @@ export function formatContentInputError(error: ContentNormalizationError): Struc
 export function formatUnknownError(error: unknown): StructuredError {
   const message = error instanceof Error ? error.message : String(error);
 
-  return {
-    message,
-    suggestion: GENERIC_GUIDANCE,
-  };
+  return { message };
 }
 
 /**

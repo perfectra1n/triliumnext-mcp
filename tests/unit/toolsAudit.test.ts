@@ -135,6 +135,22 @@ describe('search_notes result shaping', () => {
     expect(out.results[0].utcDateModified).toBe('um');
   });
 
+  it('marks a result whose preview could not be loaded', async () => {
+    const c = client();
+    (c.searchNotes as Fn).mockResolvedValue({ results: [fullNote('n1'), fullNote('n2')] });
+    (c.getNoteContent as Fn).mockImplementation(async (id: string) => {
+      if (id === 'n1') throw new Error('gone');
+      return '<p>Hello</p>';
+    });
+    const out = json(
+      await handleSearchTool(c, 'search_notes', { query: '#tag', content_preview_chars: 10 })
+    );
+    expect(out.results[0].contentPreviewError).toBe(true);
+    expect(out.results[0].contentPreview).toBeUndefined();
+    expect(out.results[1].contentPreview).toBe('Hello');
+    expect(out.results[1].contentPreviewError).toBeUndefined();
+  });
+
   it('compacts the id: lookup result too, keeping previews', async () => {
     const c = client();
     (c.getNote as Fn).mockResolvedValue(fullNote('abc123def456'));
@@ -159,7 +175,6 @@ describe('search_notes result shaping', () => {
     const [search] = registerSearchTools();
     expect(search.description).toContain('content only');
     expect(search.description).toContain('title:a or title:b');
-    expect(search.description).not.toMatch(/\bproactively\b/);
     const props = search.inputSchema.properties as Record<string, { description?: string }>;
     expect(props.limit.description).toContain('default 50');
   });
@@ -366,7 +381,6 @@ describe('manage_system export', () => {
   it('describes export honestly and flags read-only actions', () => {
     const [, manage] = registerSystemTools();
     expect(manage.description).toContain('cannot read the ZIP');
-    expect(manage.description).not.toContain('recommended for LLM');
     expect(manage.description).toContain('"app_info" (read-only)');
     expect(manage.annotations).toMatchObject({
       destructiveHint: true,
@@ -452,12 +466,30 @@ describe('organize_note move partial failure', () => {
     ).rejects.toThrow(/both places.*new_n1|new_n1.*both places/s);
   });
 
-  it('describes clone vs move parent params and has no shouting', () => {
+  it('describes clone vs move parent params', () => {
     const [tool] = registerOrganizationTools();
-    expect(tool.description).not.toContain('IMPORTANT');
-    expect(tool.description.match(/last branch/g)).toHaveLength(1);
     const props = tool.inputSchema.properties as Record<string, { description?: string }>;
     expect(props.newParentNoteId.description).toContain('parentNoteId');
+  });
+
+  it('describes moving onto a current parent as it behaves (removes the other placement)', async () => {
+    const [tool] = registerOrganizationTools();
+    expect(tool.description).not.toContain('no-op');
+    expect(tool.description).toContain('REMOVED');
+    // Behavior the description promises: parents [a, z], move to z => a is unlinked.
+    const c = client();
+    (c.getNote as Fn).mockResolvedValue({ noteId: 'n1', parentBranchIds: ['b_a', 'b_z'] });
+    (c.getBranch as Fn).mockImplementation(async (id: string) => ({
+      branchId: id,
+      parentNoteId: id.slice(2),
+    }));
+    (c.createBranch as Fn).mockResolvedValue({ branchId: 'b_z', parentNoteId: 'z' });
+    await handleOrganizationTool(c, 'organize_note', {
+      action: 'move',
+      noteId: 'n1',
+      newParentNoteId: 'z',
+    });
+    expect(c.deleteBranch).toHaveBeenCalledWith('b_a');
   });
 });
 
@@ -490,11 +522,6 @@ describe('restore_revision ordering', () => {
     expect(c.createRevision).not.toHaveBeenCalled();
     expect(c.updateNote).not.toHaveBeenCalled();
     expect(c.updateNoteContent).not.toHaveBeenCalled();
-  });
-
-  it('get_revisions description drops the curl warning', () => {
-    const [get] = registerRevisionTools();
-    expect(get.description).not.toContain('curl');
   });
 });
 

@@ -2,6 +2,19 @@ import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 
+// Leaf modules only (none imports config.ts back), so there is no cycle:
+// each owning module keeps its default and config re-uses it.
+import {
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_BUSY_COOLDOWN_MS,
+  DEFAULT_BUSY_PROBE_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_RETRY_DELAY_MS,
+  DEFAULT_MAX_RESPONSE_BYTES,
+} from './client/trilium.js';
+import { DEFAULT_JWT_CLOCK_TOLERANCE_SEC } from './http/jwtAuth.js';
+import { parseCidr } from './http/clientIp.js';
+
 /**
  * Normalizes the Trilium server URL by:
  * 1. Removing trailing slashes
@@ -39,6 +52,8 @@ export type SearchStrategy = 'auto' | 'fast' | 'full';
 
 const GATEWAY_AUTH_MODES: readonly GatewayAuthMode[] = ['none', 'bearer', 'jwt'];
 const METRICS_AUTH_MODES: readonly MetricsAuthMode[] = ['gateway', 'bearer', 'none'];
+const SEARCH_STRATEGIES: readonly SearchStrategy[] = ['auto', 'fast', 'full'];
+const TRANSPORTS: readonly ('stdio' | 'http')[] = ['stdio', 'http'];
 
 /** Invalid configuration. `main()` prints the message and exits 1. */
 export class ConfigError extends Error {
@@ -98,6 +113,7 @@ export interface Config {
    * Gateway auth mode controlling who may open an SSE connection.
    * - `none`: no auth (trusted-network only)
    * - `bearer`: require `Authorization: Bearer <token>`
+   * - `jwt`: require a signed JWT (`Authorization: Bearer <jwt>`), see `jwt*`
    */
   gatewayAuth: GatewayAuthMode;
   /**
@@ -111,10 +127,24 @@ export interface Config {
    */
   urlAllowlist: string[];
   /**
-   * If true, skip private/loopback IP checks on client-supplied URLs. Use for
-   * homelab setups where Trilium lives on a private network.
+   * If true, skip private/loopback IP checks on client-supplied (multi-tenant)
+   * Trilium URLs. Use for homelab setups where Trilium lives on a private
+   * network. Does NOT govern content URL fetches — see `contentAllowPrivateUrls`.
    */
   allowPrivateUrls: boolean;
+  /**
+   * If true, http(s) CONTENT fetches (LLM-supplied attachment/image URLs) may
+   * target private/loopback addresses. When unset, loadConfig uses false in
+   * multi-tenant mode and `allowPrivateUrls` otherwise (that flag used to
+   * govern both, and in single-tenant mode content fetches were its only
+   * effect). Optional for embedders, with the same fallback.
+   */
+  contentAllowPrivateUrls?: boolean;
+  /**
+   * Reverse-proxy addresses / CIDRs whose `X-Forwarded-For` header is
+   * trusted for rate limiting. Empty (default): key on the socket peer.
+   */
+  trustedProxies?: string[];
   /**
    * Maximum size (bytes) of a single MCP JSON-RPC POST body on the SSE
    * transport. Above this, the server returns 413. Bodies are read into memory
@@ -137,7 +167,7 @@ export interface Config {
    * Hostname allowlist for http(s) CONTENT fetches (attachment/image inputs).
    * Separate from `urlAllowlist`, which governs client-supplied Trilium hosts.
    * Empty means any public host (private IPs still blocked unless
-   * `allowPrivateUrls`).
+   * `contentAllowPrivateUrls`).
    */
   contentUrlAllowlist: string[];
   /**
@@ -286,6 +316,8 @@ interface ConfigFile {
   gatewayTokens?: string[];
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
+  contentAllowPrivateUrls?: boolean;
+  trustedProxies?: string[];
   maxPostBytes?: number;
   allowLocalFileRead?: boolean;
   localFileRoots?: string[];
@@ -353,6 +385,8 @@ interface CliArgs {
   gatewayTokens?: string[];
   urlAllowlist?: string[];
   allowPrivateUrls?: boolean;
+  contentAllowPrivateUrls?: boolean;
+  trustedProxies?: string[];
   maxPostBytes?: number;
   allowLocalFileRead?: boolean;
   localFileRoots?: string[];
@@ -476,6 +510,13 @@ function parseCliArgs(args: string[]): CliArgs {
         break;
       case '--allow-private-urls':
         result.allowPrivateUrls = true;
+        break;
+      case '--content-allow-private-urls':
+        result.contentAllowPrivateUrls = true;
+        break;
+      case '--trusted-proxies':
+        result.trustedProxies ??= [];
+        result.trustedProxies.push(...splitCsv(value()));
         break;
       case '--max-post-bytes':
         result.maxPostBytes = requireSize(arg, value());
@@ -714,10 +755,15 @@ Options:
   -p, --port <port>                  HTTP server port when using http transport (default: 3000)
   --host <addr>                      Interface to bind the HTTP transport to (default: 127.0.0.1).
                                      Use 0.0.0.0 to listen on all interfaces (the Docker image
-                                     does). On loopback, the Host header must be a loopback name.
+                                     sets TRILIUM_HTTP_HOST=0.0.0.0). On loopback, the Host
+                                     header must be a loopback name or an --allowed-hosts entry.
   --allowed-hosts <hosts>            Extra Host header values accepted while bound to loopback
-                                     (comma-separated, e.g. a same-host reverse proxy's name).
+                                     (comma-separated). Required when a same-host reverse proxy
+                                     forwards the public Host header to a loopback-bound server.
                                      On a non-loopback bind, setting this enables the Host check.
+  --trusted-proxies <cidrs>          Reverse-proxy IPs/CIDRs whose X-Forwarded-For is trusted for
+                                     rate limiting (comma-separated, repeatable). Default: none,
+                                     i.e. key on the TCP peer. Only list proxies you control.
 
 Multi-tenant HTTP options (require --transport http):
   --multi-tenant                     Each SSE client supplies its own Trilium URL + token
@@ -727,11 +773,12 @@ Multi-tenant HTTP options (require --transport http):
   --gateway-token <token>            Accepted bearer token. Repeatable; supply once per token.
   --trilium-url-allowlist <hosts>    Comma-separated hostnames permitted in X-Trilium-Url.
                                      Supports suffix match (example.com matches a.example.com).
-  --allow-private-urls               Allow client URLs that resolve to private/loopback IPs
-                                     (default: blocked in multi-tenant mode to prevent SSRF)
-  --max-post-bytes <size>            Max size of a single MCP JSON-RPC POST body on the SSE
-                                     transport. Accepts raw bytes or suffixed values
-                                     (e.g. 64mb, 1gb). Default: 64mb.
+  --allow-private-urls               Allow client Trilium URLs that resolve to private/loopback
+                                     IPs (default: blocked in multi-tenant mode to prevent SSRF).
+                                     Does not apply to content URLs in multi-tenant mode.
+  --max-post-bytes <size>            Max size of a single MCP JSON-RPC POST body (/message and
+                                     /mcp). Accepts raw bytes or suffixed values
+                                     (e.g. 64mb, 1gb). Default: 64mb. Must be > 0.
 
 Content input (file paths / URLs in attachment and image tool inputs):
   --allow-local-file-read            Permit tool inputs that name local file paths.
@@ -741,10 +788,13 @@ Content input (file paths / URLs in attachment and image tool inputs):
                                      Empty (default) = unrestricted when reads are allowed.
   --content-url-allowlist <hosts>    Comma-separated hostnames permitted for http(s) content
                                      fetches. Empty = any public host (private IPs still
-                                     blocked unless --allow-private-urls).
+                                     blocked unless --content-allow-private-urls).
+  --content-allow-private-urls       Let content URL fetches reach private/loopback IPs.
+                                     Default: off in multi-tenant mode; otherwise follows
+                                     --allow-private-urls.
   --max-content-fetch-bytes <size>   Max size of a content file read or URL download.
                                      Accepts raw bytes or suffixed values (e.g. 50mb).
-                                     Default: 50mb.
+                                     Default: 50mb. Must be > 0.
 
 Metrics (require --transport http):
   --metrics                          Expose Prometheus-compatible GET /metrics on the SSE
@@ -766,7 +816,9 @@ CORS (require --transport http):
 
 Rate limiting (require --transport http):
   --rate-limit-rps <rps>             Sustained refill rate per IP and per gateway token, in
-                                     requests/second. Off by default (0).
+                                     requests/second. Off by default (0). IPv6 clients share a
+                                     bucket per /64. Behind a reverse proxy set --trusted-proxies,
+                                     or every client shares the proxy's bucket.
   --rate-limit-burst <n>             Maximum burst before refill matters. Off by default (0).
 
 JWT gateway auth (--gateway-auth jwt):
@@ -781,28 +833,30 @@ Backend behaviour:
                                      Export, import and backup get 5x this.
   --busy-cooldown <duration>         After a request times out, treat that Trilium as busy for
                                      this long: full-text searches are refused at once and other
-                                     requests get a 5s timeout. Default: 30s.
+                                     requests get the --busy-probe-timeout. Default: 30s.
   --search-strategy <mode>           Default search_notes strategy: auto (titles and labels
                                      first, note bodies only if that finds too few), fast, or
                                      full. Default: auto.
   --busy-probe-timeout <duration>    Timeout for other requests while Trilium is marked busy.
                                      Default: 5s.
   --max-retries <n>                  Retries for idempotent requests on network errors or
-                                     502/503/504. Default: 2.
-  --retry-delay <duration>           Base retry backoff, doubled per attempt. Default: 250ms.
+                                     502/503/504 (0-10). Default: 2.
+  --retry-delay <duration>           Base retry backoff, doubled per attempt (max 60s).
+                                     Default: 250ms.
   --max-response-bytes <size>        Largest ETAPI response buffered for any request; bigger
                                      bodies are refused before being read. Default: 64mb.
+                                     Must be > 0 and at least the inline/export caps below.
 
 Response limits (what tools return to the model):
   --max-inline-attachment-bytes <size>
                                      get_attachment inlines images/binaries up to this size;
-                                     larger ones return metadata only. Default: 5mb.
-  --max-note-image-bytes <size>      get_note inlines each embedded image up to this size.
-                                     Default: 1mb.
+                                     larger ones return metadata only (0 = never). Default: 5mb.
+  --max-note-image-bytes <size>      get_note inlines each embedded image up to this size
+                                     (0 = never). Default: 1mb.
   --max-note-images-total-bytes <size>
-                                     get_note inlines embedded images up to this total per call.
-                                     Default: 4mb.
-  --max-export-bytes <size>          Largest export ZIP returned inline. Default: 10mb.
+                                     get_note inlines embedded images up to this total per call
+                                     (0 = never). Default: 4mb.
+  --max-export-bytes <size>          Largest export ZIP returned inline (> 0). Default: 10mb.
   --content-char-cap <n>             Text characters returned per read before truncation or
                                      paging (get_note default page, revisions, attachments).
                                      Default: 50000.
@@ -851,11 +905,13 @@ Environment Variables:
   TRILIUM_HTTP_PORT                  Port for HTTP transport
   TRILIUM_HTTP_HOST                  Bind address for HTTP transport (default: 127.0.0.1)
   TRILIUM_ALLOWED_HOSTS              Extra accepted Host header values when bound to loopback
+  TRILIUM_TRUSTED_PROXIES            Comma-separated proxy IPs/CIDRs trusted for X-Forwarded-For
   TRILIUM_MULTI_TENANT               "true" to enable multi-tenant mode
   TRILIUM_GATEWAY_AUTH               none, bearer, or jwt
   TRILIUM_GATEWAY_TOKENS             Comma-separated accepted bearer tokens
   TRILIUM_URL_ALLOWLIST              Comma-separated allowed hostnames for client URLs
-  TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip private-IP SSRF guard
+  TRILIUM_ALLOW_PRIVATE_URLS         "true" to skip the private-IP SSRF guard for Trilium URLs
+  TRILIUM_CONTENT_ALLOW_PRIVATE_URLS "true" to let content URL fetches reach private IPs
   TRILIUM_MAX_POST_BYTES             Max MCP POST body size (raw bytes or e.g. 64mb, 1gb)
   TRILIUM_ALLOW_LOCAL_FILE_READ      "true"/"false" to permit local file path content inputs
   TRILIUM_LOCAL_FILE_ROOTS           Comma-separated directories content may be read from
@@ -877,8 +933,8 @@ Environment Variables:
   TRILIUM_BUSY_COOLDOWN              How long a timed-out Trilium is treated as busy. Default: 30s.
   TRILIUM_SEARCH_STRATEGY            Default search_notes strategy: auto | fast | full.
   TRILIUM_BUSY_PROBE_TIMEOUT         --busy-probe-timeout          (default 5s)
-  TRILIUM_MAX_RETRIES                --max-retries                 (default 2)
-  TRILIUM_RETRY_DELAY                --retry-delay                 (default 250ms)
+  TRILIUM_MAX_RETRIES                --max-retries                 (default 2, max 10)
+  TRILIUM_RETRY_DELAY                --retry-delay                 (default 250ms, max 60s)
   TRILIUM_MAX_RESPONSE_BYTES         --max-response-bytes          (default 64mb)
   TRILIUM_MAX_INLINE_ATTACHMENT_BYTES --max-inline-attachment-bytes (default 5mb)
   TRILIUM_MAX_NOTE_IMAGE_BYTES       --max-note-image-bytes        (default 1mb)
@@ -916,6 +972,9 @@ Logging:
                                      text  -> human-readable "<ts> LEVEL event k=v" lines
                                      json  -> one JSON object per line, for log shippers
   Output stream is chosen by transport: stdio -> stderr (stdout is JSON-RPC); http -> stdout.
+
+  Invalid values are errors: an unparseable size, duration, integer, boolean or enum (from
+  the CLI, the environment or the config file) stops startup with a message naming it.
 
 Configuration File:
   Reads from ./trilium-mcp.json or ~/.trilium-mcp.json
@@ -984,22 +1043,31 @@ function parseBoolean(value: string | undefined): boolean | undefined {
   return undefined;
 }
 
-const DEFAULT_MAX_POST_BYTES = 64 * 1024 * 1024;
-const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * 1024 * 1024;
-const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
-const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
 const MIB = 1024 * 1024;
+const DEFAULT_MAX_POST_BYTES = 64 * MIB;
+const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * MIB;
+
+/** Largest delay `setTimeout` honours (2^31-1 ms, ~24.8 days); longer ones fire at once. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
+/** Upper bound for --max-retries. */
+const MAX_RETRIES_LIMIT = 10;
+/**
+ * Upper bound for --retry-delay. Backoff is `retryDelay * 2^attempt` with
+ * attempt < maxRetries <= 10, so the longest sleep is 60s * 2^9 (~8.5 h),
+ * comfortably below MAX_TIMER_MS.
+ */
+const MAX_RETRY_DELAY_MS = 60_000;
 
 /**
- * Defaults for the numeric tunables. Each mirrors the default the owning
- * module uses when it is not configured (client, tools, HTTP server), so an
- * unconfigured embedder and a default-configured server behave identically.
+ * Defaults for the numeric tunables. Values owned by another module (client,
+ * JWT auth) are imported from it; the HTTP server and tool wiring in
+ * server.ts read theirs from here, so each default has one source of truth.
  */
 export const TUNABLE_DEFAULTS = {
-  busyProbeTimeoutMs: 5_000,
-  maxRetries: 2,
-  retryDelayMs: 250,
-  maxResponseBytes: 64 * MIB,
+  busyProbeTimeoutMs: DEFAULT_BUSY_PROBE_TIMEOUT_MS,
+  maxRetries: DEFAULT_MAX_RETRIES,
+  retryDelayMs: DEFAULT_RETRY_DELAY_MS,
+  maxResponseBytes: DEFAULT_MAX_RESPONSE_BYTES,
   maxInlineAttachmentBytes: 5 * MIB,
   maxNoteImageBytes: 1 * MIB,
   maxNoteImagesTotalBytes: 4 * MIB,
@@ -1025,31 +1093,97 @@ export const TUNABLE_DEFAULTS = {
   sessionIdleTtlMs: 30 * 60 * 1000,
   maxSessions: 1000,
   triliumValidateTimeoutMs: 10_000,
-  jwtClockToleranceSec: 30,
+  jwtClockToleranceSec: DEFAULT_JWT_CLOCK_TOLERANCE_SEC,
 } as const;
 
-/** CLI > env > file > default for a byte size. Invalid env values fall back, like the other sizes. */
+/** `TRILIUM_FOO_BAR` -> `--foo-bar` (holds for every numeric setting). */
+function flagFor(envVar: string): string {
+  return `--${envVar
+    .replace(/^TRILIUM_/, '')
+    .toLowerCase()
+    .replace(/_/g, '-')}`;
+}
+
+function checkRange(
+  value: number,
+  source: string,
+  raw: unknown,
+  min: number,
+  max: number,
+  what: string
+): number {
+  if (value < min || value > max) {
+    const range = max === Infinity ? `>= ${min}` : `between ${min} and ${max}`;
+    throw new ConfigError(`Invalid ${what} for ${source}: "${String(raw)}". Must be ${range}.`);
+  }
+  return value;
+}
+
+interface Bounds {
+  min?: number;
+  max?: number;
+}
+
+/**
+ * CLI > env > file > default for a byte size. An unparseable env value, a
+ * non-numeric file value, or anything outside [min, max] is a ConfigError
+ * naming the setting. `min` defaults to 0 (where 0 is meaningful, e.g.
+ * "inline nothing"); pass 1 where a zero cap is nonsensical.
+ */
 function sizeSetting(
   cli: number | undefined,
   envVar: string,
   file: unknown,
-  fallback: number
+  fallback: number,
+  { min = 0, max = Infinity }: Bounds = {}
 ): number {
-  return cli ?? parseSize(process.env[envVar]) ?? fileNumber(file, envVar, 0) ?? fallback;
+  if (cli !== undefined) return checkRange(cli, flagFor(envVar), cli, min, max, 'size');
+  const envRaw = emptyToUndefined(process.env[envVar]);
+  if (envRaw !== undefined) {
+    const parsed = parseSize(envRaw);
+    if (parsed === undefined) {
+      throw new ConfigError(
+        `Invalid size for ${envVar}: "${envRaw}" (use bytes or e.g. 64mb, 1gb).`
+      );
+    }
+    return checkRange(parsed, envVar, envRaw, min, max, 'size');
+  }
+  const fromFile = fileNumber(file, envVar, min);
+  if (fromFile !== undefined) {
+    return checkRange(fromFile, `config-file ${envVar}`, fromFile, min, max, 'size');
+  }
+  return fallback;
 }
 
-/** CLI > env > file > default for a duration in ms. Invalid env values fall back, like the other durations. */
+/**
+ * CLI > env > file > default for a duration in ms. Same error rules as
+ * {@link sizeSetting}; 0 is rejected unless `allowZero` (where it means
+ * "disabled"), and nothing may exceed what `setTimeout` can represent.
+ */
 function durationSetting(
   cli: number | undefined,
   envVar: string,
   file: unknown,
   fallback: number | undefined,
-  allowZero = false
+  { allowZero = false, max = MAX_TIMER_MS }: { allowZero?: boolean; max?: number } = {}
 ): number | undefined {
-  const env = allowZero
-    ? parseDurationOrZero(process.env[envVar])
-    : parseDuration(process.env[envVar]);
-  return cli ?? env ?? fileNumber(file, envVar, allowZero ? 0 : 1) ?? fallback;
+  const min = allowZero ? 0 : 1;
+  if (cli !== undefined) return checkRange(cli, flagFor(envVar), cli, min, max, 'duration');
+  const envRaw = emptyToUndefined(process.env[envVar]);
+  if (envRaw !== undefined) {
+    const parsed = allowZero ? parseDurationOrZero(envRaw) : parseDuration(envRaw);
+    if (parsed === undefined) {
+      throw new ConfigError(
+        `Invalid duration for ${envVar}: "${envRaw}" (use ms or e.g. 500ms, 90s, 2m${allowZero ? '; 0 disables' : ''}).`
+      );
+    }
+    return checkRange(parsed, envVar, envRaw, min, max, 'duration');
+  }
+  const fromFile = fileNumber(file, envVar, min);
+  if (fromFile !== undefined) {
+    return checkRange(fromFile, `config-file ${envVar}`, fromFile, min, max, 'duration');
+  }
+  return fallback;
 }
 
 /** CLI > env > file > default for an integer; any invalid value is a ConfigError (like the rate limits). */
@@ -1058,7 +1192,8 @@ function intSetting(
   envVar: string,
   file: unknown,
   fallback: number,
-  min: number
+  min: number,
+  max = Infinity
 ): number {
   const raw = cli ?? emptyToUndefined(process.env[envVar]) ?? file;
   if (raw === undefined) return fallback;
@@ -1068,10 +1203,10 @@ function intSetting(
       : typeof raw === 'string' && raw.trim() !== ''
         ? Number(raw.trim())
         : NaN;
-  if (!Number.isInteger(n) || n < min) {
-    throw new ConfigError(
-      `Invalid value for ${envVar}: "${String(raw)}". Must be an integer >= ${min}.`
-    );
+  if (!Number.isInteger(n) || n < min || n > max) {
+    const range =
+      max === Infinity ? `an integer >= ${min}` : `an integer between ${min} and ${max}`;
+    throw new ConfigError(`Invalid value for ${envVar}: "${String(raw)}". Must be ${range}.`);
   }
   return n;
 }
@@ -1085,6 +1220,57 @@ function fileNumber(value: unknown, envVar: string, min: number): number | undef
     );
   }
   return value;
+}
+
+/** A boolean config-file value: absent → undefined; anything but true/false → ConfigError. */
+function fileBoolean(value: unknown, key: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') {
+    throw new ConfigError(
+      `Invalid config-file value for ${key}: ${JSON.stringify(value)}. Must be true or false.`
+    );
+  }
+  return value;
+}
+
+/**
+ * A boolean env value: unset/empty → undefined; true/1/yes or false/0/no
+ * (case-insensitive) → the boolean; anything else → ConfigError, so a typo
+ * never silently flips a security switch back to its default.
+ */
+function envBoolean(envVar: string): boolean | undefined {
+  const raw = emptyToUndefined(process.env[envVar]);
+  if (raw === undefined) return undefined;
+  const parsed = parseBoolean(raw.trim());
+  if (parsed === undefined) {
+    throw new ConfigError(
+      `Invalid value for ${envVar}: "${raw}". Use true/false (or 1/0, yes/no).`
+    );
+  }
+  return parsed;
+}
+
+/** A string-list config-file value: an array of strings or a CSV string. */
+function fileStringList(value: unknown, key: string): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') return splitCsv(value);
+  if (Array.isArray(value) && value.every((v) => typeof v === 'string')) {
+    return value.map((v) => v.trim()).filter((v) => v.length > 0);
+  }
+  throw new ConfigError(
+    `Invalid config-file value for ${key}: ${JSON.stringify(value)}. Must be an array of strings.`
+  );
+}
+
+/** CLI > env (CSV) > file (array or CSV) > []. */
+function listSetting(
+  cli: string[] | undefined,
+  envVar: string,
+  file: unknown,
+  key: string
+): string[] {
+  const env = emptyToUndefined(process.env[envVar]);
+  return cli ?? (env !== undefined ? splitCsv(env) : undefined) ?? fileStringList(file, key) ?? [];
 }
 
 /** Accepts milliseconds ("90000") or a suffixed value ("500ms", "90s", "2m"). */
@@ -1144,9 +1330,10 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   const rawPublicUrl =
     cli.publicUrl ?? emptyToUndefined(process.env.TRILIUM_PUBLIC_URL) ?? file.publicUrl;
 
-  const transportValue =
-    cli.transport ?? process.env.TRILIUM_TRANSPORT ?? file.transport ?? 'stdio';
-  const transport: 'stdio' | 'http' = transportValue === 'http' ? 'http' : 'stdio';
+  const transportRaw =
+    cli.transport ?? emptyToUndefined(process.env.TRILIUM_TRANSPORT) ?? file.transport;
+  const transport: 'stdio' | 'http' =
+    transportRaw === undefined ? 'stdio' : parseEnumValue(transportRaw, TRANSPORTS, 'transport');
 
   const httpPort = validatePort(
     cli.port !== undefined
@@ -1164,22 +1351,25 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.httpHost ??
     DEFAULT_HTTP_HOST;
 
-  const allowedHosts =
-    cli.allowedHosts ??
-    (process.env.TRILIUM_ALLOWED_HOSTS ? splitCsv(process.env.TRILIUM_ALLOWED_HOSTS) : undefined) ??
-    file.allowedHosts ??
-    [];
+  const allowedHosts = listSetting(
+    cli.allowedHosts,
+    'TRILIUM_ALLOWED_HOSTS',
+    file.allowedHosts,
+    'allowedHosts'
+  );
 
   const multiTenant =
-    cli.multiTenant ?? parseBoolean(process.env.TRILIUM_MULTI_TENANT) ?? file.multiTenant ?? false;
+    cli.multiTenant ??
+    envBoolean('TRILIUM_MULTI_TENANT') ??
+    fileBoolean(file.multiTenant, 'multiTenant') ??
+    false;
 
-  const gatewayTokens =
-    cli.gatewayTokens ??
-    (process.env.TRILIUM_GATEWAY_TOKENS
-      ? splitCsv(process.env.TRILIUM_GATEWAY_TOKENS)
-      : undefined) ??
-    file.gatewayTokens ??
-    [];
+  const gatewayTokens = listSetting(
+    cli.gatewayTokens,
+    'TRILIUM_GATEWAY_TOKENS',
+    file.gatewayTokens,
+    'gatewayTokens'
+  );
 
   const gatewayAuthRaw =
     cli.gatewayAuth ??
@@ -1196,77 +1386,106 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
         : 'none'
       : parseEnumValue(gatewayAuthRaw, GATEWAY_AUTH_MODES, 'gateway auth mode');
 
-  const urlAllowlist =
-    cli.urlAllowlist ??
-    (process.env.TRILIUM_URL_ALLOWLIST ? splitCsv(process.env.TRILIUM_URL_ALLOWLIST) : undefined) ??
-    file.urlAllowlist ??
-    [];
+  const urlAllowlist = listSetting(
+    cli.urlAllowlist,
+    'TRILIUM_URL_ALLOWLIST',
+    file.urlAllowlist,
+    'urlAllowlist'
+  );
 
   const allowPrivateUrls =
     cli.allowPrivateUrls ??
-    parseBoolean(process.env.TRILIUM_ALLOW_PRIVATE_URLS) ??
-    file.allowPrivateUrls ??
+    envBoolean('TRILIUM_ALLOW_PRIVATE_URLS') ??
+    fileBoolean(file.allowPrivateUrls, 'allowPrivateUrls') ??
     false;
 
-  const maxPostBytes =
-    cli.maxPostBytes ??
-    parseSize(process.env.TRILIUM_MAX_POST_BYTES) ??
-    file.maxPostBytes ??
-    DEFAULT_MAX_POST_BYTES;
+  // Content fetches are LLM-driven, so they get their own private-network
+  // switch. Unset: off in multi-tenant mode (a tenant's model must not reach
+  // the operator's network just because tenant Trilium URLs may be private);
+  // otherwise inherit --allow-private-urls, which used to govern both and, in
+  // single-tenant mode, had no other effect.
+  const contentAllowPrivateUrls =
+    cli.contentAllowPrivateUrls ??
+    envBoolean('TRILIUM_CONTENT_ALLOW_PRIVATE_URLS') ??
+    fileBoolean(file.contentAllowPrivateUrls, 'contentAllowPrivateUrls') ??
+    (multiTenant ? false : allowPrivateUrls);
+
+  const trustedProxies = listSetting(
+    cli.trustedProxies,
+    'TRILIUM_TRUSTED_PROXIES',
+    file.trustedProxies,
+    'trustedProxies'
+  );
+  for (const entry of trustedProxies) {
+    if (!parseCidr(entry)) {
+      throw new ConfigError(
+        `Invalid trusted proxy "${entry}" (TRILIUM_TRUSTED_PROXIES / --trusted-proxies): ` +
+          'use an IP address or CIDR, e.g. 10.0.0.0/8, 172.16.0.1, fd00::/8.'
+      );
+    }
+  }
+
+  const maxPostBytes = sizeSetting(
+    cli.maxPostBytes,
+    'TRILIUM_MAX_POST_BYTES',
+    file.maxPostBytes,
+    DEFAULT_MAX_POST_BYTES,
+    { min: 1 }
+  );
 
   // Local file reads default ON for stdio (the operator's own machine) and OFF
   // for the http transport, where an LLM-supplied path reads the SERVER's
   // filesystem on behalf of an arbitrary client.
   const allowLocalFileRead =
     cli.allowLocalFileRead ??
-    parseBoolean(process.env.TRILIUM_ALLOW_LOCAL_FILE_READ) ??
-    file.allowLocalFileRead ??
+    envBoolean('TRILIUM_ALLOW_LOCAL_FILE_READ') ??
+    fileBoolean(file.allowLocalFileRead, 'allowLocalFileRead') ??
     transport === 'stdio';
 
-  const localFileRoots =
-    cli.localFileRoots ??
-    (process.env.TRILIUM_LOCAL_FILE_ROOTS
-      ? splitCsv(process.env.TRILIUM_LOCAL_FILE_ROOTS)
-      : undefined) ??
-    file.localFileRoots ??
-    [];
+  const localFileRoots = listSetting(
+    cli.localFileRoots,
+    'TRILIUM_LOCAL_FILE_ROOTS',
+    file.localFileRoots,
+    'localFileRoots'
+  );
 
-  const contentUrlAllowlist =
-    cli.contentUrlAllowlist ??
-    (process.env.TRILIUM_CONTENT_URL_ALLOWLIST
-      ? splitCsv(process.env.TRILIUM_CONTENT_URL_ALLOWLIST)
-      : undefined) ??
-    file.contentUrlAllowlist ??
-    [];
+  const contentUrlAllowlist = listSetting(
+    cli.contentUrlAllowlist,
+    'TRILIUM_CONTENT_URL_ALLOWLIST',
+    file.contentUrlAllowlist,
+    'contentUrlAllowlist'
+  );
 
-  const maxContentFetchBytes =
-    cli.maxContentFetchBytes ??
-    parseSize(process.env.TRILIUM_MAX_CONTENT_FETCH_BYTES) ??
-    file.maxContentFetchBytes ??
-    DEFAULT_MAX_CONTENT_FETCH_BYTES;
+  const maxContentFetchBytes = sizeSetting(
+    cli.maxContentFetchBytes,
+    'TRILIUM_MAX_CONTENT_FETCH_BYTES',
+    file.maxContentFetchBytes,
+    DEFAULT_MAX_CONTENT_FETCH_BYTES,
+    { min: 1 }
+  );
 
   const metricsEnabledRaw =
-    cli.metrics ?? parseBoolean(process.env.TRILIUM_METRICS) ?? file.metrics ?? false;
+    cli.metrics ?? envBoolean('TRILIUM_METRICS') ?? fileBoolean(file.metrics, 'metrics') ?? false;
 
-  const metricsTokens =
-    cli.metricsTokens ??
-    (process.env.TRILIUM_METRICS_TOKENS
-      ? splitCsv(process.env.TRILIUM_METRICS_TOKENS)
-      : undefined) ??
-    file.metricsTokens ??
-    [];
+  const metricsTokens = listSetting(
+    cli.metricsTokens,
+    'TRILIUM_METRICS_TOKENS',
+    file.metricsTokens,
+    'metricsTokens'
+  );
 
   const metricsIncludePrincipal =
     cli.metricsIncludePrincipal ??
-    parseBoolean(process.env.TRILIUM_METRICS_INCLUDE_PRINCIPAL) ??
-    file.metricsIncludePrincipal ??
+    envBoolean('TRILIUM_METRICS_INCLUDE_PRINCIPAL') ??
+    fileBoolean(file.metricsIncludePrincipal, 'metricsIncludePrincipal') ??
     false;
 
-  const corsOrigins =
-    cli.corsOrigins ??
-    (process.env.TRILIUM_CORS_ORIGINS ? splitCsv(process.env.TRILIUM_CORS_ORIGINS) : undefined) ??
-    file.corsOrigins ??
-    [];
+  const corsOrigins = listSetting(
+    cli.corsOrigins,
+    'TRILIUM_CORS_ORIGINS',
+    file.corsOrigins,
+    'corsOrigins'
+  );
 
   const rateLimitRps = validateNonNegative(
     cli.rateLimitRps ?? emptyToUndefined(process.env.TRILIUM_RATE_LIMIT_RPS) ?? file.rateLimitRps,
@@ -1282,11 +1501,12 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     true
   );
 
-  const jwtSecrets =
-    cli.jwtSecrets ??
-    (process.env.TRILIUM_JWT_SECRETS ? splitCsv(process.env.TRILIUM_JWT_SECRETS) : undefined) ??
-    file.jwtSecrets ??
-    [];
+  const jwtSecrets = listSetting(
+    cli.jwtSecrets,
+    'TRILIUM_JWT_SECRETS',
+    file.jwtSecrets,
+    'jwtSecrets'
+  );
 
   const jwtJwksUrl =
     cli.jwtJwksUrl ?? emptyToUndefined(process.env.TRILIUM_JWT_JWKS_URL) ?? file.jwtJwksUrl ?? null;
@@ -1306,24 +1526,30 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     file.jwtPrincipalClaim ??
     'sub';
 
-  const requestTimeoutMs =
-    cli.requestTimeoutMs ??
-    parseDuration(process.env.TRILIUM_REQUEST_TIMEOUT) ??
-    file.requestTimeoutMs ??
-    DEFAULT_REQUEST_TIMEOUT_MS;
+  // Export/import/backup get 5x this, so keep 5x within setTimeout's range.
+  const requestTimeoutMs = durationSetting(
+    cli.requestTimeoutMs,
+    'TRILIUM_REQUEST_TIMEOUT',
+    file.requestTimeoutMs,
+    DEFAULT_TIMEOUT_MS,
+    { max: Math.floor(MAX_TIMER_MS / 5) }
+  );
 
-  const busyCooldownMs =
-    cli.busyCooldownMs ??
-    parseDuration(process.env.TRILIUM_BUSY_COOLDOWN) ??
-    file.busyCooldownMs ??
-    DEFAULT_BUSY_COOLDOWN_MS;
+  const busyCooldownMs = durationSetting(
+    cli.busyCooldownMs,
+    'TRILIUM_BUSY_COOLDOWN',
+    file.busyCooldownMs,
+    DEFAULT_BUSY_COOLDOWN_MS
+  );
 
   const searchStrategyRaw =
     cli.searchStrategy ??
     emptyToUndefined(process.env.TRILIUM_SEARCH_STRATEGY) ??
     file.searchStrategy;
   const searchStrategy: SearchStrategy =
-    searchStrategyRaw === 'fast' || searchStrategyRaw === 'full' ? searchStrategyRaw : 'auto';
+    searchStrategyRaw === undefined
+      ? 'auto'
+      : parseEnumValue(searchStrategyRaw, SEARCH_STRATEGIES, 'search strategy');
 
   const D = TUNABLE_DEFAULTS;
   const busyProbeTimeoutMs = durationSetting(
@@ -1337,31 +1563,34 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     'TRILIUM_MAX_RETRIES',
     file.maxRetries,
     D.maxRetries,
-    0
+    0,
+    MAX_RETRIES_LIMIT
   );
   const retryDelayMs = durationSetting(
     cli.retryDelayMs,
     'TRILIUM_RETRY_DELAY',
     file.retryDelayMs,
-    D.retryDelayMs
+    D.retryDelayMs,
+    { max: MAX_RETRY_DELAY_MS }
   );
   const maxResponseBytes = sizeSetting(
     cli.maxResponseBytes,
     'TRILIUM_MAX_RESPONSE_BYTES',
     file.maxResponseBytes,
-    D.maxResponseBytes
+    D.maxResponseBytes,
+    { min: 1 }
   );
   const maxInlineAttachmentBytes = sizeSetting(
     cli.maxInlineAttachmentBytes,
     'TRILIUM_MAX_INLINE_ATTACHMENT_BYTES',
     file.maxInlineAttachmentBytes,
-    D.maxInlineAttachmentBytes
+    Math.min(D.maxInlineAttachmentBytes, maxResponseBytes)
   );
   const maxNoteImageBytes = sizeSetting(
     cli.maxNoteImageBytes,
     'TRILIUM_MAX_NOTE_IMAGE_BYTES',
     file.maxNoteImageBytes,
-    D.maxNoteImageBytes
+    Math.min(D.maxNoteImageBytes, maxResponseBytes)
   );
   const maxNoteImagesTotalBytes = sizeSetting(
     cli.maxNoteImagesTotalBytes,
@@ -1373,8 +1602,26 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     cli.maxExportBytes,
     'TRILIUM_MAX_EXPORT_BYTES',
     file.maxExportBytes,
-    D.maxExportBytes
+    Math.min(D.maxExportBytes, maxResponseBytes),
+    { min: 1 }
   );
+  // Every inline cap is read through the client, whose maxResponseBytes
+  // refuses larger bodies first — a bigger cap could never be reached. The
+  // defaults above shrink to fit; an explicit contradiction is an error
+  // rather than something that fails confusingly at runtime.
+  for (const [value, envVar] of [
+    [maxInlineAttachmentBytes, 'TRILIUM_MAX_INLINE_ATTACHMENT_BYTES'],
+    [maxNoteImageBytes, 'TRILIUM_MAX_NOTE_IMAGE_BYTES'],
+    [maxExportBytes, 'TRILIUM_MAX_EXPORT_BYTES'],
+  ] as const) {
+    if (value > maxResponseBytes) {
+      throw new ConfigError(
+        `${envVar} (${flagFor(envVar)}) is ${value} bytes, larger than ` +
+          `TRILIUM_MAX_RESPONSE_BYTES (--max-response-bytes, ${maxResponseBytes} bytes), so it could ` +
+          'never take effect. Lower it or raise --max-response-bytes.'
+      );
+    }
+  }
   const contentCharCap = intSetting(
     cli.contentCharCap,
     'TRILIUM_CONTENT_CHAR_CAP',
@@ -1503,7 +1750,7 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     'TRILIUM_SESSION_IDLE_TTL',
     file.sessionIdleTtlMs,
     D.sessionIdleTtlMs,
-    true
+    { allowZero: true }
   );
   // Unset → derived from the TTL by the HTTP server.
   const sessionSweepIntervalMs = durationSetting(
@@ -1666,6 +1913,8 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     gatewayTokens,
     urlAllowlist,
     allowPrivateUrls,
+    contentAllowPrivateUrls,
+    trustedProxies,
     maxPostBytes,
     allowLocalFileRead,
     localFileRoots,

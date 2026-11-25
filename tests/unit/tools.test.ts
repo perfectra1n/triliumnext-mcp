@@ -61,6 +61,7 @@ function createMockClient(overrides: Partial<TriliumClient> = {}): TriliumClient
     getMonthNote: vi.fn(),
     getYearNote: vi.fn(),
     getInboxNote: vi.fn(),
+    getWeekFirstDayNote: vi.fn(),
     getAppInfo: vi.fn(),
     importZip: vi.fn(),
     createRevision: vi.fn(),
@@ -128,6 +129,29 @@ describe('isBinaryMimeType', () => {
     expect(isBinaryMimeType('application/json')).toBe(false);
     expect(isBinaryMimeType('application/javascript')).toBe(false);
     expect(isBinaryMimeType('image/svg+xml')).toBe(false);
+  });
+
+  it('ignores parameters such as Trilium script envs and charsets', () => {
+    expect(isBinaryMimeType('application/javascript;env=frontend')).toBe(false);
+    expect(isBinaryMimeType('application/javascript; env=backend')).toBe(false);
+    expect(isBinaryMimeType('text/plain; charset=utf-8')).toBe(false);
+    expect(isBinaryMimeType('application/pdf; name=x')).toBe(true);
+  });
+
+  it('treats common text-based application types as text', () => {
+    for (const mime of [
+      'application/xml',
+      'application/typescript',
+      'application/x-yaml',
+      'application/yaml',
+      'application/ld+json',
+      'application/vnd.api+json',
+      'application/atom+xml',
+      'application/x-sh',
+      'application/sql',
+    ]) {
+      expect(isBinaryMimeType(mime), mime).toBe(false);
+    }
   });
 });
 
@@ -938,17 +962,36 @@ describe('search_notes fuzzy fallback', () => {
     expect(parsed.note).toBeTruthy();
   });
 
-  it('falls back to the exact response when the retry itself fails', async () => {
+  it('rethrows a retry failure that is not Trilium being slow', async () => {
     const client = createMockClient();
-    const exact = { results: [] };
     mockSearch(client)
-      .mockResolvedValueOnce(exact)
+      .mockResolvedValueOnce({ results: [] })
       .mockRejectedValueOnce(new Error('trilium exploded'));
 
-    const result = await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' });
-
-    expect(parse(result)).toEqual({ results: [], truncated: false, returned: 0 });
+    await expect(
+      handleSearchTool(client, 'search_notes', { query: 'niagara 教程' })
+    ).rejects.toThrow('trilium exploded');
   });
+
+  it.each(['TRILIUM_TIMEOUT', 'TRILIUM_BUSY'])(
+    'returns the empty exact result marked partial when the retry hits %s',
+    async (code) => {
+      const client = createMockClient();
+      mockSearch(client)
+        .mockResolvedValueOnce({ results: [] })
+        .mockRejectedValueOnce(new TriliumClientError(504, code, 'Trilium did not answer'));
+
+      const parsed = parse(
+        await handleSearchTool(client, 'search_notes', { query: 'niagara 教程' })
+      );
+
+      expect(parsed.results).toEqual([]);
+      expect(parsed.fuzzyAttempted).toBe(true);
+      expect(parsed.partial).toBe(true);
+      expect(parsed.note).toContain('did not finish');
+      expect(parsed.note).toContain('does NOT mean nothing matches');
+    }
+  );
 
   it('orders fuzzy results by relevance without touching the note objects', async () => {
     const client = createMockClient();
@@ -1393,6 +1436,41 @@ describe('Calendar tools', () => {
     expect(client.getMonthNote).toHaveBeenCalledWith('2026-07');
   });
 
+  it('kind="week_first_day" calls getWeekFirstDayNote and returns its note', async () => {
+    (client.getWeekFirstDayNote as ReturnType<typeof vi.fn>).mockResolvedValue({
+      noteId: 'wfd1',
+      title: '2026-04-20',
+    });
+    const result = await handleCalendarTool(client, 'get_special_note', {
+      kind: 'week_first_day',
+      date: '2026-04-22',
+    });
+    expect(client.getWeekFirstDayNote).toHaveBeenCalledWith('2026-04-22');
+    expect(client.getDayNote).not.toHaveBeenCalled();
+    expect(JSON.parse((result?.content[0] as { text: string }).text)).toEqual({
+      noteId: 'wfd1',
+      title: '2026-04-20',
+    });
+  });
+
+  it.each([
+    ['inbox', 'getInboxNote'],
+    ['week_first_day', 'getWeekFirstDayNote'],
+  ] as const)('kind="%s" defaults date to today', async (kind, method) => {
+    (client[method] as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'x' });
+    await handleCalendarTool(client, 'get_special_note', { kind });
+    const call = (client[method] as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  });
+
+  it('kind="year" defaults to the current year', async () => {
+    (client.getYearNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'y' });
+    await handleCalendarTool(client, 'get_special_note', { kind: 'year' });
+    const call = (client.getYearNote as ReturnType<typeof vi.fn>).mock.calls[0][0];
+    expect(call).toMatch(/^\d{4}$/);
+    expect(client.getMonthNote).not.toHaveBeenCalled();
+  });
+
   it('kind="year" calls getYearNote', async () => {
     (client.getYearNote as ReturnType<typeof vi.fn>).mockResolvedValue({ noteId: 'year1' });
     await handleCalendarTool(client, 'get_special_note', { kind: 'year', date: '2026' });
@@ -1629,6 +1707,45 @@ describe('Attachment tools', () => {
       });
       expect(client.updateAttachmentContentBinary).toHaveBeenCalled();
     });
+
+    const binaryArgs = {
+      ownerId: 'n1',
+      role: 'image',
+      mime: 'image/png',
+      title: 'x.png',
+      content: Buffer.from('PNG').toString('base64'),
+    };
+
+    it('deletes the empty attachment and rethrows when the content upload fails', async () => {
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'at1',
+      });
+      (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('upload broke')
+      );
+      await expect(handleAttachmentTool(client, 'create_attachment', binaryArgs)).rejects.toThrow(
+        'upload broke'
+      );
+      expect(client.deleteAttachment).toHaveBeenCalledWith('at1');
+    });
+
+    it('reports the leftover attachmentId when the cleanup delete fails too', async () => {
+      (client.createAttachment as ReturnType<typeof vi.fn>).mockResolvedValue({
+        attachmentId: 'at1',
+      });
+      (client.updateAttachmentContentBinary as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('upload broke')
+      );
+      (client.deleteAttachment as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('delete broke')
+      );
+      const result = await handleAttachmentTool(client, 'create_attachment', binaryArgs);
+      expect(result).toMatchObject({ isError: true });
+      const payload = JSON.parse((result?.content[0] as { text: string }).text);
+      expect(payload.attachmentId).toBe('at1');
+      expect(payload.error).toContain('upload broke');
+      expect(payload.error).toContain('delete_attachment');
+    });
   });
 
   describe('get_attachment', () => {
@@ -1738,7 +1855,8 @@ describe('Attachment tools', () => {
           mime: 'application/pdf',
           contentLength: pdf.length,
         }),
-        getAttachmentContentBinary: vi.fn().mockResolvedValue(pdf),
+        getAttachmentContentAsBase64: vi.fn().mockResolvedValue(pdf.toString('base64')),
+        getAttachmentContentBinary: vi.fn(),
       } as Partial<TriliumClient>);
       const result = await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
       expect(result?.content[0]).toEqual({
@@ -1749,6 +1867,10 @@ describe('Attachment tools', () => {
           blob: pdf.toString('base64'),
         },
       });
+      // The base64-aware read (not raw bytes re-encoded), still under the cap,
+      // so an attachment stored as base64 text is not encoded twice.
+      expect(client.getAttachmentContentAsBase64).toHaveBeenCalledWith('a1', 5 * 1024 * 1024);
+      expect(client.getAttachmentContentBinary).not.toHaveBeenCalled();
       expect(client.getAttachmentContent).not.toHaveBeenCalled();
     });
 
@@ -1918,7 +2040,11 @@ describe('Revision tools', () => {
 
   let client: TriliumClient;
   beforeEach(() => {
-    client = createMockClient();
+    client = createMockClient({
+      getRevision: vi
+        .fn()
+        .mockResolvedValue({ revisionId: 'r1', type: 'text', mime: 'text/html', title: 'T' }),
+    } as Partial<TriliumClient>);
   });
 
   it('list mode (noteId) returns array', async () => {
@@ -1933,8 +2059,36 @@ describe('Revision tools', () => {
     (client.getRevisionContent as ReturnType<typeof vi.fn>).mockResolvedValue('<p>old</p>');
     const result = await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
     expect(client.getRevisionContent).toHaveBeenCalledWith('r1');
-    expect(client.getRevision).not.toHaveBeenCalled();
     expect(result?.content[0]).toMatchObject({ type: 'text', text: '<p>old</p>' });
+  });
+
+  it.each([
+    ['image', 'image/png'],
+    ['file', 'application/pdf'],
+  ])('returns metadata and a notice, not decoded bytes, for a %s revision', async (type, mime) => {
+    (client.getRevision as ReturnType<typeof vi.fn>).mockResolvedValue({
+      revisionId: 'r1',
+      type,
+      mime,
+      contentLength: 1234,
+    });
+    const result = await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
+    expect(client.getRevisionContent).not.toHaveBeenCalled();
+    const payload = JSON.parse((result?.content[0] as { text: string }).text);
+    expect(payload).toMatchObject({ revisionId: 'r1', type, mime, contentLength: 1234 });
+    expect(payload.notice).toContain('binary');
+    expect(payload.notice).toContain('restore_revision');
+  });
+
+  it('still returns the text body of a code revision with a script mime', async () => {
+    (client.getRevision as ReturnType<typeof vi.fn>).mockResolvedValue({
+      revisionId: 'r1',
+      type: 'code',
+      mime: 'application/javascript;env=frontend',
+    });
+    (client.getRevisionContent as ReturnType<typeof vi.fn>).mockResolvedValue('api.log(1)');
+    const result = await handleRevisionTool(client, 'get_revisions', { revisionId: 'r1' });
+    expect(result?.content[0]).toMatchObject({ type: 'text', text: 'api.log(1)' });
   });
 
   it('metadata mode (revisionId + include_content=false) returns single revision metadata', async () => {
@@ -1963,6 +2117,8 @@ describe('Revision tools', () => {
     const text = (result?.content[0] as { text: string }).text;
     expect(text.length).toBeLessThan(51_000);
     expect(text).toContain('truncated');
+    // A revision cannot be paged; the hint must not send the model to the live note's paging.
+    expect(text).toContain('restore_revision');
   });
 
   it('requires exactly one of noteId/revisionId', async () => {
