@@ -50,6 +50,41 @@ export function isBinaryMimeType(mime: string): boolean {
 }
 
 /**
+ * Note types whose content Trilium always stores as a string regardless of
+ * mime (mirrors `STRING_NOTE_TYPES` in TriliumNext's services/utils.ts).
+ * Several of them (book, render, webView, noteMap, …) carry an EMPTY mime,
+ * which `isBinaryMimeType` alone would misclassify as binary.
+ */
+const STRING_NOTE_TYPES = new Set([
+  'text',
+  'code',
+  'relationMap',
+  'search',
+  'render',
+  'book',
+  'mermaid',
+  'canvas',
+  'webView',
+  'noteMap',
+  'mindMap',
+  'geoMap',
+  'doc',
+  'contentWidget',
+  'launcher',
+]);
+
+/**
+ * Whether an existing note's content is binary, following Trilium's own
+ * `isStringNote` rule: string note types are never binary; otherwise decide by
+ * mime. A missing/empty mime is only treated as binary for `file`/`image`.
+ */
+export function isBinaryNote(type: string | undefined, mime: string | undefined | null): boolean {
+  if (type && STRING_NOTE_TYPES.has(type)) return false;
+  if (!mime) return type === 'file' || type === 'image';
+  return isBinaryMimeType(mime);
+}
+
+/**
  * Shared schema-description text for every content-carrying field. This is the
  * LLM's UX for the feature — keep it in sync with resolveContentInput.
  */

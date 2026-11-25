@@ -21,7 +21,7 @@ import { assertUrlIsSafe, UrlGuardError } from './urlGuard.js';
 import { createMetrics, normalizeRoute, type Metrics } from './metrics.js';
 import { MetricsAuth } from './metricsAuth.js';
 import { CorsPolicy } from './cors.js';
-import { RateLimiter } from './rateLimit.js';
+import { RateLimiter, type RateLimitDecision } from './rateLimit.js';
 import { checkRequestOrigin } from './originGuard.js';
 import type { Logger } from '../utils/logger.js';
 
@@ -322,17 +322,7 @@ export async function startHttp(
   return httpServer;
 }
 
-async function handleRequest(
-  req: IncomingMessage,
-  res: ServerResponse,
-  config: Config,
-  sessions: Map<string, Session>,
-  streamableSessions: Map<string, StreamableSession>,
-  gatewayPolicy: GatewayPolicy,
-  logger: Logger,
-  metrics: Metrics | null,
-  metricsAuth: MetricsAuth | null
-): Promise<void> {
+async function handleRequest(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
   const method = req.method ?? 'GET';
   const url = req.url ?? '/';
   const pathOnly = url.split('?')[0];
@@ -343,26 +333,144 @@ async function handleRequest(
   }
 
   if (method === 'GET' && (url === '/metrics' || url.startsWith('/metrics?'))) {
-    handleMetrics(req, res, metrics, metricsAuth);
+    handleMetrics(req, res, ctx.metrics, ctx.metricsAuth);
     return;
   }
 
   if (method === 'GET' && url === '/sse') {
-    await handleSseConnect(req, res, config, sessions, gatewayPolicy, logger, metrics);
+    await handleSseConnect(req, res, ctx);
     return;
   }
 
   if (method === 'POST' && url.startsWith('/message')) {
-    await handleSsePost(req, res, sessions, config.maxPostBytes, logger);
+    await handleSsePost(req, res, ctx);
     return;
   }
 
   if (pathOnly === '/mcp') {
-    await handleStreamable(req, res, config, streamableSessions, gatewayPolicy, logger, metrics);
+    await handleStreamable(req, res, ctx);
     return;
   }
 
   respondJson(res, 404, { error: 'not_found' });
+}
+
+type TransportKind = 'sse' | 'streamable';
+
+interface AuthorizedRequest {
+  /** Authenticated principal (JWT only), for audit logs and metrics. */
+  principal: string | null;
+  /** Stable identity a session is bound to (see `GatewayPolicy.identity`). */
+  identity: string;
+}
+
+/**
+ * Gateway auth + the per-credential rate-limit axis, shared by every MCP
+ * endpoint. Writes the 401 / 429 response itself and returns `null` when the
+ * request must stop here.
+ */
+async function authorizeOrReject(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: Ctx,
+  transport: TransportKind
+): Promise<AuthorizedRequest | null> {
+  const { gatewayPolicy, logger, metrics, rateLimiter } = ctx;
+  const authResult = await gatewayPolicy.authorize(req);
+  if (!authResult.authorized) {
+    logger.warn('unauthorized', {
+      remote: req.socket.remoteAddress,
+      transport,
+      reason: authResult.reason,
+    });
+    metrics?.sseConnectFailuresTotal.inc({ reason: 'unauthorized' });
+    respondJson(
+      res,
+      401,
+      { error: 'unauthorized' },
+      { 'WWW-Authenticate': `Bearer realm="${AUTH_REALM}"` }
+    );
+    return null;
+  }
+
+  // Only a VERIFIED credential gets a bucket. In `none` mode the
+  // Authorization header is unauthenticated input, so skip the token axis.
+  if (rateLimiter.enabled) {
+    const credential = gatewayPolicy.gatewayMode === 'none' ? null : undefined;
+    const decision = rateLimiter.checkToken(req, credential);
+    if (!decision.allowed) {
+      respondRateLimited(req, res, logger, (req.url ?? '/').split('?')[0], decision);
+      return null;
+    }
+  }
+
+  return {
+    principal: authResult.principal,
+    identity: gatewayPolicy.identity(req, authResult),
+  };
+}
+
+/** 429 with `Retry-After` from the limiter decision, plus a warn log. */
+function respondRateLimited(
+  req: IncomingMessage,
+  res: ServerResponse,
+  logger: Logger,
+  path: string,
+  decision: RateLimitDecision
+): void {
+  const retryAfter = decision.retryAfter ?? 1;
+  logger.warn('rate_limited', {
+    remote: req.socket.remoteAddress,
+    path,
+    reason: decision.reason,
+    retry_after_s: retryAfter,
+  });
+  respondJson(
+    res,
+    429,
+    { error: 'rate_limited', reason: decision.reason },
+    { 'Retry-After': String(retryAfter) }
+  );
+}
+
+/**
+ * Enforce the cap on concurrently open sessions (both transports). Writes a
+ * 503 and returns false when full.
+ */
+function admitNewSession(res: ServerResponse, ctx: Ctx, transport: TransportKind): boolean {
+  const open = ctx.sessions.size + ctx.streamableSessions.size;
+  if (open < ctx.maxSessions) return true;
+  ctx.logger.warn('session_limit_reached', { transport, open, max: ctx.maxSessions });
+  ctx.metrics?.sseConnectFailuresTotal.inc({ reason: 'session_limit' });
+  respondJson(res, 503, { error: 'too_many_sessions' }, { 'Retry-After': '30' });
+  return false;
+}
+
+/**
+ * A session id is only usable by the identity that created it, so a leaked or
+ * guessed id cannot be driven by a different gateway principal/token. Writes
+ * a 403 and returns false on mismatch.
+ */
+function sessionOwnedBy(
+  req: IncomingMessage,
+  res: ServerResponse,
+  ctx: Ctx,
+  session: { identity: string },
+  sessionId: string,
+  identity: string,
+  transport: TransportKind
+): boolean {
+  if (session.identity === identity) return true;
+  ctx.logger.warn('session_identity_mismatch', {
+    transport,
+    session: shortSessionId(sessionId),
+    remote: req.socket.remoteAddress,
+  });
+  respondJson(res, 403, {
+    error: 'session_forbidden',
+    message: 'This session was opened by a different identity.',
+  });
+  return false;
 }
 
 /**
@@ -383,12 +491,9 @@ async function handleRequest(
 async function handleStreamable(
   req: IncomingMessage,
   res: ServerResponse,
-  config: Config,
-  streamableSessions: Map<string, StreamableSession>,
-  gatewayPolicy: GatewayPolicy,
-  logger: Logger,
-  metrics: Metrics | null
+  ctx: Ctx
 ): Promise<void> {
+  const { config, streamableSessions, logger, metrics } = ctx;
   const method = req.method ?? 'GET';
   const sessionId = firstHeader(req.headers['mcp-session-id']);
 
@@ -396,25 +501,19 @@ async function handleStreamable(
     metrics?.sseConnectFailuresTotal.inc({ reason });
   };
 
-  // 1. Gateway auth gate — applies to every method.
-  const authResult = await gatewayPolicy.authorize(req);
-  if (!authResult.authorized) {
-    logger.warn('unauthorized', {
-      remote: req.socket.remoteAddress,
-      transport: 'streamable',
-      reason: authResult.reason,
-    });
-    recordFailure('unauthorized');
-    respondJson(res, 401, { error: 'unauthorized' });
-    return;
-  }
-  const principal = authResult.principal;
+  // 1. Gateway auth gate (+ per-credential rate limit) — every method.
+  const auth = await authorizeOrReject(req, res, ctx, 'streamable');
+  if (!auth) return;
+  const { principal, identity } = auth;
 
   // 2. Existing-session path — fast route for any method that carries a
-  // session id we already know about.
+  // session id we already know about. The caller must be the identity that
+  // opened the session.
   if (sessionId) {
     const existing = streamableSessions.get(sessionId);
     if (existing) {
+      if (!sessionOwnedBy(req, res, ctx, existing, sessionId, identity, 'streamable')) return;
+      existing.lastActivity = Date.now();
       try {
         if (method === 'POST') {
           const parsedBody = await readJsonBody(req, config.maxPostBytes);
@@ -441,7 +540,7 @@ async function handleStreamable(
     // its old id. Surface that hint so the operator / SDK has somewhere to go.
     logger.info('unknown_session', {
       transport: 'streamable',
-      session: sessionId,
+      session: shortSessionId(sessionId),
       remote: req.socket.remoteAddress,
     });
     respondJson(res, 404, {
@@ -483,6 +582,7 @@ async function handleStreamable(
     respondJson(res, 400, { error: 'missing_session_id' });
     return;
   }
+  if (!admitNewSession(res, ctx, 'streamable')) return;
 
   // 3b. Resolve backend creds (single- vs multi-tenant), same rules as /sse.
   let clientUrlRaw: string;
@@ -579,9 +679,9 @@ async function handleStreamable(
     sessionIdGenerator: () => randomUUID(),
     onsessioninitialized: (sid) => {
       registeredId = sid;
-      streamableSessions.set(sid, { transport, mcpServer });
+      streamableSessions.set(sid, { transport, mcpServer, identity, lastActivity: Date.now() });
       logger.info('mcp_session_opened', {
-        session: sid,
+        session: shortSessionId(sid),
         host: triliumHost,
         transport: 'streamable',
         principal,
@@ -594,7 +694,10 @@ async function handleStreamable(
     onsessionclosed: (sid) => {
       const removed = streamableSessions.delete(sid);
       if (removed) {
-        logger.info('mcp_session_closed', { session: sid, transport: 'streamable' });
+        logger.info('mcp_session_closed', {
+          session: shortSessionId(sid),
+          transport: 'streamable',
+        });
         if (metrics) {
           metrics.sseSessions.dec();
           metrics.sseClosesTotal.inc();
@@ -609,7 +712,10 @@ async function handleStreamable(
   transport.onclose = () => {
     if (registeredId && streamableSessions.has(registeredId)) {
       streamableSessions.delete(registeredId);
-      logger.info('mcp_session_closed', { session: registeredId, transport: 'streamable' });
+      logger.info('mcp_session_closed', {
+        session: shortSessionId(registeredId),
+        transport: 'streamable',
+      });
       if (metrics) {
         metrics.sseSessions.dec();
         metrics.sseClosesTotal.inc();
@@ -664,28 +770,18 @@ function handleMetrics(
 async function handleSseConnect(
   req: IncomingMessage,
   res: ServerResponse,
-  config: Config,
-  sessions: Map<string, Session>,
-  gatewayPolicy: GatewayPolicy,
-  logger: Logger,
-  metrics: Metrics | null
+  ctx: Ctx
 ): Promise<void> {
+  const { config, sessions, logger, metrics } = ctx;
   const recordFailure = (reason: string): void => {
     metrics?.sseConnectFailuresTotal.inc({ reason });
   };
 
-  // 1. Gateway auth gate
-  const authResult = await gatewayPolicy.authorize(req);
-  if (!authResult.authorized) {
-    logger.warn('unauthorized', {
-      remote: req.socket.remoteAddress,
-      reason: authResult.reason,
-    });
-    recordFailure('unauthorized');
-    respondJson(res, 401, { error: 'unauthorized' });
-    return;
-  }
-  const principal = authResult.principal;
+  // 1. Gateway auth gate (+ per-credential rate limit), then the session cap.
+  const auth = await authorizeOrReject(req, res, ctx, 'sse');
+  if (!auth) return;
+  const { principal, identity } = auth;
+  if (!admitNewSession(res, ctx, 'sse')) return;
 
   // 2. Resolve backend creds. In multi-tenant mode, require BOTH X-Trilium-Url
   // and X-Trilium-Token from the client as an atomic pair — no fallback to
@@ -799,7 +895,7 @@ async function handleSseConnect(
   // Never let the keep-alive timer hold the process open.
   keepAlive.unref?.();
 
-  const session: Session = { transport, mcpServer, keepAlive };
+  const session: Session = { transport, mcpServer, keepAlive, identity, lastActivity: Date.now() };
   sessions.set(sessionId, session);
 
   // The transport's onclose fires either (a) when the SSE response closes —
@@ -811,7 +907,7 @@ async function handleSseConnect(
   transport.onclose = () => {
     sessions.delete(sessionId);
     clearInterval(keepAlive);
-    logger.info('sse_closed', { session: sessionId });
+    logger.info('sse_closed', { session: shortSessionId(sessionId) });
     if (metrics) {
       metrics.sseSessions.dec();
       metrics.sseClosesTotal.inc();
@@ -820,7 +916,11 @@ async function handleSseConnect(
 
   try {
     await mcpServer.connect(transport);
-    logger.info('sse_connected', { session: sessionId, host: triliumHost, principal });
+    logger.info('sse_connected', {
+      session: shortSessionId(sessionId),
+      host: triliumHost,
+      principal,
+    });
     if (metrics) {
       metrics.sseSessions.inc();
       metrics.sseConnectsTotal.inc();
@@ -831,7 +931,7 @@ async function handleSseConnect(
     sessions.delete(sessionId);
     clearInterval(keepAlive);
     logger.error('sse_connect_failed', {
-      session: sessionId,
+      session: shortSessionId(sessionId),
       err: err instanceof Error ? err.message : String(err),
     });
     recordFailure('sse_connect_failed');
@@ -847,13 +947,9 @@ async function handleSseConnect(
   }
 }
 
-async function handleSsePost(
-  req: IncomingMessage,
-  res: ServerResponse,
-  sessions: Map<string, Session>,
-  maxPostBytes: number,
-  logger: Logger
-): Promise<void> {
+async function handleSsePost(req: IncomingMessage, res: ServerResponse, ctx: Ctx): Promise<void> {
+  const { sessions, logger } = ctx;
+  const maxPostBytes = ctx.config.maxPostBytes;
   // Fail fast on a Content-Length that already exceeds the cap, so we don't
   // pay to drain a giant request body just to reject it.
   const contentLengthRaw = req.headers['content-length'];
@@ -867,6 +963,11 @@ async function handleSsePost(
       return;
     }
   }
+
+  // Gateway auth (+ per-credential rate limit) before any session lookup, so
+  // unauthenticated callers learn nothing about which session ids exist.
+  const auth = await authorizeOrReject(req, res, ctx, 'sse');
+  if (!auth) return;
 
   const parsed = parsePath(req.url);
   const sessionId = parsed.query.get('sessionId');
@@ -883,7 +984,7 @@ async function handleSsePost(
     // can react instead of just retrying the same dead session.
     logger.info('unknown_session', {
       transport: 'sse',
-      session: sessionId,
+      session: shortSessionId(sessionId),
       remote: req.socket.remoteAddress,
     });
     respondJson(res, 404, {
@@ -897,6 +998,11 @@ async function handleSsePost(
     });
     return;
   }
+
+  // The POST must come from the identity that opened the SSE stream; the
+  // session id alone is not a sufficient capability.
+  if (!sessionOwnedBy(req, res, ctx, session, sessionId, auth.identity, 'sse')) return;
+  session.lastActivity = Date.now();
 
   // Read the body ourselves so we can (a) honor `maxPostBytes` regardless of
   // header presence (chunked requests omit Content-Length) and (b) bypass the
@@ -919,7 +1025,7 @@ async function handleSsePost(
     throw err;
   }
 
-  logger.debug('sse_post', { session: sessionId, bytes });
+  logger.debug('sse_post', { session: shortSessionId(sessionId), bytes });
 
   await session.transport.handlePostMessage(req, res, parsedBody);
 }
@@ -987,7 +1093,12 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   });
 }
 
-function respondJson(res: ServerResponse, status: number, body: unknown): void {
+function respondJson(
+  res: ServerResponse,
+  status: number,
+  body: unknown,
+  extraHeaders: Record<string, string> = {}
+): void {
   if (res.headersSent) {
     try {
       res.end();
@@ -998,6 +1109,7 @@ function respondJson(res: ServerResponse, status: number, body: unknown): void {
   }
   const payload = JSON.stringify(body);
   res.writeHead(status, {
+    ...extraHeaders,
     'Content-Type': 'application/json',
     'Content-Length': Buffer.byteLength(payload),
   });

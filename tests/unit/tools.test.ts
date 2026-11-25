@@ -28,6 +28,7 @@ import { registerRevisionTools, handleRevisionTool } from '../../src/tools/revis
 import type { TriliumClient } from '../../src/client/trilium.js';
 import { TriliumClientError } from '../../src/client/trilium.js';
 import { NOTE_TYPES } from '../../src/tools/validators.js';
+import { isBinaryNote } from '../../src/tools/contentInput.js';
 
 // ============================================================================
 // Mock client factory
@@ -127,6 +128,28 @@ describe('isBinaryMimeType', () => {
     expect(isBinaryMimeType('application/json')).toBe(false);
     expect(isBinaryMimeType('application/javascript')).toBe(false);
     expect(isBinaryMimeType('image/svg+xml')).toBe(false);
+  });
+});
+
+describe('isBinaryNote', () => {
+  it('never treats string note types as binary, even with an empty or missing mime', () => {
+    expect(isBinaryNote('text', 'text/html')).toBe(false);
+    expect(isBinaryNote('book', '')).toBe(false);
+    expect(isBinaryNote('render', '')).toBe(false);
+    expect(isBinaryNote('text', undefined)).toBe(false);
+  });
+
+  it('decides file/image notes by mime', () => {
+    expect(isBinaryNote('file', 'application/pdf')).toBe(true);
+    expect(isBinaryNote('file', 'text/plain')).toBe(false);
+    expect(isBinaryNote('image', 'image/svg+xml')).toBe(false);
+    expect(isBinaryNote('image', 'image/png')).toBe(true);
+  });
+
+  it('treats a file/image note with no mime as binary, anything else as text', () => {
+    expect(isBinaryNote('file', '')).toBe(true);
+    expect(isBinaryNote('image', undefined)).toBe(true);
+    expect(isBinaryNote(undefined, undefined)).toBe(false);
   });
 });
 

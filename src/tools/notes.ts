@@ -17,6 +17,7 @@ import TurndownService from 'turndown';
 import {
   isImageMimeType,
   isBinaryMimeType,
+  isBinaryNote,
   resolveContentInput,
   CONTENT_SOURCE_GUIDANCE,
 } from './contentInput.js';
@@ -1008,7 +1009,7 @@ async function writeNote(client: TriliumClient, args: unknown): Promise<ToolHand
   const isText = target.type === 'text';
   const hasAttachments = (parsed.images?.length ?? 0) > 0 || (parsed.files?.length ?? 0) > 0;
 
-  if (isBinaryMimeType(target.mime)) {
+  if (isBinaryNote(target.type, target.mime)) {
     if (parsed.mode !== 'replace') {
       throw new Error(
         `Note ${parsed.noteId} is a binary ${target.type} note (${target.mime}); mode="${parsed.mode}" ` +

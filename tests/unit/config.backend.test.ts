@@ -73,3 +73,24 @@ describe('parseDuration', () => {
     expect(parseDuration(input)).toBeUndefined();
   });
 });
+
+describe('backend timeout CLI validation', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv, TRILIUM_TOKEN: 'token' };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('rejects an invalid --request-timeout instead of silently ignoring it', () => {
+    expect(() => loadConfig(['--request-timeout', 'soon'])).toThrow(/Invalid duration/);
+  });
+
+  it('requires a value for --busy-cooldown and --search-strategy', () => {
+    expect(() => loadConfig(['--busy-cooldown'])).toThrow(/requires a value/);
+    expect(() => loadConfig(['--search-strategy'])).toThrow(/requires a value/);
+  });
+});

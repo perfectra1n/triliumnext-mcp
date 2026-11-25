@@ -84,7 +84,9 @@ export interface Config {
   /**
    * Extra `Host` header names (hostname, optional `:port`) accepted when the
    * server is bound to loopback — e.g. the public name a same-host reverse
-   * proxy forwards. Ignored when bound to a non-loopback interface.
+   * proxy forwards. On a non-loopback bind the Host check is off by default;
+   * setting this list opts in to it (loopback names and the bind address stay
+   * accepted alongside these entries).
    */
   allowedHosts: string[];
   /**
@@ -285,6 +287,16 @@ function requireSize(flag: string, raw: string): number {
   return parsed;
 }
 
+function requireDuration(flag: string, raw: string): number {
+  const parsed = parseDuration(raw);
+  if (parsed === undefined) {
+    throw new ConfigError(
+      `Invalid duration for ${flag}: "${raw}" (use ms or e.g. 500ms, 90s, 2m).`
+    );
+  }
+  return parsed;
+}
+
 function parseCliArgs(args: string[]): CliArgs {
   const result: CliArgs = {};
   const gatewayTokens: string[] = [];
@@ -400,21 +412,14 @@ function parseCliArgs(args: string[]): CliArgs {
       case '--jwt-principal-claim':
         result.jwtPrincipalClaim = value();
         break;
-      case '--request-timeout': {
-        const ms = parseDuration(nextArg);
-        if (ms !== undefined) result.requestTimeoutMs = ms;
-        i++;
+      case '--request-timeout':
+        result.requestTimeoutMs = requireDuration(arg, value());
         break;
-      }
-      case '--busy-cooldown': {
-        const ms = parseDuration(nextArg);
-        if (ms !== undefined) result.busyCooldownMs = ms;
-        i++;
+      case '--busy-cooldown':
+        result.busyCooldownMs = requireDuration(arg, value());
         break;
-      }
       case '--search-strategy':
-        result.searchStrategy = nextArg;
-        i++;
+        result.searchStrategy = value();
         break;
       case '--help':
       case '-h':
@@ -492,6 +497,7 @@ Options:
                                      does). On loopback, the Host header must be a loopback name.
   --allowed-hosts <hosts>            Extra Host header values accepted while bound to loopback
                                      (comma-separated, e.g. a same-host reverse proxy's name).
+                                     On a non-loopback bind, setting this enables the Host check.
 
 Multi-tenant HTTP options (require --transport http):
   --multi-tenant                     Each SSE client supplies its own Trilium URL + token
