@@ -128,6 +128,42 @@ describe('preprocessSearchQuery', () => {
     });
   });
 
+  describe('AND / NOT connectives inside OR segments', () => {
+    it('drops AND instead of searching for the word "AND"', () => {
+      expect(preprocessSearchQuery('meeting AND notes or agenda')).toEqual({
+        type: 'search',
+        query: '(note.content *=* meeting AND note.content *=* notes) OR note.content *=* agenda',
+      });
+    });
+
+    it('turns NOT x into a negated condition', () => {
+      expect(preprocessSearchQuery('meeting NOT draft or agenda')).toEqual({
+        type: 'search',
+        query:
+          '(note.content *=* meeting AND not(note.content *=* draft)) OR note.content *=* agenda',
+      });
+    });
+
+    it('is case-insensitive', () => {
+      expect(preprocessSearchQuery('a and b or c')).toEqual({
+        type: 'search',
+        query: '(note.content *=* a AND note.content *=* b) OR note.content *=* c',
+      });
+    });
+
+    it('keeps a trailing NOT as a literal word', () => {
+      expect(preprocessSearchQuery('agenda or do not')).toEqual({
+        type: 'search',
+        query: 'note.content *=* agenda OR (note.content *=* do AND note.content *=* not)',
+      });
+    });
+
+    it('never wraps a connective as a search term', () => {
+      const { query } = preprocessSearchQuery('x AND y NOT z or w');
+      expect(query).not.toMatch(/\*=\* (AND|NOT)\b/i);
+    });
+  });
+
   describe('edge cases', () => {
     it('should handle extra whitespace around OR', () => {
       const result = preprocessSearchQuery('meeting   OR   project');
@@ -308,6 +344,57 @@ describe('preprocessSearchQuery', () => {
     it('should handle empty title value', () => {
       // "title:" alone — no value, falls through
       expect(preprocessSearchQuery('title:')).toEqual({ type: 'search', query: 'title:' });
+    });
+
+    it('keeps a trailing #label outside the title text', () => {
+      expect(preprocessSearchQuery('title:meeting #project')).toEqual({
+        type: 'search',
+        query: 'note.title *=* meeting #project',
+      });
+      expect(preprocessSearchQuery('title:weekly meeting #project ~owner')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "weekly meeting" #project ~owner',
+      });
+    });
+
+    it('keeps trailing filters per OR segment', () => {
+      expect(preprocessSearchQuery('title:alpha #a or title:beta')).toEqual({
+        type: 'search',
+        query: 'note.title *=* alpha #a OR note.title *=* beta',
+      });
+    });
+
+    it('escapes embedded quotes instead of emitting a broken literal', () => {
+      expect(preprocessSearchQuery('title:say "hi" now')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "say hi now"',
+      });
+      expect(preprocessSearchQuery('title:5" ruler')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "5\\" ruler"',
+      });
+      expect(preprocessSearchQuery('title:a"b')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "a\\"b"',
+      });
+    });
+
+    it('treats only a single fully-quoted phrase as already quoted', () => {
+      expect(preprocessSearchQuery('title:"a b" "c d"')).toEqual({
+        type: 'search',
+        query: 'note.title *=* "a b c d"',
+      });
+    });
+
+    it('handles a space after title:', () => {
+      expect(preprocessSearchQuery('title: meeting')).toEqual({
+        type: 'search',
+        query: 'note.title *=* meeting',
+      });
+    });
+
+    it('falls through when only filters follow title:', () => {
+      expect(preprocessSearchQuery('title: #project').query).toBe('title: #project');
     });
   });
 });

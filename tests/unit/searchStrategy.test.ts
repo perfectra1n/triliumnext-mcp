@@ -77,6 +77,20 @@ describe('search_notes strategy', () => {
     expect(out.note).toContain('Try again in about 20s');
   });
 
+  it('auto: falls back to the fast matches, marked partial, when the body search times out', async () => {
+    const { client } = mockClient(
+      { results: notes(3) },
+      new TriliumClientError(504, 'TRILIUM_TIMEOUT', 'Trilium did not answer within 60s.')
+    );
+    const out = await run(client, { query: 'afi' });
+
+    expect(out.partial).toBe(true);
+    expect(out.searchMode).toBe('fast');
+    expect(out.results).toHaveLength(3);
+    expect(out.note).toContain('did not answer within 60s');
+    expect(out.note).toContain('strategy:"full"');
+  });
+
   it('auto: rethrows when the fast pass found nothing either', async () => {
     const { client } = mockClient(
       { results: [] },

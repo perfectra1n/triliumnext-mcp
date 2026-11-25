@@ -113,3 +113,40 @@ describe('JwtAuth — HS256', () => {
     expect(res.authorized).toBe(false);
   });
 });
+
+describe('JwtAuth — exp requirement and clock tolerance', () => {
+  it('rejects a validly-signed token with no exp claim', async () => {
+    const auth = new JwtAuth({ secrets: ['a'.repeat(32)] });
+    const token = await new SignJWT({ sub: 'alice' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt()
+      .sign(SECRET);
+    const res = await auth.authorize(fakeReq(`Bearer ${token}`));
+    expect(res.authorized).toBe(false);
+    expect(res.reason).toBe('verify_failed');
+  });
+
+  it('tolerates a token that expired within the clock tolerance', async () => {
+    const auth = new JwtAuth({ secrets: ['a'.repeat(32)] });
+    const now = Math.floor(Date.now() / 1000);
+    const token = await new SignJWT({ sub: 'alice' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt(now - 120)
+      .setExpirationTime(now - 5)
+      .sign(SECRET);
+    const res = await auth.authorize(fakeReq(`Bearer ${token}`));
+    expect(res.authorized).toBe(true);
+  });
+
+  it('honors a custom clockToleranceSec of 0', async () => {
+    const auth = new JwtAuth({ secrets: ['a'.repeat(32)], clockToleranceSec: 0 });
+    const now = Math.floor(Date.now() / 1000);
+    const token = await new SignJWT({ sub: 'alice' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setIssuedAt(now - 120)
+      .setExpirationTime(now - 5)
+      .sign(SECRET);
+    const res = await auth.authorize(fakeReq(`Bearer ${token}`));
+    expect(res.authorized).toBe(false);
+  });
+});

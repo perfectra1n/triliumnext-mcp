@@ -1,5 +1,6 @@
+import { createHash } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import type { GatewayAuth } from './auth.js';
+import { extractBearerToken, type GatewayAuth } from './auth.js';
 import type { JwtAuth } from './jwtAuth.js';
 
 export type GatewayMode = 'none' | 'bearer' | 'jwt';
@@ -48,5 +49,25 @@ export class GatewayPolicy {
     }
     // Constructor invariants guarantee we never reach here in practice.
     return { authorized: false, principal: null, reason: 'misconfigured' };
+  }
+
+  get gatewayMode(): GatewayMode {
+    return this.mode;
+  }
+
+  /**
+   * Stable identity of an AUTHORIZED request, used to bind MCP sessions to
+   * whoever created them:
+   *  - jwt: the principal claim (survives token refresh)
+   *  - bearer: a SHA-256 fingerprint of the gateway token (never the token)
+   *  - none: a constant — there is no identity to bind to
+   */
+  identity(req: IncomingMessage, result: AuthorizeResult): string {
+    if (this.mode === 'jwt') return `jwt:${result.principal ?? ''}`;
+    if (this.mode === 'bearer') {
+      const token = extractBearerToken(req.headers['authorization']) ?? '';
+      return `bearer:${createHash('sha256').update(token, 'utf8').digest('hex').slice(0, 32)}`;
+    }
+    return 'anonymous';
   }
 }

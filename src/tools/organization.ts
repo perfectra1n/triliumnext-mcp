@@ -2,57 +2,47 @@ import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import type { Branch } from '../types/etapi.js';
-import { defineTool } from './schemas.js';
-import { positionSchema, required } from './validators.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
+import { entityIdSchema, positionSchema, required } from './validators.js';
 
 const organizeNoteSchema = z
   .object({
     action: z
       .enum(['move', 'clone', 'reorder', 'unlink'])
       .describe(
-        'Operation to perform. ' +
-          '"move" — move a note to a new parent (fields: noteId, newParentNoteId, fromParentNoteId?, prefix?). ' +
-          '"clone" — make a note appear under an additional parent (fields: noteId, parentNoteId, prefix?). ' +
-          '"reorder" — change display order of children under a parent (fields: parentNoteId, notePositions[]). ' +
-          '"unlink" — remove a specific parent-child branch (field: branchId). WARNING: removing a note\'s last branch deletes the note.'
+        '"move" (noteId, newParentNoteId, fromParentNoteId?, prefix?), "clone" (noteId, parentNoteId, ' +
+          'prefix?), "reorder" (parentNoteId, notePositions), "unlink" (branchId).'
       ),
-    noteId: z.string().optional().describe('ID of the note. Required for "move" and "clone".'),
-    newParentNoteId: z
-      .string()
+    noteId: entityIdSchema.optional().describe('Note to move or clone.'),
+    newParentNoteId: entityIdSchema
+      .optional()
+      .describe('"move" only: destination parent. (clone uses parentNoteId instead.)'),
+    fromParentNoteId: entityIdSchema
       .optional()
       .describe(
-        'Destination parent for "move". Use search_notes/get_note_tree to pick the right parent.'
+        '"move" only: the parent to move the note away from. Required when the note has two or more ' +
+          'parents besides newParentNoteId; optional otherwise.'
       ),
-    fromParentNoteId: z
-      .string()
+    parentNoteId: entityIdSchema
       .optional()
       .describe(
-        'Optional for "move": the parent to move the note AWAY from. Required when the note is cloned ' +
-          '(has several parents) so the right placement is moved; ignored otherwise.'
-      ),
-    parentNoteId: z
-      .string()
-      .optional()
-      .describe(
-        'Parent note ID. Required for "clone" (destination) and "reorder" (owner of the ordering).'
+        '"clone": the additional parent to place the note under. "reorder": the parent whose children ' +
+          'are reordered.'
       ),
     prefix: z
       .string()
       .optional()
-      .describe('Optional branch prefix for "move" and "clone" (e.g., "Archive:", "Draft:").'),
+      .describe('"move"/"clone": branch title prefix shown in the tree (e.g. "Archive:").'),
     notePositions: z
       .array(
         z.object({
-          branchId: z.string().min(1).describe('ID of the branch to reorder'),
-          notePosition: positionSchema.describe('New position (10, 20, 30...)'),
+          branchId: entityIdSchema.describe('Child branch under parentNoteId.'),
+          notePosition: positionSchema.describe('New position (10, 20, 30...).'),
         })
       )
       .optional()
-      .describe('Required for "reorder": array of branch position updates.'),
-    branchId: z
-      .string()
-      .optional()
-      .describe('Required for "unlink": the branch (parent-child link) to remove.'),
+      .describe('"reorder": new positions for child branches of parentNoteId.'),
+    branchId: entityIdSchema.optional().describe('"unlink": the parent-child branch to remove.'),
   })
   .check((ctx) => {
     const { action, noteId, newParentNoteId, parentNoteId, notePositions, branchId } = ctx.value;
@@ -135,19 +125,25 @@ export function registerOrganizationTools(): Tool[] {
   return [
     defineTool(
       'organize_note',
-      'Reorganize the note tree. Four actions selected via "action":\n' +
-        '- "move": relocate a note to a new parent (creates the destination placement, then removes the old one). ' +
-        'For a cloned note (several parents) pass fromParentNoteId to choose which placement moves; ' +
-        'moving onto a parent the note is already under is a safe no-op\n' +
-        '- "clone": make a note appear in multiple locations (new branch pointing to same note)\n' +
-        '- "reorder": change display order of notes under a parent by updating branch positions\n' +
-        '- "unlink": remove a specific parent-child branch without deleting the note (unless it\'s the last branch)\n\n' +
-        'IMPORTANT: Before "move" or "clone", use search_notes and get_note_tree to explore the hierarchy and suggest the right destination. ' +
-        'Branch IDs (for "reorder"/"unlink") come from get_note (parentBranchIds/childBranchIds) or get_note_tree (childBranchIds on each node). ' +
-        'WARNING: "unlink" on the last branch of a note deletes the note itself. ' +
-        'For "move" and "clone", the response includes a "url" field linking to the note at its new location — give it to the user when you are done.',
+      'Reorganize the note tree. Actions:\n' +
+        '- "move": place the note under newParentNoteId and remove its old placement (the new branch is ' +
+        'created first). If the note has several placements other than newParentNoteId, fromParentNoteId ' +
+        'must say which to remove. If newParentNoteId is already a parent: with no other placement nothing ' +
+        'changes; with exactly one other placement, that one is REMOVED (the note collapses onto ' +
+        'newParentNoteId) — use "clone" instead to keep both.\n' +
+        '- "clone": add a placement under parentNoteId without removing any (same note, new branch).\n' +
+        '- "reorder": set notePosition on child branches of parentNoteId; every branch must belong to it.\n' +
+        '- "unlink": remove one branch. If it is the note\'s last branch, the note itself is deleted.\n' +
+        'Branch IDs come from get_note (parentBranchIds/childBranchIds) or get_note_tree (childBranchIds, ' +
+        'children[].branchId). move and clone return the url of the note at its new location.',
       organizeNoteSchema,
-      { title: 'Organize notes', readOnlyHint: false, destructiveHint: true, idempotentHint: false }
+      {
+        title: 'Organize notes',
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      }
     ),
   ];
 }
@@ -156,7 +152,7 @@ export async function handleOrganizationTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<ToolHandlerResult> {
   if (name !== 'organize_note') return null;
 
   const parsed = organizeNoteSchema.parse(args);
@@ -193,7 +189,18 @@ export async function handleOrganizationTool(
           ? sourceBranch
           : undefined;
       if (removed) {
-        await client.deleteBranch(removed.branchId);
+        try {
+          await client.deleteBranch(removed.branchId);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          throw new Error(
+            `Move partially failed: note '${noteId}' was placed under '${newBranch.parentNoteId}' ` +
+              `(branch '${newBranch.branchId}') but removing the old placement under ` +
+              `'${removed.parentNoteId}' (branch '${removed.branchId}') failed: ${reason}. The note is ` +
+              `now in both places. Finish with organize_note {action:"unlink", branchId:"${removed.branchId}"}.`,
+            { cause: error }
+          );
+        }
       }
 
       const url = await client.getNoteUrl(noteId, newBranch.parentNoteId);
@@ -242,12 +249,45 @@ export async function handleOrganizationTool(
       const parentNoteId = required(parsed.parentNoteId, 'parentNoteId');
       const notePositions = required(parsed.notePositions, 'notePositions');
 
+      // Validate every branch before touching any, so a wrong ID cannot leave a
+      // half-applied ordering under some other parent.
+      const branches = await Promise.all(notePositions.map((p) => client.getBranch(p.branchId)));
+      const foreign = branches.filter((b) => b.parentNoteId !== parentNoteId);
+      if (foreign.length > 0) {
+        throw new Error(
+          `Branches not under parentNoteId '${parentNoteId}': ` +
+            foreign.map((b) => `${b.branchId} (parent '${b.parentNoteId}')`).join(', ') +
+            `. Use childBranchIds of '${parentNoteId}' from get_note or get_note_tree.`
+        );
+      }
+
       const results = [];
       for (const pos of notePositions) {
-        const updated = await client.updateBranch(pos.branchId, {
-          notePosition: pos.notePosition,
-        });
-        results.push(updated);
+        try {
+          const updated = await client.updateBranch(pos.branchId, {
+            notePosition: pos.notePosition,
+          });
+          results.push(updated);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          const done = results.map((b) => b.branchId);
+          if (done.length > 0) {
+            // Best effort: push the positions that did apply to open clients.
+            try {
+              await client.refreshNoteOrdering(parentNoteId);
+            } catch {
+              // The reorder error below is what matters.
+            }
+          }
+          throw new Error(
+            `Reorder failed at branch '${pos.branchId}': ${reason}. ` +
+              (done.length > 0
+                ? `Already updated: ${done.join(', ')}. `
+                : 'No branches were updated. ') +
+              'Retry with the remaining branches.',
+            { cause: error }
+          );
+        }
       }
 
       await client.refreshNoteOrdering(parentNoteId);

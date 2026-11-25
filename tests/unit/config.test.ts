@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { loadConfig, normalizeServerUrl, deriveWebBaseUrl } from '../../src/config.js';
+import { loadConfig, normalizeServerUrl, deriveWebBaseUrl, ConfigError } from '../../src/config.js';
 
 describe('loadConfig', () => {
   const originalEnv = process.env;
@@ -23,6 +23,15 @@ describe('loadConfig', () => {
     delete process.env.TRILIUM_METRICS_AUTH;
     delete process.env.TRILIUM_METRICS_TOKENS;
     delete process.env.TRILIUM_PUBLIC_URL;
+    delete process.env.TRILIUM_HTTP_HOST;
+    delete process.env.TRILIUM_ALLOWED_HOSTS;
+    delete process.env.TRILIUM_RATE_LIMIT_RPS;
+    delete process.env.TRILIUM_RATE_LIMIT_BURST;
+    delete process.env.TRILIUM_JWT_JWKS_URL;
+    delete process.env.TRILIUM_JWT_AUDIENCE;
+    delete process.env.TRILIUM_JWT_SECRETS;
+    delete process.env.TRILIUM_ALLOW_LOCAL_FILE_READ;
+    delete process.env.TRILIUM_LOCAL_FILE_ROOTS;
   });
 
   afterEach(() => {
@@ -482,18 +491,19 @@ describe('loadConfig', () => {
       expect(config!.metricsEnabled).toBe(false);
     });
 
-    it('rejects unknown metrics-auth values, falling back to default (gateway)', () => {
-      const config = loadConfig([
-        '--transport',
-        'http',
-        '--multi-tenant',
-        '--gateway-token',
-        'gw',
-        '--metrics',
-        '--metrics-auth',
-        'wat',
-      ]);
-      expect(config!.metricsAuth).toBe('gateway');
+    it('rejects unknown metrics-auth values with an error listing valid values', () => {
+      expect(() =>
+        loadConfig([
+          '--transport',
+          'http',
+          '--multi-tenant',
+          '--gateway-token',
+          'gw',
+          '--metrics',
+          '--metrics-auth',
+          'wat',
+        ])
+      ).toThrow(/metrics auth mode.*gateway, bearer, none/);
     });
 
     it('exits in bearer mode even when --metrics-auth comes from env', () => {
@@ -512,6 +522,212 @@ describe('loadConfig', () => {
       exitSpy.mockRestore();
       errSpy.mockRestore();
     });
+  });
+});
+
+describe('config strictness', () => {
+  const originalEnv = process.env;
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('TRILIUM_')) delete process.env[key];
+    }
+    process.env.TRILIUM_TOKEN = 't';
+  });
+  afterEach(() => {
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+  });
+
+  it('defaults the HTTP bind host to 127.0.0.1', () => {
+    const config = loadConfig(['--transport', 'http']);
+    expect(config!.httpHost).toBe('127.0.0.1');
+    expect(config!.allowedHosts).toEqual([]);
+  });
+
+  it('reads --host, TRILIUM_HTTP_HOST and allowed hosts', () => {
+    expect(loadConfig(['--host', '0.0.0.0'])!.httpHost).toBe('0.0.0.0');
+    process.env.TRILIUM_HTTP_HOST = '::';
+    process.env.TRILIUM_ALLOWED_HOSTS = 'mcp.example.com,proxy.local:8443';
+    const config = loadConfig([]);
+    expect(config!.httpHost).toBe('::');
+    expect(config!.allowedHosts).toEqual(['mcp.example.com', 'proxy.local:8443']);
+    expect(loadConfig(['--allowed-hosts', 'a.example'])!.allowedHosts).toEqual(['a.example']);
+  });
+
+  it('defaults maxPostBytes to 64 MB', () => {
+    expect(loadConfig([])!.maxPostBytes).toBe(64 * 1024 * 1024);
+  });
+
+  it.each([['berer'], ['JWT-ish'], ['']])('rejects unknown --gateway-auth value %j', (value) => {
+    expect(() => loadConfig(['--transport', 'http', '--gateway-auth', value])).toThrow(ConfigError);
+  });
+
+  it('error for an unknown gateway auth lists the valid values', () => {
+    process.env.TRILIUM_GATEWAY_AUTH = 'nope';
+    expect(() => loadConfig(['--transport', 'http'])).toThrow(/none, bearer, jwt/);
+  });
+
+  it('accepts gateway auth values case-insensitively with whitespace', () => {
+    process.env.TRILIUM_GATEWAY_AUTH = '  NONE ';
+    expect(loadConfig(['--transport', 'http'])!.gatewayAuth).toBe('none');
+  });
+
+  it.each([['0'], ['65536'], ['-1'], ['abc'], ['80.5'], ['3000x']])(
+    'rejects invalid --port %s',
+    (port) => {
+      expect(() => loadConfig(['--port', port])).toThrow(/Invalid port/);
+    }
+  );
+
+  it('rejects an invalid TRILIUM_HTTP_PORT', () => {
+    process.env.TRILIUM_HTTP_PORT = '99999';
+    expect(() => loadConfig([])).toThrow(/TRILIUM_HTTP_PORT/);
+  });
+
+  it.each([['--url'], ['--token'], ['--port'], ['--gateway-token'], ['--cors-origin'], ['--host']])(
+    '%s without a value is an error',
+    (flag) => {
+      expect(() => loadConfig([flag])).toThrow(/requires a value/);
+    }
+  );
+
+  it('a flag value that is itself a --flag is an error', () => {
+    expect(() => loadConfig(['--token', '--transport', 'http'])).toThrow(
+      /--token requires a value/
+    );
+  });
+
+  it('rejects negative or non-numeric rate limits from env', () => {
+    process.env.TRILIUM_RATE_LIMIT_RPS = '-1';
+    expect(() => loadConfig([])).toThrow(/rate-limit rps/);
+    process.env.TRILIUM_RATE_LIMIT_RPS = '5';
+    process.env.TRILIUM_RATE_LIMIT_BURST = 'lots';
+    expect(() => loadConfig([])).toThrow(/rate-limit burst/);
+  });
+
+  it('rejects an invalid --rate-limit-rps from the CLI', () => {
+    expect(() => loadConfig(['--rate-limit-rps', 'fast'])).toThrow(/rate-limit rps/);
+  });
+
+  it('accepts valid rate limits from env', () => {
+    process.env.TRILIUM_RATE_LIMIT_RPS = '2.5';
+    process.env.TRILIUM_RATE_LIMIT_BURST = '10';
+    const config = loadConfig([]);
+    expect(config!.rateLimitRps).toBe(2.5);
+    expect(config!.rateLimitBurst).toBe(10);
+  });
+
+  it('rejects an unparseable --max-post-bytes', () => {
+    expect(() => loadConfig(['--max-post-bytes', 'huge'])).toThrow(/Invalid size/);
+  });
+
+  it('multi-tenant + local file reads without roots is fatal', () => {
+    delete process.env.TRILIUM_TOKEN;
+    expect(() =>
+      loadConfig([
+        '--transport',
+        'http',
+        '--multi-tenant',
+        '--gateway-token',
+        'gw',
+        '--allow-local-file-read',
+      ])
+    ).toThrow(/--local-file-roots/);
+  });
+
+  it('multi-tenant + local file reads WITH roots is allowed', () => {
+    delete process.env.TRILIUM_TOKEN;
+    const config = loadConfig([
+      '--transport',
+      'http',
+      '--multi-tenant',
+      '--gateway-token',
+      'gw',
+      '--allow-local-file-read',
+      '--local-file-roots',
+      '/srv/uploads',
+    ]);
+    expect(config!.localFileRoots).toEqual(['/srv/uploads']);
+  });
+
+  it('warns (not fatal) when JWKS is configured without an audience', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const config = loadConfig([
+      '--transport',
+      'http',
+      '--gateway-auth',
+      'jwt',
+      '--jwt-jwks-url',
+      'https://idp.example.com/jwks.json',
+    ]);
+    expect(config!.gatewayAuth).toBe('jwt');
+    expect(
+      errSpy.mock.calls.flat().some((a) => typeof a === 'string' && a.includes('--jwt-audience'))
+    ).toBe(true);
+  });
+
+  it('does not warn when JWKS has an audience', () => {
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    loadConfig([
+      '--transport',
+      'http',
+      '--gateway-auth',
+      'jwt',
+      '--jwt-jwks-url',
+      'https://idp.example.com/jwks.json',
+      '--jwt-audience',
+      'mcp',
+    ]);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('config file parse errors', () => {
+  const originalEnv = process.env;
+  const originalCwd = process.cwd();
+  let dir: string;
+
+  beforeEach(async () => {
+    const { mkdtemp } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const { join } = await import('node:path');
+    dir = await mkdtemp(join(tmpdir(), 'trilium-mcp-cfg-'));
+    process.env = { ...originalEnv, TRILIUM_TOKEN: 't' };
+    process.chdir(dir);
+  });
+
+  afterEach(async () => {
+    process.chdir(originalCwd);
+    process.env = originalEnv;
+    vi.restoreAllMocks();
+    const { rm } = await import('node:fs/promises');
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('warns on stderr when ./trilium-mcp.json exists but is invalid JSON', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile('trilium-mcp.json', '{ not json');
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const config = loadConfig([]);
+    expect(config).not.toBeNull();
+    expect(
+      errSpy.mock.calls
+        .flat()
+        .some((a) => typeof a === 'string' && a.includes('ignoring config file'))
+    ).toBe(true);
+  });
+
+  it('validates httpPort from the config file', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile('trilium-mcp.json', JSON.stringify({ httpPort: 70000 }));
+    expect(() => loadConfig([])).toThrow(/config file httpPort/);
+  });
+
+  it('validates gatewayAuth from the config file', async () => {
+    const { writeFile } = await import('node:fs/promises');
+    await writeFile('trilium-mcp.json', JSON.stringify({ gatewayAuth: 'token' }));
+    expect(() => loadConfig(['--transport', 'http'])).toThrow(/gateway auth mode/);
   });
 });
 
@@ -637,5 +853,76 @@ describe('content input policy config', () => {
     process.env.TRILIUM_MAX_CONTENT_FETCH_BYTES = '1mb';
     const config = loadConfig([]);
     expect(config!.maxContentFetchBytes).toBe(1024 * 1024);
+  });
+});
+
+describe('trusted proxies, content private URLs and strict env parsing', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('TRILIUM_')) delete process.env[key];
+    }
+    process.env.TRILIUM_TOKEN = 'token';
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('reads trusted proxies from CLI (repeatable) and env, and validates them', () => {
+    expect(loadConfig([])!.trustedProxies).toEqual([]);
+    process.env.TRILIUM_TRUSTED_PROXIES = '10.0.0.0/8, fd00::/8';
+    expect(loadConfig([])!.trustedProxies).toEqual(['10.0.0.0/8', 'fd00::/8']);
+    expect(
+      loadConfig(['--trusted-proxies', '172.16.0.1', '--trusted-proxies', '127.0.0.1'])!
+        .trustedProxies
+    ).toEqual(['172.16.0.1', '127.0.0.1']);
+    expect(() => loadConfig(['--trusted-proxies', 'proxy.internal'])).toThrow(ConfigError);
+    expect(() => loadConfig(['--trusted-proxies', '10.0.0.0/40'])).toThrow(/trusted proxy/);
+  });
+
+  it('defaults content private URLs to off, independent of --allow-private-urls in multi-tenant mode', () => {
+    const mt = ['--transport', 'http', '--multi-tenant', '--gateway-auth', 'none'];
+    delete process.env.TRILIUM_TOKEN;
+    expect(loadConfig(mt)!.contentAllowPrivateUrls).toBe(false);
+    const both = loadConfig([...mt, '--allow-private-urls'])!;
+    expect(both.allowPrivateUrls).toBe(true);
+    expect(both.contentAllowPrivateUrls).toBe(false);
+    expect(loadConfig([...mt, '--content-allow-private-urls'])!.contentAllowPrivateUrls).toBe(true);
+    process.env.TRILIUM_CONTENT_ALLOW_PRIVATE_URLS = 'true';
+    const envOnly = loadConfig(mt)!;
+    expect(envOnly.contentAllowPrivateUrls).toBe(true);
+    expect(envOnly.allowPrivateUrls).toBe(false);
+  });
+
+  it('keeps --allow-private-urls governing content fetches in single-tenant mode (backward compatible)', () => {
+    expect(loadConfig([])!.contentAllowPrivateUrls).toBe(false);
+    expect(loadConfig(['--allow-private-urls'])!.contentAllowPrivateUrls).toBe(true);
+    process.env.TRILIUM_CONTENT_ALLOW_PRIVATE_URLS = 'false';
+    expect(loadConfig(['--allow-private-urls'])!.contentAllowPrivateUrls).toBe(false);
+  });
+
+  it.each([
+    ['TRILIUM_ALLOW_PRIVATE_URLS', 'ture'],
+    ['TRILIUM_CONTENT_ALLOW_PRIVATE_URLS', 'maybe'],
+    ['TRILIUM_MULTI_TENANT', 'on'],
+    ['TRILIUM_METRICS', 'enabled'],
+  ])('rejects an unparseable boolean %s=%s', (env, raw) => {
+    process.env[env] = raw;
+    expect(() => loadConfig([])).toThrow(new RegExp(env));
+  });
+
+  it('treats an empty boolean env value as unset', () => {
+    process.env.TRILIUM_ALLOW_PRIVATE_URLS = '';
+    expect(loadConfig([])!.allowPrivateUrls).toBe(false);
+  });
+
+  it('parses the transport case-insensitively and rejects unknown values', () => {
+    process.env.TRILIUM_TRANSPORT = 'HTTP';
+    expect(loadConfig([])!.transport).toBe('http');
+    process.env.TRILIUM_TRANSPORT = 'websocket';
+    expect(() => loadConfig([])).toThrow(/Invalid transport/);
   });
 });

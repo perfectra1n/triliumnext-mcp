@@ -1,9 +1,16 @@
 import { promises as fs } from 'node:fs';
 import { isUtf8 } from 'node:buffer';
 import { homedir } from 'node:os';
-import { basename, isAbsolute, join, sep } from 'node:path';
+import { basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileTypeFromBuffer } from 'file-type';
-import { assertUrlIsSafe, UrlGuardError } from '../http/urlGuard.js';
+import {
+  assertUrlIsSafe,
+  createGuardedFetch,
+  findUrlGuardError,
+  UrlGuardError,
+  type GuardedFetch,
+} from '../http/urlGuard.js';
+import type { Logger } from '../utils/logger.js';
 
 // ============================================================================
 // MIME helpers (moved here from attachments.ts so both attachments.ts and
@@ -24,22 +31,84 @@ export function isImageMimeType(mime: string): boolean {
 }
 
 /**
- * MIME types that TriliumNext treats as text (string) content.
- * Mirrors TriliumNext's isStringNote() logic in services/utils.ts.
+ * MIME types handled as text (string) content. A superset of TriliumNext's
+ * isStringNote() list (services/utils.ts): it adds common text-based
+ * application/* types (XML, YAML, TypeScript, shell, ...), whose UTF-8 bytes
+ * round-trip identically whether Trilium stores them as a string or a blob,
+ * so they can be read, edited and diffed as text instead of base64.
  */
 const TEXT_MIME_EXACT = new Set([
   'application/javascript',
   'application/x-javascript',
+  'application/ecmascript',
+  'application/typescript',
+  'application/x-typescript',
   'application/json',
+  'application/ld+json',
   'application/x-sql',
+  'application/sql',
+  'application/xml',
+  'application/xhtml+xml',
+  'application/x-yaml',
+  'application/yaml',
+  'application/toml',
+  'application/x-sh',
+  'application/x-shellscript',
+  'application/x-httpd-php',
+  'application/x-perl',
+  'application/x-python',
+  'application/x-ruby',
+  'application/graphql',
   'image/svg+xml',
 ]);
 
+/**
+ * Whether content of this MIME type is binary. Parameters are ignored, so
+ * Trilium's script mimes ("application/javascript;env=frontend") and
+ * "text/plain; charset=utf-8" classify by their base type. Structured-text
+ * suffixes (+json, +xml, +yaml) count as text.
+ */
 export function isBinaryMimeType(mime: string): boolean {
-  const lower = mime.toLowerCase();
+  const lower = mime.split(';')[0].trim().toLowerCase();
   if (lower.startsWith('text/')) return false;
   if (TEXT_MIME_EXACT.has(lower)) return false;
+  if (/\+(json|xml|yaml)$/.test(lower)) return false;
   return true;
+}
+
+/**
+ * Note types whose content Trilium always stores as a string regardless of
+ * mime (mirrors `STRING_NOTE_TYPES` in TriliumNext's services/utils.ts).
+ * Several of them (book, render, webView, noteMap, …) carry an EMPTY mime,
+ * which `isBinaryMimeType` alone would misclassify as binary.
+ */
+const STRING_NOTE_TYPES = new Set([
+  'text',
+  'code',
+  'relationMap',
+  'search',
+  'render',
+  'book',
+  'mermaid',
+  'canvas',
+  'webView',
+  'noteMap',
+  'mindMap',
+  'geoMap',
+  'doc',
+  'contentWidget',
+  'launcher',
+]);
+
+/**
+ * Whether an existing note's content is binary, following Trilium's own
+ * `isStringNote` rule: string note types are never binary; otherwise decide by
+ * mime. A missing/empty mime is only treated as binary for `file`/`image`.
+ */
+export function isBinaryNote(type: string | undefined, mime: string | undefined | null): boolean {
+  if (type && STRING_NOTE_TYPES.has(type)) return false;
+  if (!mime) return type === 'file' || type === 'image';
+  return isBinaryMimeType(mime);
 }
 
 /**
@@ -47,9 +116,10 @@ export function isBinaryMimeType(mime: string): boolean {
  * LLM's UX for the feature — keep it in sync with resolveContentInput.
  */
 export const CONTENT_SOURCE_GUIDANCE =
-  'Pass any of: a local file path ("/abs/path" or "~/path"), an http(s) URL, a data URL ' +
-  '(data:image/png;base64,...), or inline base64 (binary types) / raw text (text types) — ' +
-  'the source is auto-detected. Use a file:// prefix to force path interpretation.';
+  'Pass any of: an http(s) URL, a data URL (data:image/png;base64,...), or inline base64 ' +
+  '(binary types) / raw text (text types) — the source is auto-detected. A file path ' +
+  '("/abs/path", "~/path", or file://...) refers to the MCP SERVER\'s filesystem and only ' +
+  'works when the server permits local file reads.';
 
 // ============================================================================
 // Errors
@@ -62,7 +132,8 @@ export type ContentNormalizationCode =
   | 'URL_BLOCKED'
   | 'URL_FETCH_FAILED'
   | 'INVALID_BASE64'
-  | 'UNDETECTABLE_MIME';
+  | 'UNDETECTABLE_MIME'
+  | 'TITLE_REQUIRED';
 
 export class ContentNormalizationError extends Error {
   constructor(
@@ -148,6 +219,12 @@ export interface ContentInputPolicy {
   maxBytes: number;
   /** Timeout for each URL fetch request. */
   fetchTimeoutMs: number;
+  /**
+   * Optional operator log sink. Receives the internal detail (e.g. resolved
+   * IP) for blocked URLs, which is deliberately kept out of client-facing
+   * error messages.
+   */
+  logger?: Pick<Logger, 'warn'>;
 }
 
 const DEFAULT_POLICY: ContentInputPolicy = {
@@ -163,6 +240,11 @@ let activePolicy: ContentInputPolicy = DEFAULT_POLICY;
 /** Set the process-wide content-input policy. Called once at server startup. */
 export function configureContentInput(policy: ContentInputPolicy): void {
   activePolicy = policy;
+}
+
+/** The active content-input policy (for callers that derive a tighter per-call budget). */
+export function getContentInputPolicy(): ContentInputPolicy {
+  return activePolicy;
 }
 
 // ============================================================================
@@ -207,8 +289,12 @@ export async function resolveContentInput(
 
   // 1. Data URL — unambiguous prefix.
   if (raw.startsWith('data:')) {
+    // Cheap pre-check before decoding: decoded size is <= the payload length
+    // (measured after the comma, so the "data:...;base64," header is not counted).
+    assertEncodedWithinLimit(raw.slice(raw.indexOf(',') + 1), policy.maxBytes, 'data URL');
     const parsed = parseDataUrl(raw);
     if (parsed) {
+      assertWithinLimit(parsed.buffer.length, policy.maxBytes, 'data URL');
       return finalize(parsed.buffer, 'data-url', { hints, resolvedMime: parsed.mime });
     }
   }
@@ -228,18 +314,54 @@ export async function resolveContentInput(
   //    stat-existence check below make base64 false-positives impossible:
   //    JPEG base64 starts with "/9j/4AAQ..." but is far longer than 1024
   //    chars for any real image, and never names an existing file.
-  let pathCandidate: string | null = null;
+  //
+  //    The read policy is checked BEFORE touching the filesystem, so a
+  //    disallowed path never reveals whether it exists.
+  let pathCandidate: PathCandidate | null = null;
   if (raw.length <= 1024 && /^(~\/|\/)[^\n\0]*$/.test(raw)) {
     const expanded = expandTilde(raw);
-    const stats = await fs.stat(expanded).catch(() => null);
-    if (stats?.isFile()) {
-      return await readFromPath(raw, hints, policy, { explicit: false });
+    if (pathPolicyPermits(expanded, policy)) {
+      const stats = await fs.stat(expanded).catch(() => null);
+      if (stats?.isFile()) {
+        return await readFromPath(raw, hints, policy, { explicit: false });
+      }
+      pathCandidate = { raw, permitted: true };
+    } else {
+      pathCandidate = { raw, permitted: false };
     }
-    pathCandidate = raw;
   }
 
   // 5. Inline content (today's behavior, mime-driven).
-  return await resolveInline(raw, hints, pathCandidate);
+  return await resolveInline(raw, hints, pathCandidate, policy.maxBytes);
+}
+
+interface PathCandidate {
+  raw: string;
+  /** False when the read policy refused the path before any filesystem access. */
+  permitted: boolean;
+}
+
+function assertWithinLimit(bytes: number, maxBytes: number, what: string): void {
+  if (bytes > maxBytes) {
+    throw new ContentNormalizationError(
+      'INPUT_TOO_LARGE',
+      `Decoded ${what} is ${bytes} bytes; the limit is ${maxBytes} bytes.`,
+      'Send smaller content or raise --max-content-fetch-bytes.'
+    );
+  }
+}
+
+/** Reject before decoding when even the most compact encoding would exceed the cap. */
+function assertEncodedWithinLimit(encoded: string, maxBytes: number, what: string): void {
+  // base64 decodes to ~3/4 of its length; percent-encoded text to <= its length.
+  const lowerBound = Math.floor((encoded.length * 3) / 4) - 4;
+  if (lowerBound > maxBytes) {
+    throw new ContentNormalizationError(
+      'INPUT_TOO_LARGE',
+      `Encoded ${what} is too large; the decoded limit is ${maxBytes} bytes.`,
+      'Send smaller content or raise --max-content-fetch-bytes.'
+    );
+  }
 }
 
 // ============================================================================
@@ -250,79 +372,129 @@ function expandTilde(path: string): string {
   return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path;
 }
 
+/** Pseudo-filesystems that must never be read, even inside an allowed root. */
+const FORBIDDEN_PREFIXES = ['/proc', '/sys', '/dev'];
+
+function isUnder(path: string, root: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
+function isForbiddenPath(path: string): boolean {
+  return FORBIDDEN_PREFIXES.some((p) => isUnder(path, p));
+}
+
+/**
+ * Policy gate evaluated WITHOUT touching the filesystem: local reads enabled,
+ * absolute path, and (when roots are configured) lexically inside a root.
+ * Symlink escapes are caught later by re-checking the realpath.
+ */
+function pathPolicyPermits(expanded: string, policy: ContentInputPolicy): boolean {
+  if (!policy.allowLocalFileRead) return false;
+  if (!isAbsolute(expanded)) return false;
+  const normalized = resolve(expanded);
+  if (isForbiddenPath(normalized)) return false;
+  if (policy.localFileRoots.length === 0) return true;
+  return policy.localFileRoots.some((r) => isUnder(normalized, resolve(expandTilde(r))));
+}
+
+const LOCAL_FILE_GENERIC_MESSAGE = 'Local file not permitted or not found';
+const LOCAL_FILE_SUGGESTION =
+  "File paths refer to the MCP server's filesystem and only work when the server permits " +
+  'local reads (--allow-local-file-read, --local-file-roots). Otherwise pass the content ' +
+  'inline as base64, a data URL, or an http(s) URL.';
+
+function localFileError(
+  code: 'PATH_NOT_FOUND' | 'PATH_NOT_PERMITTED',
+  rawPath: string
+): ContentNormalizationError {
+  // One message for "missing", "outside roots", "disabled" and "special file"
+  // so the response never confirms whether a path exists.
+  return new ContentNormalizationError(
+    code,
+    `${LOCAL_FILE_GENERIC_MESSAGE}: ${rawPath}`,
+    LOCAL_FILE_SUGGESTION
+  );
+}
+
 async function readFromPath(
   rawPath: string,
   hints: ContentHints,
   policy: ContentInputPolicy,
-  opts: { explicit: boolean }
+  _opts: { explicit: boolean }
 ): Promise<ResolvedContent> {
-  if (!policy.allowLocalFileRead) {
-    throw new ContentNormalizationError(
-      'PATH_NOT_PERMITTED',
-      `Local file reads are disabled on this server (input: ${rawPath}).`,
-      'Pass the content inline as base64 or a data URL, use an http(s) URL, or start the server with --allow-local-file-read.'
-    );
-  }
-
   const expanded = expandTilde(rawPath);
-  if (!isAbsolute(expanded)) {
-    throw new ContentNormalizationError(
-      'PATH_NOT_FOUND',
-      `File paths must be absolute or start with ~/ (got: ${rawPath}).`,
-      'Use an absolute path like /tmp/image.png or ~/Documents/image.png.'
-    );
+
+  // Policy BEFORE any filesystem access.
+  if (!pathPolicyPermits(expanded, policy)) {
+    throw localFileError('PATH_NOT_PERMITTED', rawPath);
   }
 
-  // Resolve symlinks BEFORE the roots check so a link inside an allowed root
-  // cannot point outside the sandbox.
+  // Resolve symlinks, then re-check roots + forbidden prefixes on the real
+  // path so a link inside an allowed root cannot point outside the sandbox.
   let real: string;
   try {
     real = await fs.realpath(expanded);
   } catch {
-    throw new ContentNormalizationError(
-      'PATH_NOT_FOUND',
-      `The input looks like a file path but no such file exists: ${rawPath}`,
-      opts.explicit
-        ? 'Check the path, or pass the content inline as base64, a data URL, or an http(s) URL.'
-        : 'Check the path. If this string was meant as literal content, provide an explicit mime.'
-    );
+    throw localFileError('PATH_NOT_FOUND', rawPath);
   }
-
+  if (isForbiddenPath(real)) {
+    throw localFileError('PATH_NOT_PERMITTED', rawPath);
+  }
   if (policy.localFileRoots.length > 0) {
     const roots = await Promise.all(
       policy.localFileRoots.map((r) => fs.realpath(expandTilde(r)).catch(() => null))
     );
-    const inRoot = roots.some(
-      (root) =>
-        root !== null && (real === root || real.startsWith(root.endsWith(sep) ? root : root + sep))
-    );
-    if (!inRoot) {
-      throw new ContentNormalizationError(
-        'PATH_NOT_PERMITTED',
-        `Path is outside the directories this server may read from: ${rawPath}`,
-        'Pass the content inline as base64 or a data URL, or adjust --local-file-roots.'
-      );
+    if (!roots.some((root) => root !== null && isUnder(real, root))) {
+      throw localFileError('PATH_NOT_PERMITTED', rawPath);
     }
   }
 
-  const stats = await fs.stat(real);
-  if (!stats.isFile()) {
-    throw new ContentNormalizationError(
-      'PATH_NOT_FOUND',
-      `Path exists but is not a regular file: ${rawPath}`,
-      'Point at a file, not a directory or special file.'
-    );
+  // Open once and work on the descriptor so the checked file is the read file.
+  // Read at most maxBytes+1: stat sizes lie for pseudo-files (size 0).
+  let handle: Awaited<ReturnType<typeof fs.open>>;
+  try {
+    handle = await fs.open(real, 'r');
+  } catch {
+    throw localFileError('PATH_NOT_FOUND', rawPath);
   }
-  if (stats.size > policy.maxBytes) {
-    throw new ContentNormalizationError(
-      'INPUT_TOO_LARGE',
-      `File is ${stats.size} bytes; the limit is ${policy.maxBytes} bytes: ${rawPath}`,
-      'Reduce the file size or raise --max-content-fetch-bytes.'
-    );
+  try {
+    const stats = await handle.stat();
+    if (!stats.isFile()) {
+      throw localFileError('PATH_NOT_FOUND', rawPath);
+    }
+    if (stats.size > policy.maxBytes) {
+      throw tooLargeFile(stats.size, policy.maxBytes, rawPath);
+    }
+    const cap = policy.maxBytes + 1;
+    const buf = Buffer.allocUnsafe(Math.min(cap, Math.max(stats.size + 1, 64 * 1024)));
+    const chunks: Buffer[] = [];
+    let total = 0;
+    for (;;) {
+      const want = Math.min(buf.length, cap - total);
+      if (want <= 0) break;
+      const { bytesRead } = await handle.read(buf, 0, want, null);
+      if (bytesRead === 0) break;
+      chunks.push(Buffer.from(buf.subarray(0, bytesRead)));
+      total += bytesRead;
+    }
+    if (total > policy.maxBytes) {
+      throw tooLargeFile(total, policy.maxBytes, rawPath);
+    }
+    return finalize(Buffer.concat(chunks, total), 'path', {
+      hints,
+      sourceName: basename(expanded),
+    });
+  } finally {
+    await handle.close().catch(() => {});
   }
+}
 
-  const buffer = await fs.readFile(real);
-  return finalize(buffer, 'path', { hints, sourceName: basename(expanded) });
+function tooLargeFile(size: number, maxBytes: number, rawPath: string): ContentNormalizationError {
+  return new ContentNormalizationError(
+    'INPUT_TOO_LARGE',
+    `File exceeds the ${maxBytes}-byte limit (read at least ${size} bytes): ${rawPath}`,
+    'Reduce the file size or raise --max-content-fetch-bytes.'
+  );
 }
 
 // ============================================================================
@@ -339,37 +511,62 @@ function tryParseUrl(raw: string): URL | null {
   }
 }
 
+/** Guarded fetchers keyed by URL-guard policy (each owns a pooled undici Agent). */
+const guardedFetchers = new Map<string, GuardedFetch>();
+
+function guardedFetchFor(policy: ContentInputPolicy): GuardedFetch {
+  const key = JSON.stringify([policy.urlGuard.allowPrivate, policy.urlGuard.allowlist]);
+  let f = guardedFetchers.get(key);
+  if (!f) {
+    f = createGuardedFetch(policy.urlGuard);
+    guardedFetchers.set(key, f);
+  }
+  return f;
+}
+
+function urlBlocked(err: UrlGuardError, url: URL, policy: ContentInputPolicy): never {
+  // The resolved IP (err.detail) goes to the operator log only.
+  policy.logger?.warn('content_url_blocked', {
+    reason: err.reason,
+    host: url.hostname,
+    detail: err.detail,
+  });
+  throw new ContentNormalizationError(
+    'URL_BLOCKED',
+    `URL rejected (${err.reason}): ${url.href}`,
+    'Use a public URL, add the host to --content-url-allowlist, or (for private/homelab hosts) start the server with --content-allow-private-urls.'
+  );
+}
+
 /** Fetch with manual, re-guarded redirects; returns the final OK response. */
 async function fetchGuarded(
   url: URL,
   policy: ContentInputPolicy
 ): Promise<{ response: Response; finalUrl: URL }> {
   let current = url;
+  const guardedFetch = guardedFetchFor(policy);
 
   for (let redirects = 0; ; redirects++) {
     // Re-guard EVERY hop so a public URL cannot redirect us into a private
-    // network or cloud metadata endpoint. (Known DNS TOCTOU between guard and
-    // fetch — same accepted trade-off as the X-Trilium-Url guard.)
+    // network or cloud metadata endpoint. The pre-flight check gives a clean
+    // error; the guarded dispatcher re-validates the address actually
+    // connected to, which closes the DNS-rebinding TOCTOU window.
     try {
       await assertUrlIsSafe(current.href, policy.urlGuard);
     } catch (err) {
-      if (err instanceof UrlGuardError) {
-        throw new ContentNormalizationError(
-          'URL_BLOCKED',
-          `URL rejected (${err.reason}): ${current.href} — ${err.message}`,
-          'Use a public URL, add the host to --content-url-allowlist, or (for private/homelab hosts) start the server with --allow-private-urls.'
-        );
-      }
+      if (err instanceof UrlGuardError) urlBlocked(err, current, policy);
       throw err;
     }
 
     let resp: Response;
     try {
-      resp = await fetch(current.href, {
+      resp = await guardedFetch(current.href, {
         redirect: 'manual',
         signal: AbortSignal.timeout(policy.fetchTimeoutMs),
       });
     } catch (err) {
+      const guardErr = findUrlGuardError(err);
+      if (guardErr) urlBlocked(guardErr, current, policy);
       throw new ContentNormalizationError(
         'URL_FETCH_FAILED',
         `Could not fetch ${current.href}: ${err instanceof Error ? err.message : String(err)}`,
@@ -466,14 +663,14 @@ async function fetchFromUrl(
 async function resolveInline(
   raw: string,
   hints: ContentHints,
-  pathCandidate: string | null
+  pathCandidate: PathCandidate | null,
+  maxBytes: number
 ): Promise<ResolvedContent> {
   const pathOrBase64Error = (): ContentNormalizationError => {
     if (pathCandidate) {
-      return new ContentNormalizationError(
-        'PATH_NOT_FOUND',
-        `The input looks like a file path but no such file exists: ${pathCandidate}`,
-        'Check the path, or pass the content inline as base64, a data URL, or an http(s) URL.'
+      return localFileError(
+        pathCandidate.permitted ? 'PATH_NOT_FOUND' : 'PATH_NOT_PERMITTED',
+        pathCandidate.raw
       );
     }
     return new ContentNormalizationError(
@@ -483,9 +680,18 @@ async function resolveInline(
     );
   };
 
+  // Bound decoded inline base64 by the same cap as file reads / downloads.
+  // `strict` (binary mime declared) also rejects oversize input before decoding.
+  const decodeBounded = (strict: boolean): Buffer | null => {
+    if (strict) assertEncodedWithinLimit(raw, maxBytes, 'inline base64');
+    const buf = decodeBase64Strict(raw);
+    if (buf) assertWithinLimit(buf.length, maxBytes, 'inline base64');
+    return buf;
+  };
+
   if (hints.mime) {
     if (isBinaryMimeType(hints.mime)) {
-      const buffer = decodeBase64Strict(raw);
+      const buffer = decodeBounded(true);
       if (buffer === null) throw pathOrBase64Error();
       return {
         buffer,
@@ -505,7 +711,7 @@ async function resolveInline(
   // No mime given. Only treat the input as binary when a magic-byte sniff
   // POSITIVELY identifies it — short prose can be coincidentally valid base64,
   // and decoding it silently would store garbage.
-  const decoded = decodeBase64Strict(raw);
+  const decoded = decodeBounded(false);
   if (decoded && decoded.length > 0) {
     const sniffed = await fileTypeFromBuffer(decoded);
     if (sniffed) {

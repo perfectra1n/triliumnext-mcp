@@ -109,3 +109,88 @@ describe('RateLimiter', () => {
     expect(d.retryAfter).toBe(2);
   });
 });
+
+describe('RateLimiter — split pre/post-auth axes and sweeping', () => {
+  it('checkIp never creates token buckets, even with an Authorization header', () => {
+    const rl = new RateLimiter({ rps: 1, burst: 2, now: () => 0 });
+    expect(rl.checkIp(req('1.2.3.4', 'Bearer garbage')).allowed).toBe(true);
+    expect(rl.inspect()).toEqual({ ips: 1, tokens: 0 });
+  });
+
+  it('checkToken limits per credential across IPs', () => {
+    const rl = new RateLimiter({ rps: 1, burst: 1, now: () => 0 });
+    expect(rl.checkToken(req('1.1.1.1', 'Bearer A')).allowed).toBe(true);
+    const d = rl.checkToken(req('2.2.2.2', 'Bearer A'));
+    expect(d.allowed).toBe(false);
+    expect(d.reason).toBe('token');
+    // Explicit credential overrides the header.
+    expect(rl.checkToken(req('2.2.2.2', 'Bearer A'), 'B').allowed).toBe(true);
+  });
+
+  it('evicts drained buckets once they have been idle long enough to refill', () => {
+    let now = 0;
+    const rl = new RateLimiter({ rps: 1, burst: 2, now: () => now, idleSweepMs: 10_000 });
+    // Drain two IP buckets completely; their stored token count is 0.
+    rl.check(req('1.1.1.1', 'Bearer A'));
+    rl.check(req('1.1.1.1', 'Bearer A'));
+    rl.check(req('2.2.2.2'));
+    rl.check(req('2.2.2.2'));
+    expect(rl.inspect()).toEqual({ ips: 2, tokens: 1 });
+    // After idling past the sweep interval, the next request triggers a
+    // sweep that must evict them even though their stored tokens are stale.
+    now = 20_000;
+    rl.check(req('3.3.3.3'));
+    expect(rl.inspect()).toEqual({ ips: 1, tokens: 0 });
+  });
+
+  it('does not evict a bucket that is still refilling', () => {
+    let now = 0;
+    // 0.0001 rps -> 10_000s to refill one token.
+    const rl = new RateLimiter({ rps: 0.0001, burst: 1, now: () => now, idleSweepMs: 1000 });
+    rl.check(req('1.1.1.1'));
+    now = 5000;
+    rl.check(req('9.9.9.9'));
+    expect(rl.check(req('1.1.1.1')).allowed).toBe(false);
+  });
+});
+
+describe('RateLimiter bucket bounds', () => {
+  it('shares one bucket per IPv6 /64', () => {
+    const rl = new RateLimiter({ rps: 0.001, burst: 1, now: () => 0 });
+    expect(rl.checkIp(req('2001:db8:0:1::1')).allowed).toBe(true);
+    expect(rl.checkIp(req('2001:db8:0:1::ffff')).allowed).toBe(false);
+    expect(rl.checkIp(req('2001:db8:0:2::1')).allowed).toBe(true);
+    expect(rl.inspect().ips).toBe(2);
+  });
+
+  it('caps the number of IP buckets, evicting the least recently used', () => {
+    const rl = new RateLimiter({ rps: 0.001, burst: 1, maxBuckets: 3, now: () => 0 });
+    for (const ip of ['1.0.0.1', '1.0.0.2', '1.0.0.3']) rl.checkIp(req(ip));
+    // 1.0.0.1 is touched again, so 1.0.0.2 is now the oldest.
+    expect(rl.checkIp(req('1.0.0.1')).allowed).toBe(false);
+    rl.checkIp(req('1.0.0.4'));
+    expect(rl.inspect().ips).toBe(3);
+    // 1.0.0.1 survived (still empty); 1.0.0.2 was evicted (fresh, full bucket).
+    expect(rl.checkIp(req('1.0.0.1')).allowed).toBe(false);
+    expect(rl.checkIp(req('1.0.0.2')).allowed).toBe(true);
+    expect(rl.inspect().ips).toBe(3);
+  });
+
+  it('keys on the forwarded client only behind a trusted proxy', () => {
+    const rl = new RateLimiter({
+      rps: 0.001,
+      burst: 1,
+      now: () => 0,
+      trustedProxies: ['10.0.0.0/8'],
+    });
+    const viaProxy = (xff: string): IncomingMessage =>
+      ({
+        socket: { remoteAddress: '10.0.0.1' },
+        headers: { 'x-forwarded-for': xff },
+      }) as unknown as IncomingMessage;
+    expect(rl.checkIp(viaProxy('198.51.100.1')).allowed).toBe(true);
+    expect(rl.checkIp(viaProxy('198.51.100.2')).allowed).toBe(true);
+    expect(rl.checkIp(viaProxy('spoof, 198.51.100.1')).allowed).toBe(false);
+    expect(rl.clientAddress(viaProxy('198.51.100.2'))).toBe('198.51.100.2');
+  });
+});

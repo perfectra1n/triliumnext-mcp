@@ -3,33 +3,24 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { TriliumClientError } from '../client/trilium.js';
 import type { PatchNoteDef } from '../types/etapi.js';
-import { defineTool } from './schemas.js';
-import { required } from './validators.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
+import { entityIdSchema, required } from './validators.js';
 import { capWithNotice } from './contentLimits.js';
+import { isBinaryNote } from './contentInput.js';
 
 const getRevisionsSchema = z
   .object({
-    noteId: z
-      .string()
+    noteId: entityIdSchema.optional().describe('List all revisions of this note (metadata only).'),
+    revisionId: entityIdSchema
       .optional()
-      .describe(
-        'If provided, returns an array of all revisions (metadata) for this note. ' +
-          'Each entry includes revisionId, title, type, dates, and content length.'
-      ),
-    revisionId: z
-      .string()
-      .optional()
-      .describe(
-        'If provided, returns a single revision with its HTML body included by default. ' +
-          'Pass include_content=false to skip the body when you only need revision metadata.'
-      ),
+      .describe('Fetch one revision; its body is returned unless include_content=false.'),
     include_content: z
       .boolean()
       .optional()
       .default(true)
       .describe(
-        'Only meaningful with "revisionId". Defaults to true — returns the HTML body of the revision snapshot. ' +
-          'Set to false to return revision metadata only (revisionId, title, type, dates, content length).'
+        'With revisionId: true (default) returns the revision body; false returns its metadata ' +
+          '(revisionId, title, type, dates, content length).'
       ),
   })
   .check((ctx) => {
@@ -53,10 +44,7 @@ const getRevisionsSchema = z
   });
 
 const restoreRevisionSchema = z.object({
-  revisionId: z
-    .string()
-    .min(1, 'Revision ID is required')
-    .describe('ID of the revision to restore (from get_revisions with a noteId).'),
+  revisionId: entityIdSchema.describe('Revision to restore (from get_revisions {noteId}).'),
   snapshot_current: z
     .boolean()
     .default(true)
@@ -77,29 +65,26 @@ export function registerRevisionTools(): Tool[] {
   return [
     defineTool(
       'get_revisions',
-      'Get note revisions (historical snapshots). Two modes:\n' +
-        '- Pass "noteId" to list all revisions for that note (metadata only — revisionId, title, type, dates, content length).\n' +
-        '- Pass "revisionId" to fetch a single revision; the HTML body is included by default. ' +
-        "Pass include_content=false on the revisionId path when you only need the revision's metadata.\n\n" +
-        'This is the canonical way to read revision content — DO NOT bypass this tool by calling the Trilium HTTP/ETAPI directly ' +
-        '(e.g. via curl, fetch, or shell). ' +
-        'Distinct from get_note_history (which is a change log across notes). Revisions are content snapshots of a single note.',
+      'Read note revisions (content snapshots of one note). Pass noteId to list its revisions ' +
+        '(metadata: revisionId, title, type, dates, content length), or revisionId to read one ' +
+        "revision's body (file/image revisions return metadata only). For a change log across many " +
+        'notes use get_note_history instead.',
       getRevisionsSchema,
-      { title: 'Get revisions', readOnlyHint: true }
+      { title: 'Get revisions', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
     defineTool(
       'restore_revision',
       "Restore a note to one of its revisions: writes the revision's content (and, by default, title) back " +
         'onto the live note. By default the current state is snapshotted first with create_revision, so the ' +
         'restore is reversible. Find revision IDs with get_revisions {noteId}; preview one with ' +
-        'get_revisions {revisionId}. Protected notes cannot be restored through ETAPI. ' +
-        'The response includes the note url — give it to the user when you are done.',
+        'get_revisions {revisionId}. Protected notes cannot be restored through ETAPI.',
       restoreRevisionSchema,
       {
         title: 'Restore revision',
         readOnlyHint: false,
         destructiveHint: true,
         idempotentHint: false,
+        openWorldHint: false,
       }
     ),
   ];
@@ -109,7 +94,7 @@ export async function handleRevisionTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<ToolHandlerResult> {
   if (name === 'restore_revision') return restoreRevision(client, args);
   if (name !== 'get_revisions') return null;
 
@@ -123,20 +108,44 @@ export async function handleRevisionTool(
   }
 
   const revisionId = required(parsed.revisionId, 'revisionId');
-  if (parsed.include_content) {
-    const content = await client.getRevisionContent(revisionId);
-    const capped = capWithNotice(
-      content,
-      'revision',
-      'Restore the revision in Trilium or read the live note with get_note (which supports paging via content_start).'
-    );
-    return { content: [{ type: 'text', text: capped }] };
+  const revision = await client.getRevision(revisionId);
+  if (!parsed.include_content) {
+    return {
+      content: [{ type: 'text', text: JSON.stringify(revision, null, 2) }],
+    };
   }
 
-  const revision = await client.getRevision(revisionId);
-  return {
-    content: [{ type: 'text', text: JSON.stringify(revision, null, 2) }],
-  };
+  if (isBinaryNote(revision.type, revision.mime)) {
+    // Decoding an image/file blob as text would only return mojibake.
+    return {
+      content: [
+        {
+          type: 'text',
+          text: JSON.stringify(
+            {
+              ...revision,
+              notice:
+                `Content not returned: this revision is a binary ${revision.type} body ` +
+                `(${revision.mime || 'no mime'}), which is not readable as text. To bring it back, ` +
+                'use restore_revision.',
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+
+  const content = await client.getRevisionContent(revisionId);
+  const capped = capWithNotice(
+    content,
+    'revision',
+    'Revisions cannot be paged. To read the rest, restore_revision it (the current state is ' +
+      'snapshotted first, so this is reversible) and page through it with get_note content_start, ' +
+      'or ask the user to view the revision in Trilium.'
+  );
+  return { content: [{ type: 'text', text: capped }] };
 }
 
 async function restoreRevision(
@@ -155,6 +164,13 @@ async function restoreRevision(
     );
   }
 
+  // Fetch the body before changing anything: if this read fails, the note is
+  // left untouched instead of with restored metadata but its current body.
+  const binary = BINARY_NOTE_TYPES.has(revision.type);
+  const body = binary
+    ? await client.getRevisionContentBinary(revision.revisionId)
+    : await client.getRevisionContent(revision.revisionId);
+
   if (parsed.snapshot_current) {
     await client.createRevision(note.noteId);
   }
@@ -168,12 +184,10 @@ async function restoreRevision(
     await client.updateNote(note.noteId, patch);
   }
 
-  if (BINARY_NOTE_TYPES.has(revision.type)) {
-    const body = await client.getRevisionContentBinary(revision.revisionId);
-    await client.updateNoteContentBinary(note.noteId, body);
+  if (binary) {
+    await client.updateNoteContentBinary(note.noteId, body as Buffer);
   } else {
-    const body = await client.getRevisionContent(revision.revisionId);
-    await client.updateNoteContent(note.noteId, body);
+    await client.updateNoteContent(note.noteId, body as string);
   }
 
   const url = await client.getNoteUrl(note.noteId);

@@ -6,10 +6,18 @@ import {
   formatZodError,
   formatUnknownError,
   formatContentInputError,
+  formatDiffError,
   formatErrorForMCP,
   type StructuredError,
 } from '../../src/errors/index.js';
 import { ContentNormalizationError } from '../../src/tools/contentInput.js';
+import {
+  DiffApplicationError,
+  applySearchReplace,
+  applyUnifiedDiff,
+  verifySearchReplaceResults,
+} from '../../src/tools/diff.js';
+import { entityIdSchema } from '../../src/tools/validators.js';
 
 describe('Error Formatting', () => {
   describe('formatTriliumError', () => {
@@ -60,12 +68,13 @@ describe('Error Formatting', () => {
       expect(result.suggestion).toContain('Authentication');
     });
 
-    it('should provide generic suggestion for unknown status codes', () => {
+    it('omits the suggestion when there is nothing specific to say', () => {
       const error = new TriliumClientError(418, 'TEAPOT', "I'm a teapot");
       const result = formatTriliumError(error);
 
       expect(result.status).toBe(418);
-      expect(result.suggestion).toContain('unexpected error');
+      expect(result).not.toHaveProperty('suggestion');
+      expect(formatErrorForMCP(result).content[0].text).not.toContain('Suggestion');
     });
   });
 
@@ -160,21 +169,19 @@ describe('Error Formatting', () => {
       const result = formatUnknownError(error);
 
       expect(result.message).toBe('Something went wrong');
-      expect(result.suggestion).toContain('unexpected error');
+      expect(result).not.toHaveProperty('suggestion');
     });
 
     it('should format string errors', () => {
       const result = formatUnknownError('String error message');
 
       expect(result.message).toBe('String error message');
-      expect(result.suggestion).toBeDefined();
     });
 
     it('should handle null/undefined', () => {
       const result = formatUnknownError(null);
 
       expect(result.message).toBe('null');
-      expect(result.suggestion).toBeDefined();
     });
   });
 
@@ -276,5 +283,134 @@ describe('formatContentInputError', () => {
     expect(mcp.isError).toBe(true);
     expect(mcp.content[0].text).toContain('**Code**: URL_BLOCKED');
     expect(mcp.content[0].text).toContain('**Suggestion**: Use a public URL.');
+  });
+});
+
+describe('formatZodError issue messages', () => {
+  it('surfaces custom regex messages from validators verbatim', () => {
+    const schema = z.object({ noteId: entityIdSchema });
+    const result = schema.safeParse({ noteId: 'bad/id' });
+    expect(result.success).toBe(false);
+    if (result.success) return;
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['noteId']).toContain('letters, digits and underscores');
+    expect(formatted.fieldErrors!['noteId']).not.toContain('Invalid format');
+  });
+
+  it('uses the zod message for too_small/too_big instead of assuming characters', () => {
+    const schema = z.object({ depth: z.number().min(1), tags: z.array(z.string()).max(1) });
+    const result = schema.safeParse({ depth: 0, tags: ['a', 'b'] });
+    if (result.success) throw new Error('expected failure');
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['depth']).not.toContain('characters');
+    expect(formatted.fieldErrors!['depth']).toMatch(/>=\s*1/);
+    expect(formatted.fieldErrors!['tags']).not.toContain('characters');
+  });
+
+  it('aggregates several issues on the same path', () => {
+    const schema = z.object({
+      name: z
+        .string()
+        .min(5, 'too short')
+        .regex(/^[a-z]+$/, 'lowercase only'),
+    });
+    const result = schema.safeParse({ name: 'A1' });
+    if (result.success) throw new Error('expected failure');
+    const formatted = formatZodError(result.error);
+    expect(formatted.fieldErrors!['name']).toBe('name: too short; lowercase only');
+  });
+});
+
+describe('recovery hints', () => {
+  it('branch hint points at the fields that actually carry branch IDs', () => {
+    const s = formatTriliumError(new TriliumClientError(404, 'BRANCH_NOT_FOUND', 'x')).suggestion!;
+    expect(s).toContain('parentBranchIds');
+    expect(s).toContain('get_note_tree');
+  });
+
+  it('deleted-note hint explains how to restore', () => {
+    const s = formatTriliumError(new TriliumClientError(400, 'NOTE_IS_DELETED', 'x')).suggestion!;
+    expect(s).toContain('delete_note');
+    expect(s).toContain('undelete');
+  });
+
+  it('auth errors tell the model not to retry', () => {
+    for (const err of [
+      new TriliumClientError(401, 'WHATEVER', 'x'),
+      new TriliumClientError(401, 'ETAPI_TOKEN_INVALID', 'x'),
+    ]) {
+      const s = formatTriliumError(err).suggestion!;
+      expect(s).toContain('do not retry');
+      expect(s).toContain('tell the user');
+    }
+  });
+
+  const diffError = (fn: () => unknown): DiffApplicationError => {
+    try {
+      fn();
+    } catch (error) {
+      if (error instanceof DiffApplicationError) return error;
+      throw error;
+    }
+    throw new Error('expected a DiffApplicationError');
+  };
+
+  it('diff errors branch on not-found vs ambiguous (real errors)', () => {
+    const notFound = formatDiffError(
+      diffError(() => applySearchReplace('<p>a</p>', [{ old_string: 'zzz', new_string: 'y' }]))
+    );
+    expect(notFound.suggestion).toContain('format="html"');
+    expect(notFound.suggestion).toContain('exact substring');
+
+    const ambiguous = formatDiffError(
+      diffError(() => applySearchReplace('<p>a a</p>', [{ old_string: 'a', new_string: 'b' }]))
+    );
+    expect(ambiguous.suggestion).toContain('unique');
+  });
+
+  it('does not misclassify from user text echoed in the message', () => {
+    // old_string mentions "ambiguous", but the failure is not-found.
+    const err = diffError(() =>
+      applySearchReplace('<p>x</p>', [{ old_string: 'ambiguous could not find', new_string: '' }])
+    );
+    expect(err.kind).toBe('not_found');
+    expect(formatDiffError(err).suggestion).toContain('exact substring');
+
+    // A real ambiguity whose old_string says "could not find".
+    const amb = diffError(() =>
+      applySearchReplace('could not find, could not find', [
+        { old_string: 'could not find', new_string: '' },
+      ])
+    );
+    expect(amb.kind).toBe('ambiguous');
+    expect(formatDiffError(amb).suggestion).toContain('unique');
+  });
+
+  it('classifies patch and verification failures', () => {
+    const parseFail = diffError(() => applyUnifiedDiff('a\n', '--- a\n+++ b\n--- c\n+++ d\n'));
+    expect(['patch_parse', 'patch_apply']).toContain(parseFail.kind);
+    expect(formatDiffError(parseFail).suggestion).toContain('changes');
+
+    const applyFail = diffError(() =>
+      applyUnifiedDiff('x\n', '--- a\n+++ b\n@@ -1 +1 @@\n-nope\n+yes\n')
+    );
+    expect(applyFail.kind).toBe('patch_apply');
+
+    const verify = diffError(() =>
+      verifySearchReplaceResults('<p>other</p>', [{ old_string: 'a', new_string: 'b' }])
+    );
+    expect(verify.kind).toBe('verification');
+    expect(formatDiffError(verify).suggestion).toContain('normalized');
+  });
+
+  it.each([
+    ['TRILIUM_BUSY', 503, ['Wait']],
+    ['TRILIUM_TIMEOUT', 504, ['create_note', 'search_notes', 'duplicate']],
+    ['RESPONSE_TOO_LARGE', 413, ['Do not retry']],
+    ['METRICS_UNSUPPORTED', 404, ['app_info']],
+    ['EXPORT_TOO_LARGE', 413, ['smaller subtree']],
+  ])('%s has specific guidance', (code, status, needles) => {
+    const s = formatTriliumError(new TriliumClientError(status, code, 'x')).suggestion!;
+    for (const needle of needles) expect(s).toContain(needle);
   });
 });

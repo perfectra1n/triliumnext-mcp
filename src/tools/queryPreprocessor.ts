@@ -64,27 +64,76 @@ export function isBareFulltextSegment(tokens: string[]): boolean {
  * Multiple tokens: `(note.content *=* term1 AND note.content *=* term2)`
  */
 function wrapFulltextSegment(tokens: string[]): string {
-  if (tokens.length === 1) {
-    return `note.content *=* ${tokens[0]}`;
+  // Inside a rewritten expression bare words are no longer fulltext, so the
+  // connectives must be translated rather than wrapped as search terms:
+  // `AND` is implied between conditions (dropped) and `NOT x` negates the
+  // next term. A trailing NOT has nothing to negate and stays a literal word.
+  const conditions: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const lower = tokens[i].toLowerCase();
+    if (lower === 'and') continue;
+    if (lower === 'not' && i + 1 < tokens.length && !isConnective(tokens[i + 1])) {
+      conditions.push(`not(note.content *=* ${tokens[++i]})`);
+      continue;
+    }
+    conditions.push(`note.content *=* ${tokens[i]}`);
   }
-  const wrapped = tokens.map((t) => `note.content *=* ${t}`).join(' AND ');
-  return `(${wrapped})`;
+  if (conditions.length === 0) return tokens.join(' ');
+  if (conditions.length === 1) return conditions[0];
+  return `(${conditions.join(' AND ')})`;
+}
+
+function isConnective(token: string): boolean {
+  const lower = token.toLowerCase();
+  return lower === 'and' || lower === 'not' || lower === 'or';
+}
+
+const QUOTED_TOKEN = /^"(?:[^"\\]|\\.)*"$/;
+
+/** Quote a literal for a Trilium query, escaping `\` and `"` (same grammar as `tokenize`). */
+function quoteLiteral(term: string): string {
+  return `"${term.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+/** Strip the surrounding quotes from a quoted token and undo its escapes. */
+function unquoteToken(token: string): string {
+  return token.slice(1, -1).replace(/\\(.)/g, '$1');
+}
+
+/** Tokens that start a new filter rather than continuing the title text. */
+function isFilterToken(token: string): boolean {
+  return token.startsWith('#') || token.startsWith('~') || token.startsWith('note.');
 }
 
 /**
- * Wrap a title segment in `note.title *=*` form.
- * Automatically quotes multi-word terms.
+ * Rewrite a `title:` segment (first token starts with `title:`) into
+ * `note.title *=* <term>`. The title text runs until the first `#label`,
+ * `~relation` or `note.` token; those trailing filters are kept as-is so
+ * `title:meeting #project` means "title contains meeting AND has #project".
+ *
+ * A single bare word stays unquoted, a single quoted phrase is passed through,
+ * and anything else (several words, embedded quotes) becomes one escaped
+ * quoted literal. Returns null when there is no title text.
  */
-function wrapTitleSegment(term: string): string {
-  // Already quoted
-  if (term.startsWith('"') && term.endsWith('"')) {
-    return `note.title *=* ${term}`;
+function wrapTitleSegment(tokens: string[]): string | null {
+  // Re-tokenize after stripping "title:" — `title:"a b"` tokenizes as
+  // `title:"a` + `b"` because the quote is not at a token boundary.
+  const words = tokenize(tokens.join(' ').slice(6));
+  const filterAt = words.findIndex(isFilterToken);
+  const titleWords = filterAt === -1 ? words : words.slice(0, filterAt);
+  const trailing = filterAt === -1 ? [] : words.slice(filterAt);
+  if (titleWords.length === 0) return null;
+
+  let term: string;
+  if (titleWords.length === 1 && QUOTED_TOKEN.test(titleWords[0])) {
+    term = titleWords[0];
+  } else if (titleWords.length === 1 && !titleWords[0].includes('"')) {
+    term = titleWords[0];
+  } else {
+    const text = titleWords.map((w) => (QUOTED_TOKEN.test(w) ? unquoteToken(w) : w)).join(' ');
+    term = quoteLiteral(text);
   }
-  // Multi-word — auto-quote
-  if (term.includes(' ')) {
-    return `note.title *=* "${term}"`;
-  }
-  return `note.title *=* ${term}`;
+  return [`note.title *=* ${term}`, ...trailing].join(' ');
 }
 
 /**
@@ -123,11 +172,7 @@ function rewriteOrQueries(query: string, tokens: string[]): string {
   const rewritten = segments.map((seg) => {
     // Check for title: prefix within OR segment
     if (seg.length >= 1 && seg[0].toLowerCase().startsWith('title:')) {
-      const firstTokenValue = seg[0].slice(6); // strip "title:"
-      const rest = seg.slice(1).join(' ');
-      const fullTerm = firstTokenValue + (rest ? ' ' + rest : '');
-      if (fullTerm.length === 0) return seg.join(' ');
-      return wrapTitleSegment(fullTerm);
+      return wrapTitleSegment(seg) ?? seg.join(' ');
     }
     if (isBareFulltextSegment(seg)) {
       return wrapFulltextSegment(seg);
@@ -166,11 +211,9 @@ export function preprocessSearchQuery(query: string): PreprocessedQuery {
     // Check if there are any OR operators
     const hasOr = tokens.some((t) => isOrOperator(t));
     if (!hasOr) {
-      const firstTokenValue = tokens[0].slice(6); // strip "title:"
-      const rest = tokens.slice(1).join(' ');
-      const fullTerm = firstTokenValue + (rest ? ' ' + rest : '');
-      if (fullTerm.length > 0) {
-        return { type: 'search', query: wrapTitleSegment(fullTerm) };
+      const wrapped = wrapTitleSegment(tokens);
+      if (wrapped !== null) {
+        return { type: 'search', query: wrapped };
       }
     }
     // If OR present, fall through to OR rewriting which handles title: segments

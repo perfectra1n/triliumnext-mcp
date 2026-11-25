@@ -477,3 +477,78 @@ describe('TriliumClient transport reliability', () => {
     expect(mockFetch.mock.calls[1][0]).toBe('http://t/etapi/metrics?format=json');
   });
 });
+
+describe('TriliumClient hardening', () => {
+  const ok = (body: ArrayBuffer | object, status = 200) => ({
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: '',
+    json: async () => body,
+    arrayBuffer: async () => body,
+    text: async () => '',
+    body: { cancel: async () => undefined },
+  });
+
+  it('percent-encodes IDs interpolated into URL paths', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok({}));
+    const c = new TriliumClient('http://t/etapi', 'tok', undefined, { fetchImpl });
+    await c.getNote('../app-info');
+    await c.getAttachment('a/b?c#d');
+    expect(fetchImpl.mock.calls[0][0]).toBe('http://t/etapi/notes/..%2Fapp-info');
+    expect(fetchImpl.mock.calls[1][0]).toBe('http://t/etapi/attachments/a%2Fb%3Fc%23d');
+  });
+
+  it('uses the injected fetchImpl with redirect: manual', async () => {
+    const fetchImpl = vi.fn().mockResolvedValue(ok({ noteId: 'n1' }));
+    const globalFetch = vi.fn();
+    global.fetch = globalFetch;
+    const c = new TriliumClient('http://t/etapi', 'tok', undefined, { fetchImpl });
+    await c.getNote('n1');
+    expect(globalFetch).not.toHaveBeenCalled();
+    expect(fetchImpl.mock.calls[0][1]).toMatchObject({ redirect: 'manual' });
+  });
+
+  it.each([301, 302, 307, 308])('rejects a %i redirect with TRILIUM_REDIRECT', async (status) => {
+    const fetchImpl = vi.fn().mockResolvedValue({
+      ...ok({}, status),
+      headers: new Headers({ location: 'http://169.254.169.254/' }),
+    });
+    const c = new TriliumClient('http://t/etapi', 'tok', undefined, { fetchImpl, maxRetries: 0 });
+    await expect(c.getNote('n1')).rejects.toMatchObject({
+      name: 'TriliumClientError',
+      code: 'TRILIUM_REDIRECT',
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  describe('attachment content', () => {
+    const client = (bytes: Buffer) => {
+      const ab = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+      return new TriliumClient('http://t/etapi', 'tok', undefined, {
+        fetchImpl: vi.fn().mockResolvedValue(ok(ab)),
+      });
+    };
+
+    it('base64-encodes SVG XML instead of returning it as fake base64', async () => {
+      const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>');
+      expect(await client(svg).getAttachmentContentAsBase64('a1')).toBe(svg.toString('base64'));
+    });
+
+    it('base64-encodes raw image bytes', async () => {
+      const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d]);
+      expect(await client(png).getAttachmentContentAsBase64('a1')).toBe(png.toString('base64'));
+    });
+
+    it('passes through content Trilium stored as base64 text', async () => {
+      const stored = Buffer.from('iVBORw0KGgo=\n');
+      expect(await client(stored).getAttachmentContentAsBase64('a1')).toBe('iVBORw0KGgo=');
+    });
+
+    it('returns raw bytes from getAttachmentContentBinary', async () => {
+      const bytes = Buffer.from([0, 1, 2, 255]);
+      const out = await client(bytes).getAttachmentContentBinary('a1');
+      expect(Buffer.isBuffer(out)).toBe(true);
+      expect(out.equals(bytes)).toBe(true);
+    });
+  });
+});

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { loadConfig, parseDuration } from '../../src/config.js';
+import { loadConfig, parseDuration, ConfigError } from '../../src/config.js';
 
 describe('backend timeout and search config', () => {
   const originalEnv = process.env;
@@ -48,12 +48,25 @@ describe('backend timeout and search config', () => {
     expect(config?.searchStrategy).toBe('fast');
   });
 
-  it('falls back to defaults for invalid values', () => {
+  it('rejects invalid env values instead of silently using the default', () => {
     process.env.TRILIUM_REQUEST_TIMEOUT = 'soon';
+    expect(() => loadConfig([])).toThrow(ConfigError);
+    expect(() => loadConfig([])).toThrow(/TRILIUM_REQUEST_TIMEOUT/);
+    delete process.env.TRILIUM_REQUEST_TIMEOUT;
+
+    process.env.TRILIUM_BUSY_COOLDOWN = '0';
+    expect(() => loadConfig([])).toThrow(/TRILIUM_BUSY_COOLDOWN/);
+    delete process.env.TRILIUM_BUSY_COOLDOWN;
+
     process.env.TRILIUM_SEARCH_STRATEGY = 'thorough';
-    const config = loadConfig([]);
-    expect(config?.requestTimeoutMs).toBe(60_000);
-    expect(config?.searchStrategy).toBe('auto');
+    expect(() => loadConfig([])).toThrow(/Invalid search strategy: "thorough"/);
+    expect(() => loadConfig(['--search-strategy', 'thorough'])).toThrow(ConfigError);
+  });
+
+  it('reads the search strategy case-insensitively', () => {
+    process.env.TRILIUM_SEARCH_STRATEGY = ' FULL ';
+    expect(loadConfig([])?.searchStrategy).toBe('full');
+    expect(loadConfig(['--search-strategy', 'Fast'])?.searchStrategy).toBe('fast');
   });
 });
 
@@ -71,5 +84,26 @@ describe('parseDuration', () => {
 
   it.each(['', 'abc', '-5s', '0', '10h'])('rejects %s', (input) => {
     expect(parseDuration(input)).toBeUndefined();
+  });
+});
+
+describe('backend timeout CLI validation', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv, TRILIUM_TOKEN: 'token' };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it('rejects an invalid --request-timeout instead of silently ignoring it', () => {
+    expect(() => loadConfig(['--request-timeout', 'soon'])).toThrow(/Invalid duration/);
+  });
+
+  it('requires a value for --busy-cooldown and --search-strategy', () => {
+    expect(() => loadConfig(['--busy-cooldown'])).toThrow(/requires a value/);
+    expect(() => loadConfig(['--search-strategy'])).toThrow(/requires a value/);
   });
 });

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { CorsPolicy } from '../../src/http/cors.js';
+import { CorsPolicy, CORS_ALLOWED_HEADERS } from '../../src/http/cors.js';
 
 interface FakeRes {
   statusCode: number;
@@ -75,7 +75,7 @@ describe('CorsPolicy', () => {
       expect(res.headers['access-control-allow-origin']).toBe('https://app.example.com');
       expect(res.headers['vary']).toBe('Origin');
       expect(res.headers['access-control-allow-credentials']).toBe('true');
-      expect(res.headers['access-control-expose-headers']).toContain('MCP-Session-Id');
+      expect(res.headers['access-control-expose-headers']).toContain('Mcp-Session-Id');
     });
 
     it('matches case-insensitively', () => {
@@ -101,14 +101,26 @@ describe('CorsPolicy', () => {
   describe('wildcard origin', () => {
     const cors = new CorsPolicy(['*']);
 
-    it('echoes the request Origin (never literal "*", to keep credentials working)', () => {
+    it('emits literal "*" and never pairs wildcard with Allow-Credentials', () => {
       const res = fakeRes();
       cors.apply(
         fakeReq({ origin: 'https://random.example.com' }),
         res as unknown as ServerResponse
       );
-      expect(res.headers['access-control-allow-origin']).toBe('https://random.example.com');
-      expect(res.headers['access-control-allow-credentials']).toBe('true');
+      expect(res.headers['access-control-allow-origin']).toBe('*');
+      expect(res.headers['access-control-allow-credentials']).toBeUndefined();
+      expect(res.headers['access-control-expose-headers']).toContain('Mcp-Session-Id');
+    });
+
+    it('wildcard preflight also omits credentials', () => {
+      const res = fakeRes();
+      cors.handlePreflight(
+        fakeReq({ origin: 'https://random.example.com' }, 'OPTIONS'),
+        res as unknown as ServerResponse
+      );
+      expect(res.statusCode).toBe(204);
+      expect(res.headers['access-control-allow-origin']).toBe('*');
+      expect(res.headers['access-control-allow-credentials']).toBeUndefined();
     });
   });
 
@@ -132,8 +144,28 @@ describe('CorsPolicy', () => {
       expect(res.statusCode).toBe(204);
       expect(res.headers['access-control-allow-origin']).toBe('https://app.example.com');
       expect(res.headers['access-control-allow-methods']).toBe('POST');
-      // Echoes the requested headers back rather than guessing.
-      expect(res.headers['access-control-allow-headers']).toBe('authorization, content-type');
+      // A fixed list — never a reflection of Access-Control-Request-Headers.
+      expect(res.headers['access-control-allow-headers']).toBe(CORS_ALLOWED_HEADERS);
+      expect(res.headers['access-control-allow-credentials']).toBe('true');
+    });
+
+    it('does not reflect arbitrary requested headers', () => {
+      const res = fakeRes();
+      cors.handlePreflight(
+        fakeReq(
+          {
+            origin: 'https://app.example.com',
+            'access-control-request-method': 'POST',
+            'access-control-request-headers': 'x-evil-header',
+          },
+          'OPTIONS'
+        ),
+        res as unknown as ServerResponse
+      );
+      expect(res.headers['access-control-allow-headers']).not.toContain('x-evil-header');
+      for (const h of ['MCP-Protocol-Version', 'Last-Event-ID', 'Mcp-Session-Id']) {
+        expect(res.headers['access-control-allow-headers']).toContain(h);
+      }
       expect(res.headers['access-control-max-age']).toBe('600');
     });
 
@@ -146,7 +178,7 @@ describe('CorsPolicy', () => {
       expect(res.headers['access-control-allow-headers']).toContain('Authorization');
       expect(res.headers['access-control-allow-headers']).toContain('X-Trilium-Url');
       expect(res.headers['access-control-allow-headers']).toContain('X-Trilium-Token');
-      expect(res.headers['access-control-allow-headers']).toContain('MCP-Session-Id');
+      expect(res.headers['access-control-allow-headers']).toContain('Mcp-Session-Id');
     });
 
     it('returns 403 for an OPTIONS request from a disallowed origin', () => {

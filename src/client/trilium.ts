@@ -50,6 +50,27 @@ export class TriliumClientError extends Error {
   }
 }
 
+/**
+ * A Trilium response body was larger than the caller (or the client-wide
+ * `maxResponseBytes`) allows. Raised before the body is fully buffered, so an
+ * oversized blob never sits in memory. `sizeBytes` is the declared
+ * Content-Length, or the bytes read when the read was cut off (a lower bound).
+ */
+export class TriliumResponseTooLargeError extends TriliumClientError {
+  constructor(
+    public readonly sizeBytes: number,
+    public readonly maxBytes: number,
+    what: string
+  ) {
+    super(
+      413,
+      'RESPONSE_TOO_LARGE',
+      `Trilium's response to ${what} is ${sizeBytes} bytes or more, over the ${maxBytes}-byte limit.`
+    );
+    this.name = 'TriliumResponseTooLargeError';
+  }
+}
+
 /** Transport-level tuning for {@link TriliumClient}. All fields are optional. */
 export interface TriliumClientOptions {
   /** Per-request timeout in ms (default 60s). Export/import get 5x this. */
@@ -65,18 +86,65 @@ export interface TriliumClientOptions {
   busyCooldownMs?: number;
   /** Timeout for cheap requests while the host is marked busy (default 5s). */
   busyProbeTimeoutMs?: number;
+  /**
+   * Largest response body any request may buffer (default 64 MiB). Bodies over
+   * this are refused from their Content-Length, or cut off mid-stream, instead
+   * of being read into memory. Per-call `maxBytes` caps can only lower it.
+   */
+  maxResponseBytes?: number;
+  /**
+   * fetch implementation used for every request (default: the global `fetch`,
+   * resolved per call). Lets the host inject an SSRF-guarded fetch (the HTTP
+   * transport does so for multi-tenant clients).
+   */
+  fetchImpl?: FetchLike;
 }
+
+/** The subset of `fetch` the client uses: always a string URL plus init. */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
 export const DEFAULT_BUSY_PROBE_TIMEOUT_MS = 5_000;
+export const DEFAULT_MAX_RETRIES = 2;
+export const DEFAULT_RETRY_DELAY_MS = 250;
+export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 /** Map server config onto client options; unset fields keep the client defaults. */
 export function clientOptionsFromConfig(config: {
   requestTimeoutMs?: number;
   busyCooldownMs?: number;
+  busyProbeTimeoutMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  maxResponseBytes?: number;
 }): TriliumClientOptions {
-  return { timeoutMs: config.requestTimeoutMs, busyCooldownMs: config.busyCooldownMs };
+  return {
+    timeoutMs: config.requestTimeoutMs,
+    busyCooldownMs: config.busyCooldownMs,
+    busyProbeTimeoutMs: config.busyProbeTimeoutMs,
+    maxRetries: config.maxRetries,
+    retryDelayMs: config.retryDelayMs,
+    maxResponseBytes: config.maxResponseBytes,
+  };
+}
+
+/** Percent-encode an ID before it is interpolated into an ETAPI URL path. */
+const seg = (id: string): string => encodeURIComponent(id);
+
+/**
+ * Detect content Trilium stored as base64 *text* (attachments created through
+ * ETAPI with a base64 string body) as opposed to raw bytes. Only pure base64
+ * alphabet bytes that decode cleanly qualify; anything else (SVG/XML, raw
+ * binary) is real content and must be encoded by us.
+ */
+function decodeStoredBase64(bytes: Buffer): string | null {
+  if (bytes.length === 0) return null;
+  const text = bytes.toString('latin1');
+  if (!/^[A-Za-z0-9+/=\s]+$/.test(text)) return null;
+  const cleaned = text.replace(/\s+/g, '');
+  if (cleaned.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(cleaned)) return null;
+  return cleaned;
 }
 
 /**
@@ -90,6 +158,61 @@ const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Error bodies are a few hundred bytes of JSON; anything bigger is not worth reading. */
+const ERROR_BODY_MAX_BYTES = 64 * 1024;
+
+type ResponseType = 'json' | 'text' | 'buffer';
+
+/**
+ * Read and decode a response body, refusing it as soon as it is known to be
+ * over `maxBytes`: up front from Content-Length, otherwise while streaming
+ * (Content-Length can be absent or lie). This is what keeps one huge blob from
+ * being buffered whole — and then copied again as text or base64.
+ */
+async function readBodyCapped<T>(
+  response: Response,
+  responseType: ResponseType,
+  maxBytes: number,
+  what: string
+): Promise<T> {
+  const declared = Number(response.headers?.get?.('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new TriliumResponseTooLargeError(declared, maxBytes, what);
+  }
+
+  const body = response.body;
+  if (!body || typeof body.getReader !== 'function') {
+    // No stream to meter (an empty body, or a minimal fetch shim): use the
+    // whole-body readers, still enforcing the cap on what came back.
+    if (responseType === 'json') return (await response.json()) as T;
+    const buf =
+      responseType === 'buffer'
+        ? Buffer.from(await response.arrayBuffer())
+        : Buffer.from(await response.text(), 'utf8');
+    if (buf.length > maxBytes) throw new TriliumResponseTooLargeError(buf.length, maxBytes, what);
+    return (responseType === 'buffer' ? buf : buf.toString('utf8')) as T;
+  }
+
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new TriliumResponseTooLargeError(total, maxBytes, what);
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
+  const buf = Buffer.concat(chunks, total);
+  if (responseType === 'buffer') return buf as T;
+  const text = buf.toString('utf8');
+  return (responseType === 'text' ? text : JSON.parse(text)) as T;
+}
+
 export class TriliumClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -99,8 +222,10 @@ export class TriliumClient {
   private readonly retryDelayMs: number;
   private readonly busyCooldownMs: number;
   private readonly busyProbeTimeoutMs: number;
+  private readonly maxResponseBytes: number;
   /** In-flight requests are only shared between callers holding the same token. */
   private readonly dedupeScope: string;
+  private readonly fetchImpl?: FetchLike;
 
   /**
    * @param baseUrl  ETAPI base URL (e.g. `http://host:port/etapi`).
@@ -119,8 +244,10 @@ export class TriliumClient {
     this.token = token;
     this.webBaseUrl = (webBaseUrl ?? baseUrl).replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = options.maxRetries ?? 2;
-    this.retryDelayMs = options.retryDelayMs ?? 250;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
+    this.fetchImpl = options.fetchImpl;
     this.busyCooldownMs = options.busyCooldownMs ?? DEFAULT_BUSY_COOLDOWN_MS;
     this.busyProbeTimeoutMs = options.busyProbeTimeoutMs ?? DEFAULT_BUSY_PROBE_TIMEOUT_MS;
     const tokenTag = createHash('sha256').update(token).digest('hex').slice(0, 16);
@@ -235,9 +362,11 @@ export class TriliumClient {
       body?: unknown;
       query?: Record<string, string | number | boolean | undefined>;
       contentType?: string;
-      responseType?: 'json' | 'text' | 'arraybuffer';
+      responseType?: ResponseType;
       /** Multiplier on the client timeout for slow endpoints (export/import). */
       timeoutFactor?: number;
+      /** Refuse a response body larger than this (never above `maxResponseBytes`). */
+      maxBytes?: number;
       /**
        * Slow on Trilium's side (a full-text search). Refused outright while the
        * host is marked busy, because it would queue behind the request that is
@@ -255,6 +384,7 @@ export class TriliumClient {
       responseType = 'json',
       timeoutFactor = 1,
       expensive = false,
+      maxBytes,
     } = options;
 
     let url = `${this.baseUrl}${path}`;
@@ -283,6 +413,9 @@ export class TriliumClient {
     const init: RequestInit = {
       method,
       headers,
+      // ETAPI never legitimately redirects; following one would let a
+      // tenant-supplied base URL bounce requests (with the token) elsewhere.
+      redirect: 'manual',
       body:
         body !== undefined
           ? body instanceof Buffer || body instanceof Uint8Array
@@ -294,7 +427,12 @@ export class TriliumClient {
     };
 
     const send = (): Promise<T> =>
-      this.send<T>(method, path, url, init, { responseType, timeoutFactor, expensive });
+      this.send<T>(method, path, url, init, {
+        responseType,
+        timeoutFactor,
+        expensive,
+        maxBytes: Math.min(maxBytes ?? Infinity, this.maxResponseBytes),
+      });
     if (options.dedupe && method === 'GET') {
       // Each caller gets its own copy: tool handlers decorate results in place.
       return dedupe(`${this.dedupeScope}|${url}`, send).then((value) => structuredClone(value));
@@ -308,12 +446,13 @@ export class TriliumClient {
     url: string,
     init: RequestInit,
     opts: {
-      responseType: 'json' | 'text' | 'arraybuffer';
+      responseType: ResponseType;
       timeoutFactor: number;
       expensive: boolean;
+      maxBytes: number;
     }
   ): Promise<T> {
-    const { responseType, timeoutFactor, expensive } = opts;
+    const { responseType, timeoutFactor, expensive, maxBytes } = opts;
     const busyBefore = getBusy(this.baseUrl);
     if (busyBefore && expensive) {
       throw this.busyError(busyBefore);
@@ -327,7 +466,8 @@ export class TriliumClient {
     let attempt = 0;
     for (; ; attempt++) {
       try {
-        response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
+        const doFetch = this.fetchImpl ?? globalThis.fetch;
+        response = await doFetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
       } catch (error) {
         const timedOut =
           error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError');
@@ -369,10 +509,29 @@ export class TriliumClient {
       return undefined as T;
     }
 
+    // With redirect: 'manual', undici yields the 3xx itself (or an opaque
+    // redirect with status 0 in browser-like runtimes).
+    if ((response.status >= 300 && response.status < 400) || response.type === 'opaqueredirect') {
+      await response.body?.cancel().catch(() => undefined);
+      throw new TriliumClientError(
+        502,
+        'TRILIUM_REDIRECT',
+        `Trilium answered ${method} ${path} with a redirect (HTTP ${response.status}); ` +
+          'ETAPI never redirects, so the configured Trilium URL is likely wrong (check scheme, host and the /etapi suffix).'
+      );
+    }
+
     if (!response.ok) {
       let errorData: Partial<EtapiError> = {};
       try {
-        errorData = (await response.json()) as EtapiError;
+        // Error bodies are small; never buffer a large one (a tenant-supplied
+        // URL may point at anything).
+        errorData = await readBodyCapped<EtapiError>(
+          response,
+          'json',
+          ERROR_BODY_MAX_BYTES,
+          `${method} ${path}`
+        );
       } catch {
         // Non-JSON error body (e.g. a reverse proxy's HTML page) — fall through.
       }
@@ -391,13 +550,7 @@ export class TriliumClient {
     // The timeout signal stays armed while the body streams, so a slow body
     // read aborts too — map it like a timeout on the request itself.
     try {
-      if (responseType === 'text') {
-        return (await response.text()) as T;
-      }
-      if (responseType === 'arraybuffer') {
-        return (await response.arrayBuffer()) as T;
-      }
-      return (await response.json()) as T;
+      return await readBodyCapped<T>(response, responseType, maxBytes, `${method} ${path}`);
     } catch (error) {
       if (
         error instanceof Error &&
@@ -420,41 +573,49 @@ export class TriliumClient {
   }
 
   async getNote(noteId: EntityId): Promise<Note> {
-    return this.request<Note>('GET', `/notes/${noteId}`);
+    return this.request<Note>('GET', `/notes/${seg(noteId)}`);
   }
 
   async getNoteContent(noteId: EntityId): Promise<string> {
-    return this.request<string>('GET', `/notes/${noteId}/content`, { responseType: 'text' });
+    return this.request<string>('GET', `/notes/${seg(noteId)}/content`, { responseType: 'text' });
+  }
+
+  /** Raw stored bytes of a note, refused when larger than `maxBytes`. */
+  async getNoteContentBinary(noteId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/notes/${seg(noteId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
+    });
   }
 
   async updateNote(noteId: EntityId, patch: PatchNoteDef): Promise<Note> {
-    return this.request<Note>('PATCH', `/notes/${noteId}`, { body: patch });
+    return this.request<Note>('PATCH', `/notes/${seg(noteId)}`, { body: patch });
   }
 
   async updateNoteContent(noteId: EntityId, content: string): Promise<void> {
-    await this.request<undefined>('PUT', `/notes/${noteId}/content`, {
+    await this.request<undefined>('PUT', `/notes/${seg(noteId)}/content`, {
       body: content,
       contentType: 'text/plain',
     });
   }
 
   async updateNoteContentBinary(noteId: EntityId, content: Buffer): Promise<void> {
-    await this.request<undefined>('PUT', `/notes/${noteId}/content`, {
+    await this.request<undefined>('PUT', `/notes/${seg(noteId)}/content`, {
       body: content,
       contentType: 'application/octet-stream',
     });
   }
 
   async deleteNote(noteId: EntityId): Promise<void> {
-    await this.request<undefined>('DELETE', `/notes/${noteId}`);
+    await this.request<undefined>('DELETE', `/notes/${seg(noteId)}`);
   }
 
   async undeleteNote(noteId: EntityId): Promise<UndeleteResponse> {
-    return this.request<UndeleteResponse>('POST', `/notes/${noteId}/undelete`);
+    return this.request<UndeleteResponse>('POST', `/notes/${seg(noteId)}/undelete`);
   }
 
   async getNoteAttachments(noteId: EntityId): Promise<Attachment[]> {
-    return this.request<Attachment[]>('GET', `/notes/${noteId}/attachments`);
+    return this.request<Attachment[]>('GET', `/notes/${seg(noteId)}/attachments`);
   }
 
   async getNoteHistory(ancestorNoteId?: EntityId): Promise<RecentChange[]> {
@@ -493,19 +654,19 @@ export class TriliumClient {
   }
 
   async getBranch(branchId: EntityId): Promise<Branch> {
-    return this.request<Branch>('GET', `/branches/${branchId}`);
+    return this.request<Branch>('GET', `/branches/${seg(branchId)}`);
   }
 
   async updateBranch(branchId: EntityId, patch: PatchBranchDef): Promise<Branch> {
-    return this.request<Branch>('PATCH', `/branches/${branchId}`, { body: patch });
+    return this.request<Branch>('PATCH', `/branches/${seg(branchId)}`, { body: patch });
   }
 
   async deleteBranch(branchId: EntityId): Promise<void> {
-    await this.request<undefined>('DELETE', `/branches/${branchId}`);
+    await this.request<undefined>('DELETE', `/branches/${seg(branchId)}`);
   }
 
   async refreshNoteOrdering(parentNoteId: EntityId): Promise<void> {
-    await this.request<undefined>('POST', `/refresh-note-ordering/${parentNoteId}`);
+    await this.request<undefined>('POST', `/refresh-note-ordering/${seg(parentNoteId)}`);
   }
 
   // ==================== Attributes ====================
@@ -515,42 +676,42 @@ export class TriliumClient {
   }
 
   async getAttribute(attributeId: EntityId): Promise<Attribute> {
-    return this.request<Attribute>('GET', `/attributes/${attributeId}`);
+    return this.request<Attribute>('GET', `/attributes/${seg(attributeId)}`);
   }
 
   async updateAttribute(attributeId: EntityId, patch: PatchAttributeDef): Promise<Attribute> {
-    return this.request<Attribute>('PATCH', `/attributes/${attributeId}`, { body: patch });
+    return this.request<Attribute>('PATCH', `/attributes/${seg(attributeId)}`, { body: patch });
   }
 
   async deleteAttribute(attributeId: EntityId): Promise<void> {
-    await this.request<undefined>('DELETE', `/attributes/${attributeId}`);
+    await this.request<undefined>('DELETE', `/attributes/${seg(attributeId)}`);
   }
 
   // ==================== Calendar ====================
 
   async getDayNote(date: string): Promise<Note> {
-    return this.request<Note>('GET', `/calendar/days/${date}`);
+    return this.request<Note>('GET', `/calendar/days/${seg(date)}`);
   }
 
   async getWeekNote(week: string): Promise<Note> {
-    return this.request<Note>('GET', `/calendar/weeks/${week}`);
+    return this.request<Note>('GET', `/calendar/weeks/${seg(week)}`);
   }
 
   async getMonthNote(month: string): Promise<Note> {
-    return this.request<Note>('GET', `/calendar/months/${month}`);
+    return this.request<Note>('GET', `/calendar/months/${seg(month)}`);
   }
 
   async getYearNote(year: string): Promise<Note> {
-    return this.request<Note>('GET', `/calendar/years/${year}`);
+    return this.request<Note>('GET', `/calendar/years/${seg(year)}`);
   }
 
   /** Day note for the first day of the week containing `date` (honours the configured first weekday). */
   async getWeekFirstDayNote(date: string): Promise<Note> {
-    return this.request<Note>('GET', `/calendar/week-first-day/${date}`);
+    return this.request<Note>('GET', `/calendar/week-first-day/${seg(date)}`);
   }
 
   async getInboxNote(date: string): Promise<Note> {
-    return this.request<Note>('GET', `/inbox/${date}`);
+    return this.request<Note>('GET', `/inbox/${seg(date)}`);
   }
 
   // ==================== App Info ====================
@@ -569,50 +730,56 @@ export class TriliumClient {
   // ==================== Revisions ====================
 
   async createRevision(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<void> {
-    await this.request<undefined>('POST', `/notes/${noteId}/revision`, {
+    await this.request<undefined>('POST', `/notes/${seg(noteId)}/revision`, {
       query: { format },
     });
   }
 
   async getNoteRevisions(noteId: EntityId): Promise<Revision[]> {
-    return this.request<Revision[]>('GET', `/notes/${noteId}/revisions`);
+    return this.request<Revision[]>('GET', `/notes/${seg(noteId)}/revisions`);
   }
 
   async getRevision(revisionId: EntityId): Promise<Revision> {
-    return this.request<Revision>('GET', `/revisions/${revisionId}`);
+    return this.request<Revision>('GET', `/revisions/${seg(revisionId)}`);
   }
 
   async getRevisionContent(revisionId: EntityId): Promise<string> {
-    return this.request<string>('GET', `/revisions/${revisionId}/content`, {
+    return this.request<string>('GET', `/revisions/${seg(revisionId)}/content`, {
       responseType: 'text',
     });
   }
 
-  async getRevisionContentBinary(revisionId: EntityId): Promise<Buffer> {
-    const buffer = await this.request<ArrayBuffer>('GET', `/revisions/${revisionId}/content`, {
-      responseType: 'arraybuffer',
+  async getRevisionContentBinary(revisionId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/revisions/${seg(revisionId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
     });
-    return Buffer.from(buffer);
   }
 
   // ==================== Backup ====================
 
   async createBackup(backupName: string): Promise<void> {
-    await this.request<undefined>('PUT', `/backup/${backupName}`, { timeoutFactor: 5 });
+    await this.request<undefined>('PUT', `/backup/${seg(backupName)}`, { timeoutFactor: 5 });
   }
 
   // ==================== Export / Import ====================
 
-  async exportNote(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<ArrayBuffer> {
-    return this.request<ArrayBuffer>('GET', `/notes/${noteId}/export`, {
+  /** Export a subtree as a ZIP, refused (before buffering) when larger than `maxBytes`. */
+  async exportNote(
+    noteId: EntityId,
+    format: 'html' | 'markdown' = 'html',
+    maxBytes?: number
+  ): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/notes/${seg(noteId)}/export`, {
       query: { format },
-      responseType: 'arraybuffer',
+      responseType: 'buffer',
       timeoutFactor: 5,
+      maxBytes,
     });
   }
 
   async importZip(noteId: EntityId, data: Buffer): Promise<NoteWithBranch> {
-    return this.request<NoteWithBranch>('POST', `/notes/${noteId}/import`, {
+    return this.request<NoteWithBranch>('POST', `/notes/${seg(noteId)}/import`, {
       body: data,
       contentType: 'application/octet-stream',
       timeoutFactor: 5,
@@ -626,57 +793,60 @@ export class TriliumClient {
   }
 
   async getAttachment(attachmentId: EntityId): Promise<Attachment> {
-    return this.request<Attachment>('GET', `/attachments/${attachmentId}`);
+    return this.request<Attachment>('GET', `/attachments/${seg(attachmentId)}`);
   }
 
   async updateAttachment(attachmentId: EntityId, patch: PatchAttachmentDef): Promise<Attachment> {
-    return this.request<Attachment>('PATCH', `/attachments/${attachmentId}`, { body: patch });
+    return this.request<Attachment>('PATCH', `/attachments/${seg(attachmentId)}`, { body: patch });
   }
 
   async deleteAttachment(attachmentId: EntityId): Promise<void> {
-    await this.request<undefined>('DELETE', `/attachments/${attachmentId}`);
+    await this.request<undefined>('DELETE', `/attachments/${seg(attachmentId)}`);
   }
 
   async getAttachmentContent(attachmentId: EntityId): Promise<string> {
-    return this.request<string>('GET', `/attachments/${attachmentId}/content`, {
+    return this.request<string>('GET', `/attachments/${seg(attachmentId)}/content`, {
       responseType: 'text',
     });
   }
 
-  async getAttachmentContentAsBase64(attachmentId: EntityId): Promise<string> {
-    const buffer = await this.request<ArrayBuffer>('GET', `/attachments/${attachmentId}/content`, {
-      responseType: 'arraybuffer',
+  /**
+   * Raw stored bytes of an attachment, exactly as Trilium returns them. With
+   * `maxBytes`, a larger body is refused with {@link TriliumResponseTooLargeError}
+   * before it is buffered.
+   */
+  async getAttachmentContentBinary(attachmentId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/attachments/${seg(attachmentId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
     });
-    const bytes = new Uint8Array(buffer);
+  }
 
-    // Use file-type library to detect if content is raw binary image
-    // vs already base64-encoded text (created via ETAPI)
-    const fileType = await fileTypeFromBuffer(bytes);
-
-    if (fileType && fileType.mime.startsWith('image/')) {
-      // Content is raw binary - convert to base64
-      let binary = '';
-      for (let i = 0; i < bytes.byteLength; i++) {
-        binary += String.fromCharCode(bytes[i]);
-      }
-      return btoa(binary);
+  /**
+   * Attachment content as base64. Attachments uploaded as bytes are encoded
+   * here; attachments created through ETAPI with a base64 *string* body are
+   * stored as that text, so those are returned as-is. Text formats such as
+   * SVG are never mistaken for pre-encoded base64. `maxBytes` bounds the
+   * stored bytes (see {@link getAttachmentContentBinary}).
+   */
+  async getAttachmentContentAsBase64(attachmentId: EntityId, maxBytes?: number): Promise<string> {
+    const bytes = await this.getAttachmentContentBinary(attachmentId, maxBytes);
+    // Recognisable binary formats (PNG, JPEG, ...) are raw bytes by definition.
+    if (await fileTypeFromBuffer(bytes)) {
+      return bytes.toString('base64');
     }
-
-    // Content is already base64-encoded (stored as text via ETAPI)
-    // Just decode the bytes as UTF-8 text
-    const decoder = new TextDecoder('utf-8');
-    return decoder.decode(buffer);
+    return decodeStoredBase64(bytes) ?? bytes.toString('base64');
   }
 
   async updateAttachmentContent(attachmentId: EntityId, content: string): Promise<void> {
-    await this.request<undefined>('PUT', `/attachments/${attachmentId}/content`, {
+    await this.request<undefined>('PUT', `/attachments/${seg(attachmentId)}/content`, {
       body: content,
       contentType: 'text/plain',
     });
   }
 
   async updateAttachmentContentBinary(attachmentId: EntityId, content: Buffer): Promise<void> {
-    await this.request<undefined>('PUT', `/attachments/${attachmentId}/content`, {
+    await this.request<undefined>('PUT', `/attachments/${seg(attachmentId)}/content`, {
       body: content,
       contentType: 'application/octet-stream',
     });

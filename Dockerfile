@@ -22,6 +22,12 @@ RUN npm ci --omit=dev
 COPY --chown=node:node --from=builder /app/dist ./dist
 
 ENV NODE_ENV=production
+# The server binds to 127.0.0.1 by default, which is unreachable through a
+# published container port. Listen on all interfaces inside the container;
+# with no TRILIUM_ALLOWED_HOSTS set, a non-loopback bind skips the Host-header
+# check, so a reverse proxy can forward any public hostname. Override with
+# TRILIUM_HTTP_HOST / --host if needed.
+ENV TRILIUM_HTTP_HOST=0.0.0.0
 
 USER node
 

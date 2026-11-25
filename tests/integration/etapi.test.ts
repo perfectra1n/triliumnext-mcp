@@ -730,13 +730,12 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       const data = await client.exportNote(note.note.noteId, 'html');
 
-      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(Buffer.isBuffer(data)).toBe(true);
       expect(data.byteLength).toBeGreaterThan(0);
 
       // Check ZIP magic bytes
-      const bytes = new Uint8Array(data);
-      expect(bytes[0]).toBe(0x50); // P
-      expect(bytes[1]).toBe(0x4b); // K
+      expect(data[0]).toBe(0x50); // P
+      expect(data[1]).toBe(0x4b); // K
     });
 
     it('export_note - should export as markdown format', async () => {
@@ -749,7 +748,7 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       const data = await client.exportNote(note.note.noteId, 'markdown');
 
-      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(Buffer.isBuffer(data)).toBe(true);
       expect(data.byteLength).toBeGreaterThan(0);
     });
   });
@@ -920,13 +919,18 @@ describe('TriliumNext ETAPI Integration Tests', () => {
       // Attach a 1x1 PNG pixel
       const pngBase64 =
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
-      await client.createAttachment({
+      const attachment = await client.createAttachment({
         ownerId: noteId,
         role: 'image',
         mime: 'image/png',
         title: 'pixel.png',
         content: pngBase64,
       });
+      // get_note inlines only images the body actually embeds.
+      await client.updateNoteContent(
+        noteId,
+        `<p>Note with an attached image</p><img src="api/attachments/${attachment.attachmentId}/image/pixel.png">`
+      );
 
       // include_content=true ensures we exercise the embedded-image block path
       const result = await handleNoteTool(client, 'get_note', { noteId, include_content: true });

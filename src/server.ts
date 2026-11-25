@@ -15,19 +15,46 @@ import {
 import { DiffApplicationError } from './tools/diff.js';
 import { configureContentInput, ContentNormalizationError } from './tools/contentInput.js';
 import type { Config } from './config.js';
-import { deriveWebBaseUrl } from './config.js';
+import type { ToolHandlerResult } from './tools/schemas.js';
+import type { ToolContext } from './tools/context.js';
+import { deriveWebBaseUrl, TUNABLE_DEFAULTS } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
-import { registerNoteTools, handleNoteTool } from './tools/notes.js';
+import { SERVER_VERSION } from './version.js';
+import { registerNoteTools, handleNoteTool, configureNoteTools } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool, configureSearch } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from './tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
-import { registerSystemTools, handleSystemTool } from './tools/system.js';
-import { registerAttachmentTools, handleAttachmentTool } from './tools/attachments.js';
+import { registerSystemTools, handleSystemTool, configureSystemTools } from './tools/system.js';
+import {
+  registerAttachmentTools,
+  handleAttachmentTool,
+  configureAttachmentTools,
+} from './tools/attachments.js';
+import { configureContentLimits } from './tools/contentLimits.js';
 import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js';
 import { startHttp } from './http/server.js';
 import { redactArgs, type Logger } from './utils/logger.js';
 import type { Metrics } from './http/metrics.js';
+
+type ToolHandler = (
+  client: TriliumClient,
+  name: string,
+  args: unknown,
+  ctx: ToolContext
+) => Promise<ToolHandlerResult>;
+
+/** Each handler returns null for names it does not own; the first non-null result wins. */
+const TOOL_HANDLERS: ToolHandler[] = [
+  handleNoteTool,
+  handleSearchTool,
+  handleOrganizationTool,
+  handleAttributeTool,
+  handleCalendarTool,
+  handleSystemTool,
+  handleAttachmentTool,
+  handleRevisionTool,
+];
 
 export interface McpServerContext {
   logger: Logger;
@@ -46,8 +73,6 @@ export interface McpServerContext {
   progressIntervalMs?: number;
 }
 
-const DEFAULT_PROGRESS_INTERVAL_MS = 10_000;
-
 /**
  * Builds a fully-configured MCP Server bound to the given Trilium client.
  * One instance per logical connection: in multi-tenant SSE mode each SSE
@@ -60,12 +85,12 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     sessionId,
     metrics,
     principal,
-    progressIntervalMs = DEFAULT_PROGRESS_INTERVAL_MS,
+    progressIntervalMs = TUNABLE_DEFAULTS.progressIntervalMs,
   } = ctx;
   const server = new Server(
     {
       name: 'triliumnext-mcp',
-      version: '1.0.0',
+      version: SERVER_VERSION,
     },
     {
       capabilities: {
@@ -87,6 +112,8 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     ...registerOrganizationTools(), // organize_note
     ...registerSystemTools(), // create_revision, manage_system
   ];
+
+  const toolNames = new Set(allTools.map((t) => t.name));
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     logger.info('list_tools', { session: sessionId, principal, count: allTools.length });
@@ -111,12 +138,20 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
       message: outcome.message,
     });
     if (metrics) {
+      // Unknown names collapse to one label so arbitrary client input cannot
+      // blow up metric cardinality (the log line above keeps the raw name).
+      const label = toolNames.has(tool) ? tool : 'unknown';
       const okLabel = outcome.ok ? 'true' : 'false';
       const errorLabel = outcome.ok ? 'none' : (outcome.error ?? 'unknown');
-      metrics.toolCallsTotal.inc({ tool, ok: okLabel, error: errorLabel });
-      metrics.toolCallDuration.observe({ tool }, durationMs / 1000);
+      metrics.toolCallsTotal.inc({ tool: label, ok: okLabel, error: errorLabel });
+      metrics.toolCallDuration.observe({ tool: label }, durationMs / 1000);
       if (metrics.toolCallsByPrincipalTotal && principal) {
-        metrics.toolCallsByPrincipalTotal.inc({ principal, tool, ok: okLabel, error: errorLabel });
+        metrics.toolCallsByPrincipalTotal.inc({
+          principal,
+          tool: label,
+          ok: okLabel,
+          error: errorLabel,
+        });
       }
     }
   };
@@ -154,61 +189,22 @@ export function buildMcpServer(client: TriliumClient, ctx: McpServerContext): Se
     });
 
     try {
-      let result: {
-        content: Array<
-          { type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }
-        >;
-      } | null = await handleNoteTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleSearchTool(client, name, args, { progress });
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleOrganizationTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleAttributeTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleCalendarTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleSystemTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleAttachmentTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
-      }
-
-      result = await handleRevisionTool(client, name, args);
-      if (result !== null) {
-        recordToolCall(name, t0, { ok: true });
-        return result;
+      for (const handle of TOOL_HANDLERS) {
+        const result = await handle(client, name, args, { progress });
+        if (result !== null) {
+          recordToolCall(name, t0, { ok: true });
+          return result;
+        }
       }
 
       recordToolCall(name, t0, { ok: false, error: 'unknown_tool' });
       return {
-        content: [{ type: 'text', text: `Unknown tool: ${name}` }],
+        content: [
+          {
+            type: 'text',
+            text: `Unknown tool: ${name}. Valid tools: ${[...toolNames].join(', ')}.`,
+          },
+        ],
         isError: true,
       };
     } catch (error) {
@@ -258,23 +254,66 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
     config.publicUrl ?? deriveWebBaseUrl(config.triliumUrl),
     clientOptionsFromConfig(config)
   );
-  const server = buildMcpServer(client, { logger, sessionId: 'stdio' });
+  const server = buildMcpServer(client, {
+    logger,
+    sessionId: 'stdio',
+    progressIntervalMs: config.progressIntervalMs,
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info('server_started', { transport: 'stdio' });
 }
 
-export async function createServer(config: Config, logger: Logger): Promise<void> {
+/**
+ * Apply the process-wide tool settings from config. Must run before any
+ * buildMcpServer call: tool descriptions and schemas interpolate these limits
+ * at registration time. Unset (undefined) fields keep each module's default.
+ */
+export function configureTools(config: Config): void {
   // Content-input policy is process-wide: both transports share it, and tool
   // handlers pick it up via the contentInput module rather than a threaded arg.
   configureContentInput({
     allowLocalFileRead: config.allowLocalFileRead,
     localFileRoots: config.localFileRoots,
-    urlGuard: { allowlist: config.contentUrlAllowlist, allowPrivate: config.allowPrivateUrls },
+    // Content URLs are LLM-chosen, so they have their own private-network
+    // switch; the fallback mirrors loadConfig for embedders that omit it.
+    urlGuard: {
+      allowlist: config.contentUrlAllowlist,
+      allowPrivate:
+        config.contentAllowPrivateUrls ?? (config.multiTenant ? false : config.allowPrivateUrls),
+    },
     maxBytes: config.maxContentFetchBytes,
-    fetchTimeoutMs: 30_000,
+    fetchTimeoutMs: config.contentFetchTimeoutMs ?? TUNABLE_DEFAULTS.contentFetchTimeoutMs,
   });
-  configureSearch({ defaultStrategy: config.searchStrategy });
+  // Before configureNoteTools: get_note's schema defaults to the char cap.
+  configureContentLimits({ contentCharCap: config.contentCharCap });
+  configureNoteTools({
+    noteImageMaxBytes: config.maxNoteImageBytes,
+    noteImagesTotalMaxBytes: config.maxNoteImagesTotalBytes,
+    contentMaxCharsLimit: config.contentMaxCharsLimit,
+    maxPaths: config.noteMaxPaths,
+    maxBacklinks: config.noteMaxBacklinks,
+    historyLimit: config.historyLimit,
+    historyMaxLimit: config.historyMaxLimit,
+  });
+  configureAttachmentTools({ maxInlineAttachmentBytes: config.maxInlineAttachmentBytes });
+  configureSystemTools({ maxExportBytes: config.maxExportBytes });
+  configureSearch({
+    defaultStrategy: config.searchStrategy,
+    defaultLimit: config.defaultSearchLimit,
+    maxLimit: config.maxSearchLimit,
+    fastFirstMinResults: config.searchFastMinResults,
+    maxPreviewResults: config.searchPreviewMaxResults,
+    fetchConcurrency: config.fetchConcurrency,
+    maxTreeNotes: config.treeMaxNotes,
+    fuzzyMaxTerms: config.fuzzyMaxTerms,
+    fuzzyRecallMultiplier: config.fuzzyRecallMultiplier,
+    fuzzyRecallCap: config.fuzzyRecallCap,
+  });
+}
+
+export async function createServer(config: Config, logger: Logger): Promise<void> {
+  configureTools(config);
 
   if (config.transport === 'stdio') {
     await startStdio(config, logger);

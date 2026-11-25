@@ -1,4 +1,5 @@
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { promises as fsp } from 'node:fs';
 import { mkdtemp, writeFile, rm, symlink } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir, homedir } from 'node:os';
@@ -415,6 +416,97 @@ describe('resolveContentInput: local paths', () => {
   });
 });
 
+describe('resolveContentInput: local-file policy hardening', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('never touches the filesystem when local reads are disabled', async () => {
+    const statSpy = vi.spyOn(fsp, 'stat');
+    const realpathSpy = vi.spyOn(fsp, 'realpath');
+    const openSpy = vi.spyOn(fsp, 'open');
+    const { path } = await makeTempFile('secret.png', PNG_BYTES);
+    await expectError(
+      resolveContentInput(path, {}, policy({ allowLocalFileRead: false })),
+      'PATH_NOT_PERMITTED'
+    );
+    await expectError(
+      resolveContentInput(`file://${path}`, {}, policy({ allowLocalFileRead: false })),
+      'PATH_NOT_PERMITTED'
+    );
+    expect(statSpy).not.toHaveBeenCalled();
+    expect(realpathSpy).not.toHaveBeenCalled();
+    expect(openSpy).not.toHaveBeenCalled();
+  });
+
+  it('never stats a path lexically outside localFileRoots', async () => {
+    const root = await makeTempDir();
+    const statSpy = vi.spyOn(fsp, 'stat');
+    await expectError(
+      resolveContentInput('/etc/hostname', {}, policy({ localFileRoots: [root] })),
+      'PATH_NOT_PERMITTED'
+    );
+    expect(statSpy).not.toHaveBeenCalled();
+  });
+
+  it('uses the same message for existing-but-forbidden and missing paths', async () => {
+    const root = await makeTempDir();
+    const { path: existing } = await makeTempFile('exists.png', PNG_BYTES);
+    const a = await expectError(
+      resolveContentInput(`file://${existing}`, {}, policy({ localFileRoots: [root] })),
+      'PATH_NOT_PERMITTED'
+    );
+    const b = await expectError(
+      resolveContentInput('file:///nope/missing.png', {}, policy({ localFileRoots: [root] })),
+      'PATH_NOT_PERMITTED'
+    );
+    const strip = (m: string) => m.replace(/: .*$/, '');
+    expect(strip(a.message)).toBe(strip(b.message));
+    expect(a.message).toContain('not permitted or not found');
+  });
+
+  it.each(['/proc/self/environ', '/sys/kernel/hostname', '/dev/zero'])(
+    'refuses pseudo-filesystem path %s',
+    async (p) => {
+      await expectError(resolveContentInput(`file://${p}`, {}, policy()), 'PATH_NOT_PERMITTED');
+    }
+  );
+
+  it('refuses a symlink that resolves into /proc', async () => {
+    const dir = await makeTempDir();
+    const link = join(dir, 'env');
+    await symlink('/proc/self/environ', link);
+    await expectError(resolveContentInput(`file://${link}`, {}, policy()), 'PATH_NOT_PERMITTED');
+  });
+
+  it('enforces maxBytes on decoded data URLs', async () => {
+    const big = Buffer.alloc(4096, 1).toString('base64');
+    await expectError(
+      resolveContentInput(
+        `data:application/octet-stream;base64,${big}`,
+        {},
+        policy({ maxBytes: 1024 })
+      ),
+      'INPUT_TOO_LARGE'
+    );
+  });
+
+  it('enforces maxBytes on inline base64 with a binary mime', async () => {
+    const big = Buffer.alloc(4096, 1).toString('base64');
+    await expectError(
+      resolveContentInput(big, { mime: 'application/octet-stream' }, policy({ maxBytes: 1024 })),
+      'INPUT_TOO_LARGE'
+    );
+  });
+
+  it('still accepts inline base64 within the limit', async () => {
+    const res = await resolveContentInput(
+      PNG_B64,
+      { mime: 'image/png' },
+      policy({ maxBytes: 1024 })
+    );
+    expect(res.buffer.equals(PNG_BYTES)).toBe(true);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // URLs
 // ---------------------------------------------------------------------------
@@ -477,6 +569,23 @@ describe('resolveContentInput: URLs', () => {
         policy({ urlGuard: { allowlist: ['127.0.0.1'], allowPrivate: false } })
       ),
       'URL_BLOCKED'
+    );
+  });
+
+  it('does not echo resolved IPs in URL_BLOCKED messages and logs the detail', async () => {
+    const warn = vi.fn();
+    const err = await expectError(
+      resolveContentInput(
+        'http://localhost:1/x.png',
+        {},
+        policy({ urlGuard: { allowlist: [], allowPrivate: false }, logger: { warn } })
+      ),
+      'URL_BLOCKED'
+    );
+    expect(err.message).not.toMatch(/127\.0\.0\.1|::1/);
+    expect(warn).toHaveBeenCalledWith(
+      'content_url_blocked',
+      expect.objectContaining({ reason: 'private_address' })
     );
   });
 

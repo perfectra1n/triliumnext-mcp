@@ -1,46 +1,81 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
-import { defineTool } from './schemas.js';
-import { dateSchema, weekSchema, monthSchema, yearSchema } from './validators.js';
+import { defineTool, type ToolHandlerResult } from './schemas.js';
 
-const DATE_FORMAT_BY_KIND = {
-  day: { schema: dateSchema, hint: 'YYYY-MM-DD' },
-  inbox: { schema: dateSchema, hint: 'YYYY-MM-DD' },
-  week_first_day: { schema: dateSchema, hint: 'YYYY-MM-DD (any day within the week)' },
-  week: { schema: weekSchema, hint: 'YYYY-Www (ISO week, e.g. 2026-W03)' },
-  month: { schema: monthSchema, hint: 'YYYY-MM' },
-  year: { schema: yearSchema, hint: 'YYYY' },
-} as const;
+/**
+ * Validate a calendar period string for `kind`. Returns an error message, or
+ * null when valid. Checks real dates (no 2024-02-30, month 13, or W53 in a
+ * 52-week year), not just the shape.
+ */
+export function validatePeriod(kind: SpecialNoteKind, value: string): string | null {
+  switch (kind) {
+    case 'day':
+    case 'inbox':
+    case 'week_first_day': {
+      const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+      if (!m) return `Expected YYYY-MM-DD (e.g. 2026-01-15), got "${value}".`;
+      const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+      if (mo < 1 || mo > 12) return `Month ${m[2]} is out of range 01-12 in "${value}".`;
+      const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+      if (d < 1 || d > daysInMonth) {
+        return `Day ${m[3]} is out of range for ${m[1]}-${m[2]} (01-${daysInMonth}) in "${value}".`;
+      }
+      return null;
+    }
+    case 'week': {
+      const m = /^(\d{4})-W(\d{2})$/.exec(value);
+      if (!m) return `Expected YYYY-Www (ISO week, e.g. 2026-W03), got "${value}".`;
+      const [y, w] = [Number(m[1]), Number(m[2])];
+      // Dec 28 is always in the ISO year's last week.
+      const weeksInYear = Number(isoWeekString(new Date(y, 11, 28)).slice(6));
+      if (w < 1 || w > weeksInYear) {
+        return `Week ${m[2]} is out of range for ISO year ${m[1]} (W01-W${weeksInYear}).`;
+      }
+      return null;
+    }
+    case 'month': {
+      const m = /^(\d{4})-(\d{2})$/.exec(value);
+      if (!m) return `Expected YYYY-MM (e.g. 2026-01), got "${value}".`;
+      const mo = Number(m[2]);
+      if (mo < 1 || mo > 12) return `Month ${m[2]} is out of range 01-12 in "${value}".`;
+      return null;
+    }
+    case 'year':
+      return /^\d{4}$/.test(value) ? null : `Expected YYYY (e.g. 2026), got "${value}".`;
+  }
+}
+
+const SPECIAL_NOTE_KINDS = ['day', 'week', 'month', 'year', 'inbox', 'week_first_day'] as const;
+type SpecialNoteKind = (typeof SPECIAL_NOTE_KINDS)[number];
 
 const getSpecialNoteSchema = z
   .object({
     kind: z
-      .enum(['day', 'week', 'month', 'year', 'inbox', 'week_first_day'])
+      .enum(SPECIAL_NOTE_KINDS)
       .describe(
-        '"day" — the daily journal note. "week"/"month"/"year" — the corresponding periodic journal note ' +
-          '(for weekly/monthly/yearly reviews). All are created if missing. ' +
-          '"inbox" — the quick-capture inbox note (may be a fixed note or the daily note depending on Trilium configuration). ' +
-          '"week_first_day" — the DAY note for the first day of the week containing date (honours the configured ' +
-          'first weekday); unlike "week" it works without week notes being enabled. Needs a recent Trilium.'
+        '"day"/"week"/"month"/"year": that journal note, created if missing. "inbox": the quick-capture ' +
+          'inbox (a fixed note or the day note, per Trilium settings). "week_first_day": the day note ' +
+          'for the first day of the week containing date (works without week notes enabled; needs a ' +
+          'recent Trilium).'
       ),
     date: z
       .string()
       .optional()
       .describe(
-        'Which period to fetch; format depends on kind — day/inbox/week_first_day: YYYY-MM-DD, week: YYYY-Www ' +
-          '(ISO week, e.g. 2026-W03), month: YYYY-MM, year: YYYY. Defaults to the current day/week/month/year.'
+        'Period to fetch: YYYY-MM-DD for day/inbox/week_first_day, YYYY-Www (ISO week) for week, ' +
+          "YYYY-MM for month, YYYY for year. Defaults to the current period in the MCP server's timezone."
       ),
   })
   .check((ctx) => {
     const { kind, date } = ctx.value;
     if (date === undefined) return;
-    const expected = DATE_FORMAT_BY_KIND[kind];
-    if (!expected.schema.safeParse(date).success) {
+    const problem = validatePeriod(kind, date);
+    if (problem !== null) {
       ctx.issues.push({
         code: 'custom',
         input: ctx.value,
-        message: `Invalid date for kind="${kind}". Expected format: ${expected.hint}`,
+        message: `Invalid date for kind="${kind}": ${problem}`,
         path: ['date'],
       });
     }
@@ -73,14 +108,18 @@ export function registerCalendarTools(): Tool[] {
   return [
     defineTool(
       'get_special_note',
-      'Get a periodic journal note or the inbox note. kind="day" fetches the daily note, "week"/"month"/"year" ' +
-        'fetch the corresponding periodic notes (useful for weekly/monthly/yearly reviews) — all auto-created if ' +
-        'missing. kind="inbox" fetches the quick-capture inbox (configuration-dependent: either a fixed note or ' +
-        'the daily note). kind="week_first_day" returns the day note that starts the week. ' +
-        'The date format follows the kind (YYYY-MM-DD, YYYY-Www, YYYY-MM, or YYYY) and defaults ' +
-        'to the current period.',
+      'Get (creating if missing) a day/week/month/year journal note, the inbox note, or the first day ' +
+        'of a week. Returns the note metadata; read its body with get_note.',
       getSpecialNoteSchema,
-      { title: 'Get periodic or inbox note', readOnlyHint: false, idempotentHint: true }
+      {
+        title: 'Get periodic or inbox note',
+        // May create the journal note on first call, so not read-only — but
+        // repeat calls return the same note and nothing is ever removed.
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      }
     ),
   ];
 }
@@ -89,7 +128,7 @@ export async function handleCalendarTool(
   client: TriliumClient,
   name: string,
   args: unknown
-): Promise<{ content: Array<{ type: 'text'; text: string }> } | null> {
+): Promise<ToolHandlerResult> {
   if (name !== 'get_special_note') return null;
 
   const parsed = getSpecialNoteSchema.parse(args);

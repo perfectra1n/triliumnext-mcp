@@ -1,22 +1,42 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
 /**
+ * Request headers the server actually reads. Preflight responses advertise
+ * this fixed list instead of reflecting `Access-Control-Request-Headers`, so a
+ * browser can never be talked into sending arbitrary headers cross-origin.
+ */
+export const CORS_ALLOWED_HEADERS = [
+  'Authorization',
+  'Content-Type',
+  'Accept',
+  'Mcp-Session-Id',
+  'MCP-Protocol-Version',
+  'Last-Event-ID',
+  'X-Trilium-Url',
+  'X-Trilium-Token',
+].join(', ');
+
+/** Response headers browser JS may read. */
+export const CORS_EXPOSED_HEADERS = [
+  'Mcp-Session-Id',
+  'MCP-Protocol-Version',
+  'WWW-Authenticate',
+].join(', ');
+
+/**
  * Minimal CORS handler with explicit origin allowlist. Off by default —
  * the server is intended for trusted clients, but browser-based MCP clients
  * (or local development against a different origin) need CORS to talk to it.
  *
  * The allowlist semantics:
  *  - empty list → CORS disabled, no headers added
- *  - exact match → echo the request Origin into Access-Control-Allow-Origin
- *  - `*` → wildcard, but only when no credentials are sent (browsers reject
- *    Authorization headers against `Allow-Origin: *`), so wildcard mode always
- *    echoes the Origin instead of literally emitting `*`
- *
- * Preflight (OPTIONS) responses include the headers that MCP-over-HTTP needs:
- *  - Authorization (gateway auth)
- *  - X-Trilium-Url / X-Trilium-Token (per-tenant creds)
- *  - Content-Type
- *  - MCP-Session-Id (StreamableHTTP transport)
+ *  - exact match → echo the request Origin into Access-Control-Allow-Origin,
+ *    with `Access-Control-Allow-Credentials: true`
+ *  - `*` → literal `Access-Control-Allow-Origin: *` and NO credentials flag.
+ *    The gateway authenticates with an `Authorization` header (never
+ *    cookies), which browsers send fine under `*` as long as it is listed in
+ *    Access-Control-Allow-Headers — credentialed wildcard reflection would
+ *    only widen exposure.
  */
 export class CorsPolicy {
   /** Pre-computed lower-case exact origins (everything stays case-insensitive at lookup). */
@@ -32,23 +52,44 @@ export class CorsPolicy {
     return this.wildcard || this.exactOrigins.size > 0;
   }
 
-  /** Returns the Origin header value if it should be reflected back, else null. */
+  get isWildcard(): boolean {
+    return this.wildcard;
+  }
+
+  /** True if `origin` is explicitly (or via wildcard) allowed by the CORS allowlist. */
+  allowsOrigin(origin: string): boolean {
+    if (this.wildcard) return true;
+    return this.exactOrigins.has(origin.toLowerCase());
+  }
+
+  /**
+   * Returns the value for Access-Control-Allow-Origin, or null if no CORS
+   * headers should be sent: `*` in wildcard mode, else the echoed Origin.
+   */
   resolveOrigin(req: IncomingMessage): string | null {
     if (!this.enabled) return null;
     const origin = firstHeader(req.headers['origin']);
     if (!origin) return null;
-    if (this.wildcard) return origin;
-    return this.exactOrigins.has(origin.toLowerCase()) ? origin : null;
+    if (this.exactOrigins.has(origin.toLowerCase())) return origin;
+    if (this.wildcard) return '*';
+    return null;
+  }
+
+  private baseHeaders(allowOrigin: string): Record<string, string> {
+    const headers: Record<string, string> = { 'Access-Control-Allow-Origin': allowOrigin };
+    if (allowOrigin !== '*') {
+      headers['Vary'] = 'Origin';
+      headers['Access-Control-Allow-Credentials'] = 'true';
+    }
+    return headers;
   }
 
   /** Apply Access-Control-Allow-* headers to a response. Idempotent. */
   apply(req: IncomingMessage, res: ServerResponse): void {
     const origin = this.resolveOrigin(req);
     if (!origin) return;
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Expose-Headers', 'MCP-Session-Id');
+    for (const [k, v] of Object.entries(this.baseHeaders(origin))) res.setHeader(k, v);
+    res.setHeader('Access-Control-Expose-Headers', CORS_EXPOSED_HEADERS);
   }
 
   /**
@@ -69,15 +110,10 @@ export class CorsPolicy {
       return true;
     }
     const reqMethod = firstHeader(req.headers['access-control-request-method']) ?? 'GET';
-    const reqHeaders = firstHeader(req.headers['access-control-request-headers']);
     res.writeHead(204, {
-      'Access-Control-Allow-Origin': origin,
-      Vary: 'Origin',
-      'Access-Control-Allow-Credentials': 'true',
+      ...this.baseHeaders(origin),
       'Access-Control-Allow-Methods': normalizeMethods(reqMethod),
-      'Access-Control-Allow-Headers':
-        reqHeaders ??
-        'Authorization, Content-Type, X-Trilium-Url, X-Trilium-Token, MCP-Session-Id, Last-Event-ID',
+      'Access-Control-Allow-Headers': CORS_ALLOWED_HEADERS,
       'Access-Control-Max-Age': '600',
       'Content-Length': '0',
     });

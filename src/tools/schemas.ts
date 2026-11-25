@@ -1,6 +1,19 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
+/** Content blocks the tool handlers return (a subset of MCP CallToolResult content). */
+export type ToolContentBlock =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string }
+  | { type: 'resource'; resource: { uri: string; mimeType: string; blob: string } };
+
+/**
+ * Return shape shared by every `handle*Tool` dispatcher (`null` = not this
+ * module's tool). `isError` marks a partial failure reported as data (e.g. a
+ * note was created but its attachments failed) rather than thrown.
+ */
+export type ToolHandlerResult = { content: ToolContentBlock[]; isError?: boolean } | null;
+
 /**
  * MCP tool annotations as hints for clients. None of these affect tool
  * load priority in any current client, but they do improve approval-dialog
@@ -56,6 +69,11 @@ export function defineTool(
 
   if (annotations) {
     tool.annotations = annotations;
+    // MCP 2025-06-18 added a top-level display title; mirror the annotation
+    // so newer clients pick it up without reading annotations.
+    if (annotations.title) {
+      tool.title = annotations.title;
+    }
   }
 
   return tool;
