@@ -48,6 +48,8 @@ const TRILIUM_ERROR_GUIDANCE: Record<string, string> = {
   TRILIUM_BUSY:
     'Trilium is still busy with an earlier slow request (usually a full-text search) and is not answering. Wait the time given in the message, then retry. Avoid strategy:"full" searches until it recovers: they would queue behind the slow one.',
   ETAPI_TOKEN_INVALID: AUTH_GUIDANCE,
+  RESPONSE_TOO_LARGE:
+    'The content is larger than this server is configured to load, so it was not read. Do not retry; have the user open it in Trilium (or ask the operator to raise TRILIUM_MAX_RESPONSE_BYTES).',
 };
 
 /**

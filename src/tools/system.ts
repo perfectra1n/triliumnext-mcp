@@ -1,12 +1,20 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
-import { TriliumClientError } from '../client/trilium.js';
+import { TriliumClientError, TriliumResponseTooLargeError } from '../client/trilium.js';
 import { defineTool, type ToolHandlerResult } from './schemas.js';
 import { backupNameSchema, entityIdSchema, required } from './validators.js';
+import { formatMegabytes } from './contentLimits.js';
 
-/** Largest export ZIP returned inline; beyond this the response would swamp the client. */
+/** Default largest export ZIP returned inline; beyond this the response would swamp the client. */
 export const MAX_EXPORT_BYTES = 10 * 1024 * 1024;
+
+let maxExportBytes = MAX_EXPORT_BYTES;
+
+/** Process-wide system-tool limits (TRILIUM_MAX_EXPORT_BYTES). Call before registering tools. */
+export function configureSystemTools(options: { maxExportBytes?: number }): void {
+  maxExportBytes = options.maxExportBytes ?? MAX_EXPORT_BYTES;
+}
 
 /** ETAPI GET /notes/{id}/export formats (etapi.openapi.yaml). */
 const EXPORT_FORMATS = ['html', 'markdown', 'share'] as const;
@@ -110,7 +118,7 @@ export function registerSystemTools(): Tool[] {
         '- "backup": write backup-<backupName>.db to Trilium\'s data directory, replacing a backup with ' +
         'the same name.\n' +
         '- "export": export a subtree as a ZIP (html, markdown or share format), returned as an embedded ' +
-        `resource for the user to save (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). You cannot read the ZIP ` +
+        `resource for the user to save (max ${formatMegabytes(maxExportBytes)}). You cannot read the ZIP ` +
         'contents — to read notes use get_note.\n' +
         '- "import": import a base64 ZIP (e.g. a previous export) under noteId; returns the created note.',
       manageSystemSchema,
@@ -229,19 +237,30 @@ export async function handleSystemTool(
       const format = parsed.format ?? 'html';
       // The client's signature predates the spec's "share" format; the query
       // value is forwarded verbatim.
-      const data = await client.exportNote(noteId, format as 'html' | 'markdown');
-
-      if (data.byteLength > MAX_EXPORT_BYTES) {
-        throw new TriliumClientError(
+      const exportTooLarge = (sizeBytes: number, atLeast: boolean): TriliumClientError =>
+        new TriliumClientError(
           413,
           'EXPORT_TOO_LARGE',
-          `Export of '${noteId}' is ${data.byteLength} bytes, over the ${MAX_EXPORT_BYTES}-byte limit for ` +
-            'inline export. Export a smaller subtree (a child note), or have the user export from the ' +
-            'Trilium UI.'
+          `Export of '${noteId}' is ${atLeast ? 'at least ' : ''}${sizeBytes} bytes, over the ` +
+            `${maxExportBytes}-byte limit for inline export. Export a smaller subtree (a child note), ` +
+            'or have the user export from the Trilium UI.'
         );
+      // The cap is enforced while downloading, so an oversized ZIP is never
+      // buffered (let alone base64-encoded) in full.
+      let data: Buffer;
+      try {
+        data = await client.exportNote(noteId, format as 'html' | 'markdown', maxExportBytes);
+      } catch (error) {
+        if (error instanceof TriliumResponseTooLargeError) {
+          throw exportTooLarge(error.sizeBytes, true);
+        }
+        throw error;
+      }
+      if (data.byteLength > maxExportBytes) {
+        throw exportTooLarge(data.byteLength, false);
       }
 
-      const blob = Buffer.from(data).toString('base64');
+      const blob = data.toString('base64');
       return {
         content: [
           {

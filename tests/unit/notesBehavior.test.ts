@@ -58,7 +58,7 @@ describe('get_note image handling', () => {
     const images = result!.content.filter((b) => b.type === 'image');
     expect(images).toHaveLength(1);
     expect(client.getAttachmentContentAsBase64).toHaveBeenCalledTimes(1);
-    expect(client.getAttachmentContentAsBase64).toHaveBeenCalledWith('small');
+    expect(client.getAttachmentContentAsBase64).toHaveBeenCalledWith('small', 1024 * 1024);
     const body = textOf(result, 1);
     expect(body).toContain('"attachmentId":"big"');
     expect(body).toContain('get_attachment');

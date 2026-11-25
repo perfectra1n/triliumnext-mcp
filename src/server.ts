@@ -20,13 +20,18 @@ import type { ToolContext } from './tools/context.js';
 import { deriveWebBaseUrl } from './config.js';
 import { SERVER_INSTRUCTIONS } from './server-instructions.js';
 import { SERVER_VERSION } from './version.js';
-import { registerNoteTools, handleNoteTool } from './tools/notes.js';
+import { registerNoteTools, handleNoteTool, configureNoteTools } from './tools/notes.js';
 import { registerSearchTools, handleSearchTool, configureSearch } from './tools/search.js';
 import { registerOrganizationTools, handleOrganizationTool } from './tools/organization.js';
 import { registerAttributeTools, handleAttributeTool } from './tools/attributes.js';
 import { registerCalendarTools, handleCalendarTool } from './tools/calendar.js';
-import { registerSystemTools, handleSystemTool } from './tools/system.js';
-import { registerAttachmentTools, handleAttachmentTool } from './tools/attachments.js';
+import { registerSystemTools, handleSystemTool, configureSystemTools } from './tools/system.js';
+import {
+  registerAttachmentTools,
+  handleAttachmentTool,
+  configureAttachmentTools,
+} from './tools/attachments.js';
+import { configureContentLimits } from './tools/contentLimits.js';
 import { registerRevisionTools, handleRevisionTool } from './tools/revisions.js';
 import { startHttp } from './http/server.js';
 import { redactArgs, type Logger } from './utils/logger.js';
@@ -251,13 +256,24 @@ async function startStdio(config: Config, logger: Logger): Promise<void> {
     config.publicUrl ?? deriveWebBaseUrl(config.triliumUrl),
     clientOptionsFromConfig(config)
   );
-  const server = buildMcpServer(client, { logger, sessionId: 'stdio' });
+  const server = buildMcpServer(client, {
+    logger,
+    sessionId: 'stdio',
+    progressIntervalMs: config.progressIntervalMs,
+  });
   const transport = new StdioServerTransport();
   await server.connect(transport);
   logger.info('server_started', { transport: 'stdio' });
 }
 
-export async function createServer(config: Config, logger: Logger): Promise<void> {
+const DEFAULT_CONTENT_FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Apply the process-wide tool settings from config. Must run before any
+ * buildMcpServer call: tool descriptions and schemas interpolate these limits
+ * at registration time. Unset (undefined) fields keep each module's default.
+ */
+export function configureTools(config: Config): void {
   // Content-input policy is process-wide: both transports share it, and tool
   // handlers pick it up via the contentInput module rather than a threaded arg.
   configureContentInput({
@@ -265,9 +281,37 @@ export async function createServer(config: Config, logger: Logger): Promise<void
     localFileRoots: config.localFileRoots,
     urlGuard: { allowlist: config.contentUrlAllowlist, allowPrivate: config.allowPrivateUrls },
     maxBytes: config.maxContentFetchBytes,
-    fetchTimeoutMs: 30_000,
+    fetchTimeoutMs: config.contentFetchTimeoutMs ?? DEFAULT_CONTENT_FETCH_TIMEOUT_MS,
   });
-  configureSearch({ defaultStrategy: config.searchStrategy });
+  // Before configureNoteTools: get_note's schema defaults to the char cap.
+  configureContentLimits({ contentCharCap: config.contentCharCap });
+  configureNoteTools({
+    noteImageMaxBytes: config.maxNoteImageBytes,
+    noteImagesTotalMaxBytes: config.maxNoteImagesTotalBytes,
+    contentMaxCharsLimit: config.contentMaxCharsLimit,
+    maxPaths: config.noteMaxPaths,
+    maxBacklinks: config.noteMaxBacklinks,
+    historyLimit: config.historyLimit,
+    historyMaxLimit: config.historyMaxLimit,
+  });
+  configureAttachmentTools({ maxInlineAttachmentBytes: config.maxInlineAttachmentBytes });
+  configureSystemTools({ maxExportBytes: config.maxExportBytes });
+  configureSearch({
+    defaultStrategy: config.searchStrategy,
+    defaultLimit: config.defaultSearchLimit,
+    maxLimit: config.maxSearchLimit,
+    fastFirstMinResults: config.searchFastMinResults,
+    maxPreviewResults: config.searchPreviewMaxResults,
+    fetchConcurrency: config.fetchConcurrency,
+    maxTreeNotes: config.treeMaxNotes,
+    fuzzyMaxTerms: config.fuzzyMaxTerms,
+    fuzzyRecallMultiplier: config.fuzzyRecallMultiplier,
+    fuzzyRecallCap: config.fuzzyRecallCap,
+  });
+}
+
+export async function createServer(config: Config, logger: Logger): Promise<void> {
+  configureTools(config);
 
   if (config.transport === 'stdio') {
     await startStdio(config, logger);

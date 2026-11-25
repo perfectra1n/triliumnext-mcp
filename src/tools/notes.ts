@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { TriliumClient } from '../client/trilium.js';
+import { TriliumResponseTooLargeError, type TriliumClient } from '../client/trilium.js';
 import type { Attachment, NoteType, PatchNoteDef } from '../types/etapi.js';
 import { defineTool, type ToolContentBlock, type ToolHandlerResult } from './schemas.js';
 import {
@@ -22,7 +22,7 @@ import {
   CONTENT_SOURCE_GUIDANCE,
 } from './contentInput.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
-import { CONTENT_CHAR_CAP } from './contentLimits.js';
+import { base64DecodedLength, formatMegabytes, getContentCharCap } from './contentLimits.js';
 import {
   escapeHtml,
   hasNoteLinkPlaceholders,
@@ -370,70 +370,112 @@ const createNoteSchema = z.object({
   files: filesFieldSchema,
 });
 
-/** get_note inlines referenced images only up to these sizes. */
-const IMAGE_MAX_BYTES = 1024 * 1024;
-const IMAGES_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+/** get_note inlines embedded images only up to these sizes (per image / per call). */
+export const DEFAULT_NOTE_IMAGE_MAX_BYTES = 1024 * 1024;
+export const DEFAULT_NOTE_IMAGES_TOTAL_MAX_BYTES = 4 * 1024 * 1024;
+/** Default ceiling for get_note's content_max_chars parameter. */
+export const DEFAULT_CONTENT_MAX_CHARS_LIMIT = 500_000;
+/** Bound the ancestor walks / backlink scan one get_note call can trigger. */
+export const DEFAULT_MAX_PATHS = 10;
+export const DEFAULT_MAX_BACKLINKS = 50;
+/** get_note_history page size: default and ceiling of its `limit` parameter. */
+export const DEFAULT_HISTORY_LIMIT = 100;
+export const DEFAULT_HISTORY_MAX_LIMIT = 1000;
 
-const getNoteSchema = z.object({
-  noteId: entityIdSchema.describe('ID of the note to retrieve'),
-  include_content: z
-    .boolean()
-    .optional()
-    .default(true)
-    .describe(
-      'Include the note body (default true). Pass false for metadata-only navigation (title, type, ' +
-        'attributes, parent/child IDs).'
-    ),
-  format: z
-    .enum(['html', 'markdown'])
-    .default('html')
-    .describe(
-      '"html" (default) returns the stored HTML — use it before write_note edits. "markdown" is a lossy, ' +
-        'more compact view for reading only. Ignored when include_content=false.'
-    ),
-  includeImages: z
-    .boolean()
-    .default(true)
-    .describe(
-      'Return images embedded in the note body as image blocks — only on the first page ' +
-        '(content_start=0), at most ~1 MB each and ~4 MB total; larger ones are listed for get_attachment. ' +
-        'Costly; pass false when you only need text.'
-    ),
-  content_start: z
-    .number()
-    .int('content_start must be an integer')
-    .min(0, 'content_start must be >= 0')
-    .default(0)
-    .describe(
-      'Character offset into the (format-converted) content to start from — for paging through ' +
-        'large notes. Defaults to 0. The metadata block reports the returned range and total size.'
-    ),
-  content_max_chars: z
-    .number()
-    .int('content_max_chars must be an integer')
-    .min(1, 'content_max_chars must be at least 1')
-    .max(500_000, 'content_max_chars cannot exceed 500000')
-    .default(CONTENT_CHAR_CAP)
-    .describe(
-      `Maximum content characters to return (default ${CONTENT_CHAR_CAP}). When the note is larger, ` +
-        'the content is truncated with a notice explaining how to fetch the rest.'
-    ),
-  include_path: z
-    .boolean()
-    .default(false)
-    .describe(
-      'Add "paths" to the metadata: for every place the note sits in the tree (one per parent, clones ' +
-        'included), the noteId path and a human-readable title breadcrumb like "root > Projects > Plan". ' +
-        'Use it to tell the user WHERE a note lives.'
-    ),
-  include_backlinks: z
-    .boolean()
-    .default(false)
-    .describe(
-      'Add "backlinks" to the metadata: notes whose content links to (or mentions the ID of) this note, ' +
-        'with noteId and title (max 50). Relations without a link in the content (e.g. ~author) are not included.'
-    ),
-});
+export interface NoteToolLimits {
+  noteImageMaxBytes: number;
+  noteImagesTotalMaxBytes: number;
+  contentMaxCharsLimit: number;
+  maxPaths: number;
+  maxBacklinks: number;
+  historyLimit: number;
+  historyMaxLimit: number;
+}
+
+const DEFAULT_NOTE_LIMITS: NoteToolLimits = {
+  noteImageMaxBytes: DEFAULT_NOTE_IMAGE_MAX_BYTES,
+  noteImagesTotalMaxBytes: DEFAULT_NOTE_IMAGES_TOTAL_MAX_BYTES,
+  contentMaxCharsLimit: DEFAULT_CONTENT_MAX_CHARS_LIMIT,
+  maxPaths: DEFAULT_MAX_PATHS,
+  maxBacklinks: DEFAULT_MAX_BACKLINKS,
+  historyLimit: DEFAULT_HISTORY_LIMIT,
+  historyMaxLimit: DEFAULT_HISTORY_MAX_LIMIT,
+};
+
+let limits: NoteToolLimits = { ...DEFAULT_NOTE_LIMITS };
+
+// The get_note / get_note_history schemas interpolate limits into defaults,
+// bounds and descriptions, so they are rebuilt whenever the limits change.
+function buildGetNoteSchema() {
+  const charCap = getContentCharCap();
+  return z.object({
+    noteId: entityIdSchema.describe('ID of the note to retrieve'),
+    include_content: z
+      .boolean()
+      .optional()
+      .default(true)
+      .describe(
+        'Include the note body (default true). Pass false for metadata-only navigation (title, type, ' +
+          'attributes, parent/child IDs).'
+      ),
+    format: z
+      .enum(['html', 'markdown'])
+      .default('html')
+      .describe(
+        '"html" (default) returns the stored HTML — use it before write_note edits. "markdown" is a lossy, ' +
+          'more compact view for reading only. Ignored when include_content=false.'
+      ),
+    includeImages: z
+      .boolean()
+      .default(true)
+      .describe(
+        'Return images embedded in the note body as image blocks — only on the first page ' +
+          `(content_start=0), at most ~${formatMegabytes(limits.noteImageMaxBytes)} each and ` +
+          `~${formatMegabytes(limits.noteImagesTotalMaxBytes)} total; larger ones are listed for ` +
+          'get_attachment. Costly; pass false when you only need text.'
+      ),
+    content_start: z
+      .number()
+      .int('content_start must be an integer')
+      .min(0, 'content_start must be >= 0')
+      .default(0)
+      .describe(
+        'Character offset into the (format-converted) content to start from — for paging through ' +
+          'large notes. Defaults to 0. The metadata block reports the returned range and total size.'
+      ),
+    content_max_chars: z
+      .number()
+      .int('content_max_chars must be an integer')
+      .min(1, 'content_max_chars must be at least 1')
+      .max(
+        limits.contentMaxCharsLimit,
+        `content_max_chars cannot exceed ${limits.contentMaxCharsLimit}`
+      )
+      .default(Math.min(charCap, limits.contentMaxCharsLimit))
+      .describe(
+        `Maximum content characters to return (default ${Math.min(charCap, limits.contentMaxCharsLimit)}). ` +
+          'When the note is larger, the content is truncated with a notice explaining how to fetch the rest.'
+      ),
+    include_path: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Add "paths" to the metadata: for every place the note sits in the tree (one per parent, clones ' +
+          'included), the noteId path and a human-readable title breadcrumb like "root > Projects > Plan". ' +
+          'Use it to tell the user WHERE a note lives.'
+      ),
+    include_backlinks: z
+      .boolean()
+      .default(false)
+      .describe(
+        'Add "backlinks" to the metadata: notes whose content links to (or mentions the ID of) this note, ' +
+          `with noteId and title (max ${limits.maxBacklinks}). Relations without a link in the content ` +
+          '(e.g. ~author) are not included.'
+      ),
+  });
+}
+
+let getNoteSchema = buildGetNoteSchema();
 
 const writeNoteSchema = z
   .object({
@@ -607,26 +649,43 @@ const deleteNoteSchema = z.object({
     ),
 });
 
-const getNoteHistorySchema = z.object({
-  ancestorNoteId: entityIdSchema
-    .optional()
-    .describe('Limit changes to a subtree identified by this note ID. Defaults to all notes.'),
-  limit: z
-    .number()
-    .int('limit must be an integer')
-    .min(1, 'limit must be at least 1')
-    .max(1000, 'limit cannot exceed 1000')
-    .default(100)
-    .describe('Maximum number of changes to return, newest first (default 100, max 1000).'),
-});
+function buildGetNoteHistorySchema() {
+  return z.object({
+    ancestorNoteId: entityIdSchema
+      .optional()
+      .describe('Limit changes to a subtree identified by this note ID. Defaults to all notes.'),
+    limit: z
+      .number()
+      .int('limit must be an integer')
+      .min(1, 'limit must be at least 1')
+      .max(limits.historyMaxLimit, `limit cannot exceed ${limits.historyMaxLimit}`)
+      .default(Math.min(limits.historyLimit, limits.historyMaxLimit))
+      .describe(
+        'Maximum number of changes to return, newest first (default ' +
+          `${Math.min(limits.historyLimit, limits.historyMaxLimit)}, max ${limits.historyMaxLimit}).`
+      ),
+  });
+}
+
+let getNoteHistorySchema = buildGetNoteHistorySchema();
+
+/**
+ * Process-wide note-tool limits. Called once at startup, after
+ * configureContentLimits and before tools are registered; unset fields keep
+ * their defaults.
+ */
+export function configureNoteTools(options: Partial<NoteToolLimits>): void {
+  limits = { ...DEFAULT_NOTE_LIMITS };
+  for (const [key, value] of Object.entries(options) as Array<[keyof NoteToolLimits, number]>) {
+    if (value !== undefined) limits[key] = value;
+  }
+  getNoteSchema = buildGetNoteSchema();
+  getNoteHistorySchema = buildGetNoteHistorySchema();
+}
 
 // ============================================================================
 // Note context helpers
 // ============================================================================
-
-/** Bound the ancestor walks one get_note call can trigger. */
-const MAX_PATHS = 10;
-const MAX_BACKLINKS = 50;
 
 type NoteMeta = Awaited<ReturnType<TriliumClient['getNote']>>;
 
@@ -644,7 +703,8 @@ async function buildNotePaths(
     return title;
   };
 
-  const parents = note.noteId === 'root' ? [undefined] : note.parentNoteIds.slice(0, MAX_PATHS);
+  const parents =
+    note.noteId === 'root' ? [undefined] : note.parentNoteIds.slice(0, limits.maxPaths);
   return Promise.all(
     parents.map(async (parentId) => {
       const path = await client.getNotePath(note.noteId, parentId);
@@ -663,11 +723,11 @@ async function findBacklinks(
   // ID finds links regardless of whether Trilium has indexed them as relations.
   const response = await client.searchNotes({
     search: `note.content *=* "${noteId}"`,
-    limit: MAX_BACKLINKS + 1,
+    limit: limits.maxBacklinks + 1,
   });
   return response.results
     .filter((n) => n.noteId !== noteId)
-    .slice(0, MAX_BACKLINKS)
+    .slice(0, limits.maxBacklinks)
     .map((n) => ({ noteId: n.noteId, title: n.title }));
 }
 
@@ -684,7 +744,7 @@ export function registerNoteTools(): Tool[] {
       'Read a note. Returns a metadata JSON block (title, type, attributes, parent/child IDs, and ' +
         'contentInfo with the total size and returned character range), then the body (stored HTML by ' +
         'default), then any images embedded in the body. Bodies over ' +
-        `${CONTENT_CHAR_CAP} characters are paged via content_start/content_max_chars. ` +
+        `${getContentCharCap()} characters are paged via content_start/content_max_chars. ` +
         'Pass include_content=false for metadata only, include_path=true for breadcrumbs of where the ' +
         'note lives, include_backlinks=true for notes linking to it.',
       getNoteSchema,
@@ -693,7 +753,8 @@ export function registerNoteTools(): Tool[] {
     defineTool(
       'get_note_history',
       'Get recent changes across the note tree — creations, modifications, and deletions. Optionally filter by subtree via ancestorNoteId. ' +
-        'Returns {changes, total, returned, truncated}; pass limit (default 100) to see more. ' +
+        'Returns {changes, total, returned, truncated}; pass limit (default ' +
+        `${Math.min(limits.historyLimit, limits.historyMaxLimit)}) to see more. ` +
         'Distinct from revisions: this is a change log across notes; revisions are content snapshots of a single note.',
       getNoteHistorySchema,
       { title: 'Note change history', readOnlyHint: true, openWorldHint: false }
@@ -882,6 +943,62 @@ async function createNote(client: TriliumClient, args: unknown): Promise<ToolHan
   });
 }
 
+/**
+ * Body of a binary (file/image) note. Its bytes are not text, so decoding them
+ * as a string would only waste memory and context: an image note within the
+ * per-image cap comes back as an image block; anything else gets a notice.
+ */
+async function getBinaryNoteContent(
+  client: TriliumClient,
+  note: NoteMeta,
+  meta: Record<string, unknown>,
+  includeImages: boolean
+): Promise<ToolHandlerResult> {
+  const notice = (reason: string): ToolHandlerResult => ({
+    content: [
+      { type: 'text', text: JSON.stringify({ ...meta, contentInfo: { binary: true } }, null, 2) },
+      {
+        type: 'text',
+        text: `**Content not returned:** ${reason} Do not retry; have the user open the note in Trilium.`,
+      },
+    ],
+  });
+  const kind = `binary ${note.type} note (${note.mime || 'no mime'})`;
+  if (!isImageMimeType(note.mime) || !includeImages) {
+    return notice(`this is a ${kind}, so its content is not readable as text.`);
+  }
+  const maxBytes = limits.noteImageMaxBytes;
+  let bytes: Buffer;
+  try {
+    bytes = await client.getNoteContentBinary(note.noteId, maxBytes);
+  } catch (error) {
+    if (error instanceof TriliumResponseTooLargeError) {
+      return notice(
+        `this ${kind} is at least ${error.sizeBytes} bytes, over the ${maxBytes}-byte limit, so it is too large to inline here.`
+      );
+    }
+    throw error;
+  }
+  if (bytes.length > maxBytes) {
+    return notice(
+      `this ${kind} is ${bytes.length} bytes, over the ${maxBytes}-byte limit, so it is too large to inline here.`
+    );
+  }
+  return {
+    content: [
+      {
+        type: 'text',
+        text: JSON.stringify(
+          { ...meta, contentInfo: { binary: true, sizeBytes: bytes.length } },
+          null,
+          2
+        ),
+      },
+      { type: 'image', data: bytes.toString('base64'), mimeType: note.mime },
+    ],
+  };
+}
+
 async function getNote(client: TriliumClient, args: unknown): Promise<ToolHandlerResult> {
   const parsed = getNoteSchema.parse(args);
   const note = await client.getNote(parsed.noteId);
@@ -897,6 +1014,10 @@ async function getNote(client: TriliumClient, args: unknown): Promise<ToolHandle
 
   if (!parsed.include_content) {
     return textResult(meta);
+  }
+
+  if (isBinaryNote(note.type, note.mime)) {
+    return getBinaryNoteContent(client, note, meta, parsed.includeImages);
   }
 
   const rawHtml = await client.getNoteContent(parsed.noteId);
@@ -942,24 +1063,34 @@ async function getNote(client: TriliumClient, args: unknown): Promise<ToolHandle
   const images: Array<{ data: string; mimeType: string }> = [];
   const skipped: Array<{ attachmentId: string; title: string; sizeBytes: number }> = [];
   const failed: string[] = [];
+  const { noteImageMaxBytes, noteImagesTotalMaxBytes } = limits;
   let totalBytes = 0;
+  // Sequential on purpose: each image is held as bytes plus a base64 copy, so
+  // fetching them in parallel would multiply peak memory.
   for (const a of embedded) {
     const declared = a.contentLength ?? 0;
-    if (declared > IMAGE_MAX_BYTES || totalBytes + declared > IMAGES_TOTAL_MAX_BYTES) {
+    if (declared > noteImageMaxBytes || totalBytes + declared > noteImagesTotalMaxBytes) {
       skipped.push({ attachmentId: a.attachmentId, title: a.title, sizeBytes: declared });
       continue;
     }
     try {
-      const data = await client.getAttachmentContentAsBase64(a.attachmentId);
+      // The client stops reading past this budget, so an image whose declared
+      // size lied is never buffered whole.
+      const budget = Math.min(noteImageMaxBytes, noteImagesTotalMaxBytes - totalBytes);
+      const data = await client.getAttachmentContentAsBase64(a.attachmentId, budget);
       // contentLength may be absent or stale; trust whichever is larger.
-      const sizeBytes = Math.max(declared, Math.floor((data.length * 3) / 4));
-      if (sizeBytes > IMAGE_MAX_BYTES || totalBytes + sizeBytes > IMAGES_TOTAL_MAX_BYTES) {
+      const sizeBytes = Math.max(declared, base64DecodedLength(data));
+      if (sizeBytes > noteImageMaxBytes || totalBytes + sizeBytes > noteImagesTotalMaxBytes) {
         skipped.push({ attachmentId: a.attachmentId, title: a.title, sizeBytes });
         continue;
       }
       totalBytes += sizeBytes;
       images.push({ data, mimeType: a.mime });
     } catch (error) {
+      if (error instanceof TriliumResponseTooLargeError) {
+        skipped.push({ attachmentId: a.attachmentId, title: a.title, sizeBytes: error.sizeBytes });
+        continue;
+      }
       failed.push(`- ${a.attachmentId}: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

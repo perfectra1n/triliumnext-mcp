@@ -3,12 +3,13 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 import type { TriliumClient } from '../client/trilium.js';
 import { TriliumClientError } from '../client/trilium.js';
 import { defineTool } from './schemas.js';
-import { entityIdSchema, orderDirectionSchema, searchLimitSchema } from './validators.js';
+import { entityIdSchema, orderDirectionSchema } from './validators.js';
 import { preprocessSearchQuery } from './queryPreprocessor.js';
 import type { ToolContext } from './context.js';
 import type { SearchStrategy } from '../config.js';
 import type { SearchResponse } from '../types/etapi.js';
 import {
+  configureFuzzySearch,
   buildFuzzyQuery,
   extractFuzzyTerms,
   isFuzzyEligible,
@@ -18,13 +19,13 @@ import {
 } from './fuzzySearch.js';
 
 /** How many results get a content preview; each one costs a content fetch. */
-const MAX_PREVIEW_RESULTS = 20;
+export const MAX_PREVIEW_RESULTS = 20;
 /** Max in-flight ETAPI requests for preview and tree fan-out. */
-const FETCH_CONCURRENCY = 5;
+export const FETCH_CONCURRENCY = 5;
 /** Results returned when the caller passes no limit. */
 export const DEFAULT_SEARCH_LIMIT = 50;
-/** searchLimitSchema's ceiling; over-fetching by one must not exceed it. */
-const MAX_SEARCH_LIMIT = 10000;
+/** Ceiling of search_notes' `limit`; over-fetching by one must not exceed it. */
+export const MAX_SEARCH_LIMIT = 10000;
 
 /**
  * Under strategy "auto", a fast (title/label) pass that finds at least this many
@@ -32,89 +33,144 @@ const MAX_SEARCH_LIMIT = 10000;
  */
 export const FAST_FIRST_MIN_RESULTS = 5;
 
-const DEFAULT_SEARCH_STRATEGY: SearchStrategy = 'auto';
-let defaultStrategy: SearchStrategy = DEFAULT_SEARCH_STRATEGY;
+/** Soft cap on notes fetched per get_note_tree call to bound response size. */
+export const MAX_TREE_NOTES = 200;
 
-/** Process-wide default for search_notes' `strategy` (TRILIUM_SEARCH_STRATEGY). */
-export function configureSearch(options: { defaultStrategy?: SearchStrategy }): void {
-  defaultStrategy = options.defaultStrategy ?? DEFAULT_SEARCH_STRATEGY;
+const DEFAULT_SEARCH_STRATEGY: SearchStrategy = 'auto';
+
+export interface SearchOptions {
+  defaultStrategy: SearchStrategy;
+  defaultLimit: number;
+  maxLimit: number;
+  fastFirstMinResults: number;
+  maxPreviewResults: number;
+  fetchConcurrency: number;
+  maxTreeNotes: number;
+  fuzzyMaxTerms: number;
+  fuzzyRecallMultiplier: number;
+  fuzzyRecallCap: number;
 }
 
-const searchNotesSchema = z.object({
-  query: z
-    .string()
-    .min(1, 'Search query is required')
-    .describe('Trilium search query; see tool description for syntax.'),
-  fastSearch: z
-    .boolean()
-    .optional()
-    .describe('Low-level flag: true matches titles and labels only. Overrides `strategy`.'),
-  strategy: z
-    .enum(['auto', 'fast', 'full'])
-    .optional()
-    .describe(
-      '"auto" (default): plain-word queries match titles/labels first and search note bodies only ' +
-        `when that finds fewer than ${FAST_FIRST_MIN_RESULTS} notes. "fast": titles/labels only. "full": always ` +
-        'search bodies (slow on large Trilium; blocks it meanwhile). Trilium-syntax queries run as written.'
-    ),
-  includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
-  ancestorNoteId: entityIdSchema
-    .optional()
-    .describe('Restrict results to descendants of this note (combine with ancestorDepth).'),
-  ancestorDepth: z
-    .string()
-    .regex(
-      /^(eq|lt|gt)\d{1,3}$/,
-      'Invalid ancestorDepth. Expected eqN, ltN, or gtN (e.g. "eq1", "lt3")'
-    )
-    .optional()
-    .describe(
-      'Depth constraint relative to ancestorNoteId: "eq1" = direct children only, ' +
-        '"lt3" = fewer than 3 levels deep, "gt1" = deeper than direct children.'
-    ),
-  orderBy: z
-    .string()
-    .optional()
-    .describe(
-      'Property to order by: title, dateCreated, dateModified, utcDateCreated, utcDateModified, ' +
-        'isProtected, isArchived, or a label (e.g. "#publicationDate").'
-    ),
-  orderDirection: orderDirectionSchema.optional().describe('Order direction'),
-  limit: searchLimitSchema
-    .optional()
-    .describe(
-      `Maximum results (default ${DEFAULT_SEARCH_LIMIT}). The response reports truncated:true when more matched.`
-    ),
-  verbose: z
-    .boolean()
-    .optional()
-    .describe(
-      'Return full note metadata (child/branch IDs, blobId, UTC dates, isInheritable). Default false.'
-    ),
-  debug: z
-    .boolean()
-    .optional()
-    .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
-  content_preview_chars: z
-    .number()
-    .int('content_preview_chars must be an integer')
-    .min(0, 'content_preview_chars must be >= 0')
-    .max(2000, 'content_preview_chars cannot exceed 2000')
-    .default(0)
-    .describe(
-      `Attach a plain-text "contentPreview" (first N characters, HTML stripped) to the first ${MAX_PREVIEW_RESULTS} ` +
-        'results so you can tell candidates apart without a get_note call per result. 0 (default) = off. ' +
-        '200-300 is usually enough. Skipped for binary (image/file) and protected notes.'
-    ),
-  fuzzy: z
-    .enum(['auto', 'off', 'force'])
-    .optional()
-    .default('auto')
-    .describe(
-      '"auto" (default): a plain multi-word query with zero results is retried as a ranked OR over its ' +
-        'words. "off": exact only. "force": skip the exact attempt.'
-    ),
-});
+const DEFAULT_SEARCH_OPTIONS: Omit<
+  SearchOptions,
+  'fuzzyMaxTerms' | 'fuzzyRecallMultiplier' | 'fuzzyRecallCap'
+> = {
+  defaultStrategy: DEFAULT_SEARCH_STRATEGY,
+  defaultLimit: DEFAULT_SEARCH_LIMIT,
+  maxLimit: MAX_SEARCH_LIMIT,
+  fastFirstMinResults: FAST_FIRST_MIN_RESULTS,
+  maxPreviewResults: MAX_PREVIEW_RESULTS,
+  fetchConcurrency: FETCH_CONCURRENCY,
+  maxTreeNotes: MAX_TREE_NOTES,
+};
+
+let opts = { ...DEFAULT_SEARCH_OPTIONS };
+
+/**
+ * Process-wide search settings (TRILIUM_SEARCH_STRATEGY, TRILIUM_DEFAULT_SEARCH_LIMIT, ...).
+ * Unset fields keep their defaults. Call before registering tools: the
+ * search_notes schema interpolates these into its bounds and descriptions.
+ */
+export function configureSearch(options: Partial<SearchOptions>): void {
+  const { fuzzyMaxTerms, fuzzyRecallMultiplier, fuzzyRecallCap, ...rest } = options;
+  opts = { ...DEFAULT_SEARCH_OPTIONS };
+  for (const [key, value] of Object.entries(rest) as Array<[keyof typeof opts, never]>) {
+    if (value !== undefined) opts[key] = value;
+  }
+  // The default page can never exceed the ceiling.
+  opts.defaultLimit = Math.min(opts.defaultLimit, opts.maxLimit);
+  configureFuzzySearch({
+    maxTerms: fuzzyMaxTerms,
+    recallMultiplier: fuzzyRecallMultiplier,
+    recallCap: fuzzyRecallCap,
+    searchLimitCeiling: opts.maxLimit,
+  });
+  searchNotesSchema = buildSearchNotesSchema();
+}
+
+function buildSearchNotesSchema() {
+  return z.object({
+    query: z
+      .string()
+      .min(1, 'Search query is required')
+      .describe('Trilium search query; see tool description for syntax.'),
+    fastSearch: z
+      .boolean()
+      .optional()
+      .describe('Low-level flag: true matches titles and labels only. Overrides `strategy`.'),
+    strategy: z
+      .enum(['auto', 'fast', 'full'])
+      .optional()
+      .describe(
+        '"auto" (default): plain-word queries match titles/labels first and search note bodies only ' +
+          `when that finds fewer than ${opts.fastFirstMinResults} notes. "fast": titles/labels only. "full": always ` +
+          'search bodies (slow on large Trilium; blocks it meanwhile). Trilium-syntax queries run as written.'
+      ),
+    includeArchivedNotes: z.boolean().optional().describe('Include archived notes'),
+    ancestorNoteId: entityIdSchema
+      .optional()
+      .describe('Restrict results to descendants of this note (combine with ancestorDepth).'),
+    ancestorDepth: z
+      .string()
+      .regex(
+        /^(eq|lt|gt)\d{1,3}$/,
+        'Invalid ancestorDepth. Expected eqN, ltN, or gtN (e.g. "eq1", "lt3")'
+      )
+      .optional()
+      .describe(
+        'Depth constraint relative to ancestorNoteId: "eq1" = direct children only, ' +
+          '"lt3" = fewer than 3 levels deep, "gt1" = deeper than direct children.'
+      ),
+    orderBy: z
+      .string()
+      .optional()
+      .describe(
+        'Property to order by: title, dateCreated, dateModified, utcDateCreated, utcDateModified, ' +
+          'isProtected, isArchived, or a label (e.g. "#publicationDate").'
+      ),
+    orderDirection: orderDirectionSchema.optional().describe('Order direction'),
+    limit: z
+      .number()
+      .int('Limit must be an integer')
+      .min(1, 'Limit must be at least 1')
+      .max(opts.maxLimit, `Limit cannot exceed ${opts.maxLimit}`)
+      .optional()
+      .describe(
+        `Maximum results (default ${opts.defaultLimit}). The response reports truncated:true when more matched.`
+      ),
+    verbose: z
+      .boolean()
+      .optional()
+      .describe(
+        'Return full note metadata (child/branch IDs, blobId, UTC dates, isInheritable). Default false.'
+      ),
+    debug: z
+      .boolean()
+      .optional()
+      .describe('Return query-parse diagnostics from Trilium (for troubleshooting search syntax).'),
+    content_preview_chars: z
+      .number()
+      .int('content_preview_chars must be an integer')
+      .min(0, 'content_preview_chars must be >= 0')
+      .max(2000, 'content_preview_chars cannot exceed 2000')
+      .default(0)
+      .describe(
+        `Attach a plain-text "contentPreview" (first N characters, HTML stripped) to the first ${opts.maxPreviewResults} ` +
+          'results so you can tell candidates apart without a get_note call per result. 0 (default) = off. ' +
+          '200-300 is usually enough. Skipped for binary (image/file) and protected notes.'
+      ),
+    fuzzy: z
+      .enum(['auto', 'off', 'force'])
+      .optional()
+      .default('auto')
+      .describe(
+        '"auto" (default): a plain multi-word query with zero results is retried as a ranked OR over its ' +
+          'words. "off": exact only. "force": skip the exact attempt.'
+      ),
+  });
+}
+
+let searchNotesSchema = buildSearchNotesSchema();
 
 const getNoteTreeSchema = z.object({
   noteId: entityIdSchema.describe('ID of the note to expand ("root" for the top of the tree).'),
@@ -129,9 +185,6 @@ const getNoteTreeSchema = z.object({
         'nodes at the boundary include childNoteIds for further drilling.'
     ),
 });
-
-/** Soft cap on notes fetched per get_note_tree call to bound response size. */
-const MAX_TREE_NOTES = 200;
 
 type NoteLike = Awaited<ReturnType<TriliumClient['getNote']>>;
 
@@ -210,7 +263,7 @@ async function buildTree(
   }
   budget.remaining -= toFetch.length;
 
-  node.children = await mapLimited(toFetch, FETCH_CONCURRENCY, async (c): Promise<TreeNode> => {
+  node.children = await mapLimited(toFetch, opts.fetchConcurrency, async (c): Promise<TreeNode> => {
     try {
       const child = await client.getNote(c.noteId);
       return await buildTree(client, child, depth - 1, includeSystem, budget, c.branchId);
@@ -250,7 +303,7 @@ Scope a subtree with ancestorNoteId + ancestorDepth. If a plain multi-word query
         'noteId, title, type, childCount and childBranchIds; expanded children also carry their own branchId ' +
         '(what organize_note reorder/unlink need). Nodes at the depth boundary list childNoteIds for a follow-up ' +
         'call. System notes (IDs starting with "_") are skipped unless you start from one. At most ' +
-        `${MAX_TREE_NOTES} notes per call; the response is marked truncated when the cap is hit.`,
+        `${opts.maxTreeNotes} notes per call; the response is marked truncated when the cap is hit.`,
       getNoteTreeSchema,
       { title: 'Get note tree', readOnlyHint: true, idempotentHint: true, openWorldHint: false }
     ),
@@ -289,10 +342,10 @@ async function attachPreviews(
 ): Promise<void> {
   if (chars <= 0 || !Array.isArray(results)) return;
   const targets = (results as Array<Record<string, unknown>>)
-    .slice(0, MAX_PREVIEW_RESULTS)
+    .slice(0, opts.maxPreviewResults)
     .filter((n) => PREVIEWABLE_TYPES.has(String(n.type)) && n.isProtected !== true);
 
-  await mapLimited(targets, FETCH_CONCURRENCY, async (n) => {
+  await mapLimited(targets, opts.fetchConcurrency, async (n) => {
     try {
       const raw = await client.getNoteContent(String(n.noteId));
       const text = n.type === 'text' ? htmlToPreviewText(raw) : raw.trim();
@@ -402,7 +455,7 @@ async function runFuzzySearch(
   terms: string[],
   forced: boolean
 ): Promise<Record<string, unknown>> {
-  const { fetchLimit, sliceTo } = resolveFuzzyLimit(parsed.limit ?? DEFAULT_SEARCH_LIMIT);
+  const { fetchLimit, sliceTo } = resolveFuzzyLimit(parsed.limit ?? opts.defaultLimit);
   const response = await client.searchNotes({
     ...scopeParams(parsed),
     search: buildFuzzyQuery(terms),
@@ -447,7 +500,7 @@ function resolveStrategy(
   originalQuery: string
 ): SearchStrategy | 'as-is' {
   if (parsed.fastSearch !== undefined) return 'as-is';
-  const strategy = parsed.strategy ?? defaultStrategy;
+  const strategy = parsed.strategy ?? opts.defaultStrategy;
   if (strategy !== 'auto') return strategy;
   const plain = effectiveQuery === originalQuery && isFuzzyEligible(originalQuery, 'force');
   return plain ? 'auto' : 'full';
@@ -480,7 +533,7 @@ async function runExactSearch(
     return { ...fast, searchMode: 'fast', note: FAST_NOTE };
   }
 
-  const enough = Math.min(parsed.limit ?? DEFAULT_SEARCH_LIMIT, FAST_FIRST_MIN_RESULTS);
+  const enough = Math.min(parsed.limit ?? opts.defaultLimit, opts.fastFirstMinResults);
   if (fast.results.length >= enough) {
     return { ...fast, searchMode: 'fast', note: FAST_NOTE };
   }
@@ -530,14 +583,14 @@ async function runSearchWithFallback(
   }
 
   // Over-fetch by one so truncation is observable without a second query.
-  const limit = parsed.limit ?? DEFAULT_SEARCH_LIMIT;
+  const limit = parsed.limit ?? opts.defaultLimit;
   const fetched = await runExactSearch(
     client,
     parsed,
     effectiveQuery,
     strategy,
     ctx,
-    Math.min(limit + 1, MAX_SEARCH_LIMIT)
+    Math.min(limit + 1, opts.maxLimit)
   );
   const exact = {
     ...fetched,
@@ -621,14 +674,14 @@ export async function handleSearchTool(
     case 'get_note_tree': {
       const parsed = getNoteTreeSchema.parse(args);
       const includeSystem = parsed.noteId.startsWith('_');
-      const budget = { remaining: MAX_TREE_NOTES, truncated: false };
+      const budget = { remaining: opts.maxTreeNotes, truncated: false };
       const root = await client.getNote(parsed.noteId);
       const tree = await buildTree(client, root, parsed.depth, includeSystem, budget);
       const payload: Record<string, unknown> = { ...tree };
       if (budget.truncated) {
         payload.truncated = true;
         payload.note =
-          `Fetched at most ${MAX_TREE_NOTES} notes; some children are omitted. ` +
+          `Fetched at most ${opts.maxTreeNotes} notes; some children are omitted. ` +
           'Call get_note_tree on a child noteId to continue exploring.';
       }
       return {

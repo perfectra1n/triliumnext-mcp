@@ -730,13 +730,12 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       const data = await client.exportNote(note.note.noteId, 'html');
 
-      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(Buffer.isBuffer(data)).toBe(true);
       expect(data.byteLength).toBeGreaterThan(0);
 
       // Check ZIP magic bytes
-      const bytes = new Uint8Array(data);
-      expect(bytes[0]).toBe(0x50); // P
-      expect(bytes[1]).toBe(0x4b); // K
+      expect(data[0]).toBe(0x50); // P
+      expect(data[1]).toBe(0x4b); // K
     });
 
     it('export_note - should export as markdown format', async () => {
@@ -749,7 +748,7 @@ describe('TriliumNext ETAPI Integration Tests', () => {
 
       const data = await client.exportNote(note.note.noteId, 'markdown');
 
-      expect(data).toBeInstanceOf(ArrayBuffer);
+      expect(Buffer.isBuffer(data)).toBe(true);
       expect(data.byteLength).toBeGreaterThan(0);
     });
   });

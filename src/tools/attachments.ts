@@ -1,11 +1,11 @@
 import { z } from 'zod';
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
-import type { TriliumClient } from '../client/trilium.js';
+import { TriliumResponseTooLargeError, type TriliumClient } from '../client/trilium.js';
 import type { Attachment } from '../types/etapi.js';
 import { defineTool, type ToolHandlerResult } from './schemas.js';
 import { entityIdSchema, positionSchema, required } from './validators.js';
 import { searchReplaceBlockSchema, resolveContent, verifySearchReplaceResults } from './diff.js';
-import { capWithNotice } from './contentLimits.js';
+import { base64DecodedLength, capWithNotice, formatMegabytes } from './contentLimits.js';
 import {
   IMAGE_MIME_TYPES,
   isImageMimeType,
@@ -24,8 +24,18 @@ export { IMAGE_MIME_TYPES, isImageMimeType, isBinaryMimeType, parseDataUrl };
 // Schemas
 // ============================================================================
 
-/** get_attachment returns non-image binaries as an embedded resource up to this size. */
-const BINARY_RESOURCE_MAX_BYTES = 5 * 1024 * 1024;
+/**
+ * Default cap on attachment bytes get_attachment inlines — image blocks and
+ * base64 embedded resources alike (TRILIUM_MAX_INLINE_ATTACHMENT_BYTES).
+ */
+export const BINARY_RESOURCE_MAX_BYTES = 5 * 1024 * 1024;
+
+let maxInlineAttachmentBytes = BINARY_RESOURCE_MAX_BYTES;
+
+/** Process-wide attachment-tool limits. Call before registering tools. */
+export function configureAttachmentTools(options: { maxInlineAttachmentBytes?: number }): void {
+  maxInlineAttachmentBytes = options.maxInlineAttachmentBytes ?? BINARY_RESOURCE_MAX_BYTES;
+}
 
 const ROLE_GUIDANCE =
   '"image" for pictures embedded in the note, "file" for downloadable files (Trilium accepts other ' +
@@ -197,8 +207,8 @@ export function registerAttachmentTools(): Tool[] {
       'get_attachment',
       "Read one attachment (attachmentId) or list a note's attachments (noteId, metadata only). " +
         'Bodies come back by type: images as image blocks, text as a string (long text is truncated), ' +
-        `other binaries as a base64 embedded resource up to ${BINARY_RESOURCE_MAX_BYTES / 1024 / 1024} MB ` +
-        '(larger ones return metadata only).',
+        'other binaries as a base64 embedded resource. Images and binaries over ' +
+        `${formatMegabytes(maxInlineAttachmentBytes)} return metadata only.`,
       getAttachmentSchema,
       { title: 'Read attachment(s)', readOnlyHint: true, openWorldHint: false }
     ),
@@ -249,7 +259,8 @@ export function registerAttachmentTools(): Tool[] {
 // Dispatch
 // ============================================================================
 
-function tooLarge(attachment: Attachment, sizeBytes: number): ToolHandlerResult {
+function tooLarge(attachment: Attachment, sizeBytes: number, atLeast = false): ToolHandlerResult {
+  const kind = isImageMimeType(attachment.mime) ? 'image' : 'binary';
   return {
     content: [
       {
@@ -258,8 +269,9 @@ function tooLarge(attachment: Attachment, sizeBytes: number): ToolHandlerResult 
           {
             ...attachment,
             notice:
-              `Content not returned: ${sizeBytes} bytes exceeds the ${BINARY_RESOURCE_MAX_BYTES}-byte ` +
-              'limit for binary attachments. Open it in Trilium instead.',
+              `Content not returned: this ${kind} attachment is ${atLeast ? 'at least ' : ''}${sizeBytes} ` +
+              `bytes, over the ${maxInlineAttachmentBytes}-byte limit, so it is too large to inline here. ` +
+              'Do not retry; have the user open it in Trilium instead.',
           },
           null,
           2
@@ -334,26 +346,39 @@ export async function handleAttachmentTool(
         };
       }
 
-      if (isImageMimeType(attachment.mime)) {
-        const base64Content = await client.getAttachmentContentAsBase64(attachmentId);
-        return {
-          content: [
-            {
-              type: 'image',
-              data: base64Content,
-              mimeType: attachment.mime,
-            },
-          ],
-        };
-      }
-
-      if (isBinaryMimeType(attachment.mime)) {
-        if ((attachment.contentLength ?? 0) > BINARY_RESOURCE_MAX_BYTES) {
+      const isImage = isImageMimeType(attachment.mime);
+      if (isImage || isBinaryMimeType(attachment.mime)) {
+        // Images and binaries are inlined as base64 (a ~1.33x copy on top of
+        // the bytes), so both are capped: first on the declared size, without
+        // fetching anything, then on the bytes actually received — the client
+        // stops reading once the cap is passed, so an oversized blob is never
+        // buffered whole.
+        const maxBytes = maxInlineAttachmentBytes;
+        if ((attachment.contentLength ?? 0) > maxBytes) {
           return tooLarge(attachment, attachment.contentLength);
         }
-        const bytes = await client.getAttachmentContentBinary(attachmentId);
-        if (bytes.length > BINARY_RESOURCE_MAX_BYTES) {
-          return tooLarge(attachment, bytes.length);
+        let encoded: string;
+        try {
+          if (isImage) {
+            encoded = await client.getAttachmentContentAsBase64(attachmentId, maxBytes);
+          } else {
+            encoded = (await client.getAttachmentContentBinary(attachmentId, maxBytes)).toString(
+              'base64'
+            );
+          }
+        } catch (error) {
+          if (error instanceof TriliumResponseTooLargeError) {
+            return tooLarge(attachment, error.sizeBytes, true);
+          }
+          throw error;
+        }
+        // contentLength can be absent or stale; re-check what actually came back.
+        const actualBytes = base64DecodedLength(encoded);
+        if (actualBytes > maxBytes) {
+          return tooLarge(attachment, actualBytes);
+        }
+        if (isImage) {
+          return { content: [{ type: 'image', data: encoded, mimeType: attachment.mime }] };
         }
         return {
           content: [
@@ -362,7 +387,7 @@ export async function handleAttachmentTool(
               resource: {
                 uri: `trilium://attachment/${encodeURIComponent(attachmentId)}`,
                 mimeType: attachment.mime,
-                blob: bytes.toString('base64'),
+                blob: encoded,
               },
             },
           ],

@@ -206,6 +206,71 @@ export interface Config {
   busyCooldownMs?: number;
   /** Default `strategy` for search_notes. */
   searchStrategy?: SearchStrategy;
+
+  // ---- Tunables below are optional so embedders/tests may omit them; loadConfig
+  // ---- always fills them with the defaults documented in printHelp / README.
+
+  /** Timeout for cheap requests while a Trilium is marked busy (default 5s). */
+  busyProbeTimeoutMs?: number;
+  /** Retries for idempotent ETAPI requests on network errors / 502-504 (default 2). */
+  maxRetries?: number;
+  /** Base retry backoff in ms, doubled per attempt (default 250). */
+  retryDelayMs?: number;
+  /**
+   * Largest ETAPI response body buffered for any request (default 64 MiB).
+   * Larger bodies are refused before they are read into memory.
+   */
+  maxResponseBytes?: number;
+  /** get_attachment inlines image/binary attachments up to this size (default 5 MiB). */
+  maxInlineAttachmentBytes?: number;
+  /** get_note inlines each embedded image up to this size (default 1 MiB). */
+  maxNoteImageBytes?: number;
+  /** get_note inlines embedded images up to this total per call (default 4 MiB). */
+  maxNoteImagesTotalBytes?: number;
+  /** Largest export ZIP manage_system returns inline (default 10 MiB). */
+  maxExportBytes?: number;
+  /** Characters of text returned per read before truncation/paging (default 50000). */
+  contentCharCap?: number;
+  /** Ceiling for get_note's content_max_chars parameter (default 500000). */
+  contentMaxCharsLimit?: number;
+  /** Timeout for each http(s) content download (default 30s). */
+  contentFetchTimeoutMs?: number;
+  /** Progress heartbeat cadence during slow tool calls (default 10s). */
+  progressIntervalMs?: number;
+  /** search_notes `limit` default (50) and ceiling (10000). */
+  defaultSearchLimit?: number;
+  maxSearchLimit?: number;
+  /** strategy "auto": a fast pass with at least this many hits skips the body search (default 5). */
+  searchFastMinResults?: number;
+  /** search_notes results that get a contentPreview (default 20). */
+  searchPreviewMaxResults?: number;
+  /** Max in-flight ETAPI requests for preview / tree fan-out (default 5). */
+  fetchConcurrency?: number;
+  /** Notes fetched per get_note_tree call (default 200). */
+  treeMaxNotes?: number;
+  /** Fuzzy fallback: max OR terms (8), recall multiplier (4), recall window cap (200). */
+  fuzzyMaxTerms?: number;
+  fuzzyRecallMultiplier?: number;
+  fuzzyRecallCap?: number;
+  /** get_note include_path: max tree placements walked (default 10). */
+  noteMaxPaths?: number;
+  /** get_note include_backlinks: max backlinks returned (default 50). */
+  noteMaxBacklinks?: number;
+  /** get_note_history `limit` default (100) and ceiling (1000). */
+  historyLimit?: number;
+  historyMaxLimit?: number;
+  /** SSE keep-alive ping cadence (default 30s). */
+  sseKeepaliveMs?: number;
+  /** Idle TTL for Streamable HTTP sessions; 0 disables expiry (default 30m). */
+  sessionIdleTtlMs?: number;
+  /** How often idle sessions are swept (default min(60s, max(1s, ttl/2))). */
+  sessionSweepIntervalMs?: number;
+  /** Max concurrently open MCP sessions across both HTTP transports (default 1000). */
+  maxSessions?: number;
+  /** Timeout of the Trilium probe made when an HTTP session connects (default 10s). */
+  triliumValidateTimeoutMs?: number;
+  /** Clock skew tolerated on JWT exp/nbf, in seconds (default 30). */
+  jwtClockToleranceSec?: number;
 }
 
 interface ConfigFile {
@@ -241,6 +306,37 @@ interface ConfigFile {
   requestTimeoutMs?: number;
   busyCooldownMs?: number;
   searchStrategy?: string;
+  busyProbeTimeoutMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  maxResponseBytes?: number;
+  maxInlineAttachmentBytes?: number;
+  maxNoteImageBytes?: number;
+  maxNoteImagesTotalBytes?: number;
+  maxExportBytes?: number;
+  contentCharCap?: number;
+  contentMaxCharsLimit?: number;
+  contentFetchTimeoutMs?: number;
+  progressIntervalMs?: number;
+  defaultSearchLimit?: number;
+  maxSearchLimit?: number;
+  searchFastMinResults?: number;
+  searchPreviewMaxResults?: number;
+  fetchConcurrency?: number;
+  treeMaxNotes?: number;
+  fuzzyMaxTerms?: number;
+  fuzzyRecallMultiplier?: number;
+  fuzzyRecallCap?: number;
+  noteMaxPaths?: number;
+  noteMaxBacklinks?: number;
+  historyLimit?: number;
+  historyMaxLimit?: number;
+  sseKeepaliveMs?: number;
+  sessionIdleTtlMs?: number;
+  sessionSweepIntervalMs?: number;
+  maxSessions?: number;
+  triliumValidateTimeoutMs?: number;
+  jwtClockToleranceSec?: number;
 }
 
 interface CliArgs {
@@ -277,6 +373,37 @@ interface CliArgs {
   requestTimeoutMs?: number;
   busyCooldownMs?: number;
   searchStrategy?: string;
+  busyProbeTimeoutMs?: number;
+  maxRetries?: string;
+  retryDelayMs?: number;
+  maxResponseBytes?: number;
+  maxInlineAttachmentBytes?: number;
+  maxNoteImageBytes?: number;
+  maxNoteImagesTotalBytes?: number;
+  maxExportBytes?: number;
+  contentCharCap?: string;
+  contentMaxCharsLimit?: string;
+  contentFetchTimeoutMs?: number;
+  progressIntervalMs?: number;
+  defaultSearchLimit?: string;
+  maxSearchLimit?: string;
+  searchFastMinResults?: string;
+  searchPreviewMaxResults?: string;
+  fetchConcurrency?: string;
+  treeMaxNotes?: string;
+  fuzzyMaxTerms?: string;
+  fuzzyRecallMultiplier?: string;
+  fuzzyRecallCap?: string;
+  noteMaxPaths?: string;
+  noteMaxBacklinks?: string;
+  historyLimit?: string;
+  historyMaxLimit?: string;
+  sseKeepaliveMs?: number;
+  sessionIdleTtlMs?: number;
+  sessionSweepIntervalMs?: number;
+  maxSessions?: string;
+  triliumValidateTimeoutMs?: number;
+  jwtClockToleranceSec?: string;
 }
 
 function requireSize(flag: string, raw: string): number {
@@ -287,11 +414,11 @@ function requireSize(flag: string, raw: string): number {
   return parsed;
 }
 
-function requireDuration(flag: string, raw: string): number {
-  const parsed = parseDuration(raw);
+function requireDuration(flag: string, raw: string, allowZero = false): number {
+  const parsed = allowZero ? parseDurationOrZero(raw) : parseDuration(raw);
   if (parsed === undefined) {
     throw new ConfigError(
-      `Invalid duration for ${flag}: "${raw}" (use ms or e.g. 500ms, 90s, 2m).`
+      `Invalid duration for ${flag}: "${raw}" (use ms or e.g. 500ms, 90s, 2m${allowZero ? '; 0 disables' : ''}).`
     );
   }
   return parsed;
@@ -420,6 +547,99 @@ function parseCliArgs(args: string[]): CliArgs {
         break;
       case '--search-strategy':
         result.searchStrategy = value();
+        break;
+      case '--busy-probe-timeout':
+        result.busyProbeTimeoutMs = requireDuration(arg, value());
+        break;
+      case '--max-retries':
+        result.maxRetries = value();
+        break;
+      case '--retry-delay':
+        result.retryDelayMs = requireDuration(arg, value());
+        break;
+      case '--max-response-bytes':
+        result.maxResponseBytes = requireSize(arg, value());
+        break;
+      case '--max-inline-attachment-bytes':
+        result.maxInlineAttachmentBytes = requireSize(arg, value());
+        break;
+      case '--max-note-image-bytes':
+        result.maxNoteImageBytes = requireSize(arg, value());
+        break;
+      case '--max-note-images-total-bytes':
+        result.maxNoteImagesTotalBytes = requireSize(arg, value());
+        break;
+      case '--max-export-bytes':
+        result.maxExportBytes = requireSize(arg, value());
+        break;
+      case '--content-char-cap':
+        result.contentCharCap = value();
+        break;
+      case '--content-max-chars-limit':
+        result.contentMaxCharsLimit = value();
+        break;
+      case '--content-fetch-timeout':
+        result.contentFetchTimeoutMs = requireDuration(arg, value());
+        break;
+      case '--progress-interval':
+        result.progressIntervalMs = requireDuration(arg, value());
+        break;
+      case '--default-search-limit':
+        result.defaultSearchLimit = value();
+        break;
+      case '--max-search-limit':
+        result.maxSearchLimit = value();
+        break;
+      case '--search-fast-min-results':
+        result.searchFastMinResults = value();
+        break;
+      case '--search-preview-max-results':
+        result.searchPreviewMaxResults = value();
+        break;
+      case '--fetch-concurrency':
+        result.fetchConcurrency = value();
+        break;
+      case '--tree-max-notes':
+        result.treeMaxNotes = value();
+        break;
+      case '--fuzzy-max-terms':
+        result.fuzzyMaxTerms = value();
+        break;
+      case '--fuzzy-recall-multiplier':
+        result.fuzzyRecallMultiplier = value();
+        break;
+      case '--fuzzy-recall-cap':
+        result.fuzzyRecallCap = value();
+        break;
+      case '--note-max-paths':
+        result.noteMaxPaths = value();
+        break;
+      case '--note-max-backlinks':
+        result.noteMaxBacklinks = value();
+        break;
+      case '--history-limit':
+        result.historyLimit = value();
+        break;
+      case '--history-max-limit':
+        result.historyMaxLimit = value();
+        break;
+      case '--sse-keepalive':
+        result.sseKeepaliveMs = requireDuration(arg, value());
+        break;
+      case '--session-idle-ttl':
+        result.sessionIdleTtlMs = requireDuration(arg, value(), true);
+        break;
+      case '--session-sweep-interval':
+        result.sessionSweepIntervalMs = requireDuration(arg, value());
+        break;
+      case '--max-sessions':
+        result.maxSessions = value();
+        break;
+      case '--validate-timeout':
+        result.triliumValidateTimeoutMs = requireDuration(arg, value());
+        break;
+      case '--jwt-clock-tolerance':
+        result.jwtClockToleranceSec = value();
         break;
       case '--help':
       case '-h':
@@ -565,6 +785,60 @@ Backend behaviour:
   --search-strategy <mode>           Default search_notes strategy: auto (titles and labels
                                      first, note bodies only if that finds too few), fast, or
                                      full. Default: auto.
+  --busy-probe-timeout <duration>    Timeout for other requests while Trilium is marked busy.
+                                     Default: 5s.
+  --max-retries <n>                  Retries for idempotent requests on network errors or
+                                     502/503/504. Default: 2.
+  --retry-delay <duration>           Base retry backoff, doubled per attempt. Default: 250ms.
+  --max-response-bytes <size>        Largest ETAPI response buffered for any request; bigger
+                                     bodies are refused before being read. Default: 64mb.
+
+Response limits (what tools return to the model):
+  --max-inline-attachment-bytes <size>
+                                     get_attachment inlines images/binaries up to this size;
+                                     larger ones return metadata only. Default: 5mb.
+  --max-note-image-bytes <size>      get_note inlines each embedded image up to this size.
+                                     Default: 1mb.
+  --max-note-images-total-bytes <size>
+                                     get_note inlines embedded images up to this total per call.
+                                     Default: 4mb.
+  --max-export-bytes <size>          Largest export ZIP returned inline. Default: 10mb.
+  --content-char-cap <n>             Text characters returned per read before truncation or
+                                     paging (get_note default page, revisions, attachments).
+                                     Default: 50000.
+  --content-max-chars-limit <n>      Ceiling for get_note's content_max_chars. Default: 500000.
+  --content-fetch-timeout <duration> Timeout for each http(s) content download. Default: 30s.
+  --progress-interval <duration>     Progress heartbeat cadence during slow tool calls.
+                                     Default: 10s.
+
+Search tuning:
+  --default-search-limit <n>         search_notes results when no limit is given. Default: 50.
+  --max-search-limit <n>             Ceiling for search_notes' limit. Default: 10000.
+  --search-fast-min-results <n>      strategy auto: a title/label pass with this many hits skips
+                                     the body search. Default: 5.
+  --search-preview-max-results <n>   Results that get a contentPreview. Default: 20.
+  --fetch-concurrency <n>            Max in-flight ETAPI requests for preview/tree fan-out.
+                                     Default: 5.
+  --tree-max-notes <n>               Notes fetched per get_note_tree call. Default: 200.
+  --fuzzy-max-terms <n>              Fuzzy fallback: max OR terms. Default: 8.
+  --fuzzy-recall-multiplier <n>      Fuzzy fallback: candidates fetched per result. Default: 4.
+  --fuzzy-recall-cap <n>             Fuzzy fallback: candidate window cap. Default: 200.
+  --note-max-paths <n>               get_note include_path: max placements walked. Default: 10.
+  --note-max-backlinks <n>           get_note include_backlinks: max backlinks. Default: 50.
+  --history-limit <n>                get_note_history default limit. Default: 100.
+  --history-max-limit <n>            get_note_history limit ceiling. Default: 1000.
+
+HTTP sessions (require --transport http):
+  --sse-keepalive <duration>         SSE keep-alive ping cadence. Default: 30s.
+  --session-idle-ttl <duration>      Expire Streamable HTTP sessions idle this long (0 = never).
+                                     Default: 30m.
+  --session-sweep-interval <duration>
+                                     How often idle sessions are swept.
+                                     Default: min(60s, max(1s, ttl/2)).
+  --max-sessions <n>                 Max concurrently open MCP sessions. Default: 1000.
+  --validate-timeout <duration>      Timeout of the Trilium probe on session connect.
+                                     Default: 10s.
+  --jwt-clock-tolerance <seconds>    Clock skew tolerated on JWT exp/nbf. Default: 30.
 
   -h, --help                         Show this help message
 
@@ -602,6 +876,37 @@ Environment Variables:
   TRILIUM_REQUEST_TIMEOUT            Per-request ETAPI timeout (ms, or e.g. 90s, 2m). Default: 60s.
   TRILIUM_BUSY_COOLDOWN              How long a timed-out Trilium is treated as busy. Default: 30s.
   TRILIUM_SEARCH_STRATEGY            Default search_notes strategy: auto | fast | full.
+  TRILIUM_BUSY_PROBE_TIMEOUT         --busy-probe-timeout          (default 5s)
+  TRILIUM_MAX_RETRIES                --max-retries                 (default 2)
+  TRILIUM_RETRY_DELAY                --retry-delay                 (default 250ms)
+  TRILIUM_MAX_RESPONSE_BYTES         --max-response-bytes          (default 64mb)
+  TRILIUM_MAX_INLINE_ATTACHMENT_BYTES --max-inline-attachment-bytes (default 5mb)
+  TRILIUM_MAX_NOTE_IMAGE_BYTES       --max-note-image-bytes        (default 1mb)
+  TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES --max-note-images-total-bytes (default 4mb)
+  TRILIUM_MAX_EXPORT_BYTES           --max-export-bytes            (default 10mb)
+  TRILIUM_CONTENT_CHAR_CAP           --content-char-cap            (default 50000)
+  TRILIUM_CONTENT_MAX_CHARS_LIMIT    --content-max-chars-limit     (default 500000)
+  TRILIUM_CONTENT_FETCH_TIMEOUT      --content-fetch-timeout       (default 30s)
+  TRILIUM_PROGRESS_INTERVAL          --progress-interval           (default 10s)
+  TRILIUM_DEFAULT_SEARCH_LIMIT       --default-search-limit        (default 50)
+  TRILIUM_MAX_SEARCH_LIMIT           --max-search-limit            (default 10000)
+  TRILIUM_SEARCH_FAST_MIN_RESULTS    --search-fast-min-results     (default 5)
+  TRILIUM_SEARCH_PREVIEW_MAX_RESULTS --search-preview-max-results  (default 20)
+  TRILIUM_FETCH_CONCURRENCY          --fetch-concurrency           (default 5)
+  TRILIUM_TREE_MAX_NOTES             --tree-max-notes              (default 200)
+  TRILIUM_FUZZY_MAX_TERMS            --fuzzy-max-terms             (default 8)
+  TRILIUM_FUZZY_RECALL_MULTIPLIER    --fuzzy-recall-multiplier     (default 4)
+  TRILIUM_FUZZY_RECALL_CAP           --fuzzy-recall-cap            (default 200)
+  TRILIUM_NOTE_MAX_PATHS             --note-max-paths              (default 10)
+  TRILIUM_NOTE_MAX_BACKLINKS         --note-max-backlinks          (default 50)
+  TRILIUM_HISTORY_LIMIT              --history-limit               (default 100)
+  TRILIUM_HISTORY_MAX_LIMIT          --history-max-limit           (default 1000)
+  TRILIUM_SSE_KEEPALIVE              --sse-keepalive               (default 30s)
+  TRILIUM_SESSION_IDLE_TTL           --session-idle-ttl            (default 30m; 0 = never)
+  TRILIUM_SESSION_SWEEP_INTERVAL     --session-sweep-interval      (default derived from TTL)
+  TRILIUM_MAX_SESSIONS               --max-sessions                (default 1000)
+  TRILIUM_VALIDATE_TIMEOUT           --validate-timeout            (default 10s)
+  TRILIUM_JWT_CLOCK_TOLERANCE        --jwt-clock-tolerance         (default 30, seconds)
 
 Logging:
   LOG_LEVEL                          silent | error | warn | info | debug (default: info)
@@ -683,6 +988,104 @@ const DEFAULT_MAX_POST_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_CONTENT_FETCH_BYTES = 50 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
+const MIB = 1024 * 1024;
+
+/**
+ * Defaults for the numeric tunables. Each mirrors the default the owning
+ * module uses when it is not configured (client, tools, HTTP server), so an
+ * unconfigured embedder and a default-configured server behave identically.
+ */
+export const TUNABLE_DEFAULTS = {
+  busyProbeTimeoutMs: 5_000,
+  maxRetries: 2,
+  retryDelayMs: 250,
+  maxResponseBytes: 64 * MIB,
+  maxInlineAttachmentBytes: 5 * MIB,
+  maxNoteImageBytes: 1 * MIB,
+  maxNoteImagesTotalBytes: 4 * MIB,
+  maxExportBytes: 10 * MIB,
+  contentCharCap: 50_000,
+  contentMaxCharsLimit: 500_000,
+  contentFetchTimeoutMs: 30_000,
+  progressIntervalMs: 10_000,
+  defaultSearchLimit: 50,
+  maxSearchLimit: 10_000,
+  searchFastMinResults: 5,
+  searchPreviewMaxResults: 20,
+  fetchConcurrency: 5,
+  treeMaxNotes: 200,
+  fuzzyMaxTerms: 8,
+  fuzzyRecallMultiplier: 4,
+  fuzzyRecallCap: 200,
+  noteMaxPaths: 10,
+  noteMaxBacklinks: 50,
+  historyLimit: 100,
+  historyMaxLimit: 1000,
+  sseKeepaliveMs: 30_000,
+  sessionIdleTtlMs: 30 * 60 * 1000,
+  maxSessions: 1000,
+  triliumValidateTimeoutMs: 10_000,
+  jwtClockToleranceSec: 30,
+} as const;
+
+/** CLI > env > file > default for a byte size. Invalid env values fall back, like the other sizes. */
+function sizeSetting(
+  cli: number | undefined,
+  envVar: string,
+  file: unknown,
+  fallback: number
+): number {
+  return cli ?? parseSize(process.env[envVar]) ?? fileNumber(file, envVar, 0) ?? fallback;
+}
+
+/** CLI > env > file > default for a duration in ms. Invalid env values fall back, like the other durations. */
+function durationSetting(
+  cli: number | undefined,
+  envVar: string,
+  file: unknown,
+  fallback: number | undefined,
+  allowZero = false
+): number | undefined {
+  const env = allowZero
+    ? parseDurationOrZero(process.env[envVar])
+    : parseDuration(process.env[envVar]);
+  return cli ?? env ?? fileNumber(file, envVar, allowZero ? 0 : 1) ?? fallback;
+}
+
+/** CLI > env > file > default for an integer; any invalid value is a ConfigError (like the rate limits). */
+function intSetting(
+  cli: string | undefined,
+  envVar: string,
+  file: unknown,
+  fallback: number,
+  min: number
+): number {
+  const raw = cli ?? emptyToUndefined(process.env[envVar]) ?? file;
+  if (raw === undefined) return fallback;
+  const n =
+    typeof raw === 'number'
+      ? raw
+      : typeof raw === 'string' && raw.trim() !== ''
+        ? Number(raw.trim())
+        : NaN;
+  if (!Number.isInteger(n) || n < min) {
+    throw new ConfigError(
+      `Invalid value for ${envVar}: "${String(raw)}". Must be an integer >= ${min}.`
+    );
+  }
+  return n;
+}
+
+/** A numeric config-file value: absent → undefined; present but not a number >= min → ConfigError. */
+function fileNumber(value: unknown, envVar: string, min: number): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < min) {
+    throw new ConfigError(
+      `Invalid config-file value for ${envVar}: ${JSON.stringify(value)}. Must be a number >= ${min}.`
+    );
+  }
+  return value;
+}
 
 /** Accepts milliseconds ("90000") or a suffixed value ("500ms", "90s", "2m"). */
 export function parseDuration(value: string | undefined): number | undefined {
@@ -693,6 +1096,12 @@ export function parseDuration(value: string | undefined): number | undefined {
   const unit = (match[2] ?? 'ms').toLowerCase();
   const ms = unit === 'm' ? n * 60_000 : unit === 's' ? n * 1000 : n;
   return ms > 0 ? Math.round(ms) : undefined;
+}
+
+/** Like {@link parseDuration}, but also accepts an explicit "0" (e.g. "disabled"). */
+function parseDurationOrZero(value: string | undefined): number | undefined {
+  if (value !== undefined && /^\s*0+(\.0+)?\s*(ms|s|m)?\s*$/i.test(value)) return 0;
+  return parseDuration(value);
 }
 
 /** Accepts a raw byte count or a suffixed value like "500mb", "10MiB", "2g". */
@@ -916,6 +1325,214 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
   const searchStrategy: SearchStrategy =
     searchStrategyRaw === 'fast' || searchStrategyRaw === 'full' ? searchStrategyRaw : 'auto';
 
+  const D = TUNABLE_DEFAULTS;
+  const busyProbeTimeoutMs = durationSetting(
+    cli.busyProbeTimeoutMs,
+    'TRILIUM_BUSY_PROBE_TIMEOUT',
+    file.busyProbeTimeoutMs,
+    D.busyProbeTimeoutMs
+  );
+  const maxRetries = intSetting(
+    cli.maxRetries,
+    'TRILIUM_MAX_RETRIES',
+    file.maxRetries,
+    D.maxRetries,
+    0
+  );
+  const retryDelayMs = durationSetting(
+    cli.retryDelayMs,
+    'TRILIUM_RETRY_DELAY',
+    file.retryDelayMs,
+    D.retryDelayMs
+  );
+  const maxResponseBytes = sizeSetting(
+    cli.maxResponseBytes,
+    'TRILIUM_MAX_RESPONSE_BYTES',
+    file.maxResponseBytes,
+    D.maxResponseBytes
+  );
+  const maxInlineAttachmentBytes = sizeSetting(
+    cli.maxInlineAttachmentBytes,
+    'TRILIUM_MAX_INLINE_ATTACHMENT_BYTES',
+    file.maxInlineAttachmentBytes,
+    D.maxInlineAttachmentBytes
+  );
+  const maxNoteImageBytes = sizeSetting(
+    cli.maxNoteImageBytes,
+    'TRILIUM_MAX_NOTE_IMAGE_BYTES',
+    file.maxNoteImageBytes,
+    D.maxNoteImageBytes
+  );
+  const maxNoteImagesTotalBytes = sizeSetting(
+    cli.maxNoteImagesTotalBytes,
+    'TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES',
+    file.maxNoteImagesTotalBytes,
+    D.maxNoteImagesTotalBytes
+  );
+  const maxExportBytes = sizeSetting(
+    cli.maxExportBytes,
+    'TRILIUM_MAX_EXPORT_BYTES',
+    file.maxExportBytes,
+    D.maxExportBytes
+  );
+  const contentCharCap = intSetting(
+    cli.contentCharCap,
+    'TRILIUM_CONTENT_CHAR_CAP',
+    file.contentCharCap,
+    D.contentCharCap,
+    1
+  );
+  const contentMaxCharsLimit = intSetting(
+    cli.contentMaxCharsLimit,
+    'TRILIUM_CONTENT_MAX_CHARS_LIMIT',
+    file.contentMaxCharsLimit,
+    D.contentMaxCharsLimit,
+    1
+  );
+  const contentFetchTimeoutMs = durationSetting(
+    cli.contentFetchTimeoutMs,
+    'TRILIUM_CONTENT_FETCH_TIMEOUT',
+    file.contentFetchTimeoutMs,
+    D.contentFetchTimeoutMs
+  );
+  const progressIntervalMs = durationSetting(
+    cli.progressIntervalMs,
+    'TRILIUM_PROGRESS_INTERVAL',
+    file.progressIntervalMs,
+    D.progressIntervalMs
+  );
+  const defaultSearchLimit = intSetting(
+    cli.defaultSearchLimit,
+    'TRILIUM_DEFAULT_SEARCH_LIMIT',
+    file.defaultSearchLimit,
+    D.defaultSearchLimit,
+    1
+  );
+  const maxSearchLimit = intSetting(
+    cli.maxSearchLimit,
+    'TRILIUM_MAX_SEARCH_LIMIT',
+    file.maxSearchLimit,
+    D.maxSearchLimit,
+    1
+  );
+  const searchFastMinResults = intSetting(
+    cli.searchFastMinResults,
+    'TRILIUM_SEARCH_FAST_MIN_RESULTS',
+    file.searchFastMinResults,
+    D.searchFastMinResults,
+    1
+  );
+  const searchPreviewMaxResults = intSetting(
+    cli.searchPreviewMaxResults,
+    'TRILIUM_SEARCH_PREVIEW_MAX_RESULTS',
+    file.searchPreviewMaxResults,
+    D.searchPreviewMaxResults,
+    0
+  );
+  const fetchConcurrency = intSetting(
+    cli.fetchConcurrency,
+    'TRILIUM_FETCH_CONCURRENCY',
+    file.fetchConcurrency,
+    D.fetchConcurrency,
+    1
+  );
+  const treeMaxNotes = intSetting(
+    cli.treeMaxNotes,
+    'TRILIUM_TREE_MAX_NOTES',
+    file.treeMaxNotes,
+    D.treeMaxNotes,
+    1
+  );
+  const fuzzyMaxTerms = intSetting(
+    cli.fuzzyMaxTerms,
+    'TRILIUM_FUZZY_MAX_TERMS',
+    file.fuzzyMaxTerms,
+    D.fuzzyMaxTerms,
+    1
+  );
+  const fuzzyRecallMultiplier = intSetting(
+    cli.fuzzyRecallMultiplier,
+    'TRILIUM_FUZZY_RECALL_MULTIPLIER',
+    file.fuzzyRecallMultiplier,
+    D.fuzzyRecallMultiplier,
+    1
+  );
+  const fuzzyRecallCap = intSetting(
+    cli.fuzzyRecallCap,
+    'TRILIUM_FUZZY_RECALL_CAP',
+    file.fuzzyRecallCap,
+    D.fuzzyRecallCap,
+    1
+  );
+  const noteMaxPaths = intSetting(
+    cli.noteMaxPaths,
+    'TRILIUM_NOTE_MAX_PATHS',
+    file.noteMaxPaths,
+    D.noteMaxPaths,
+    1
+  );
+  const noteMaxBacklinks = intSetting(
+    cli.noteMaxBacklinks,
+    'TRILIUM_NOTE_MAX_BACKLINKS',
+    file.noteMaxBacklinks,
+    D.noteMaxBacklinks,
+    1
+  );
+  const historyLimit = intSetting(
+    cli.historyLimit,
+    'TRILIUM_HISTORY_LIMIT',
+    file.historyLimit,
+    D.historyLimit,
+    1
+  );
+  const historyMaxLimit = intSetting(
+    cli.historyMaxLimit,
+    'TRILIUM_HISTORY_MAX_LIMIT',
+    file.historyMaxLimit,
+    D.historyMaxLimit,
+    1
+  );
+  const sseKeepaliveMs = durationSetting(
+    cli.sseKeepaliveMs,
+    'TRILIUM_SSE_KEEPALIVE',
+    file.sseKeepaliveMs,
+    D.sseKeepaliveMs
+  );
+  const sessionIdleTtlMs = durationSetting(
+    cli.sessionIdleTtlMs,
+    'TRILIUM_SESSION_IDLE_TTL',
+    file.sessionIdleTtlMs,
+    D.sessionIdleTtlMs,
+    true
+  );
+  // Unset → derived from the TTL by the HTTP server.
+  const sessionSweepIntervalMs = durationSetting(
+    cli.sessionSweepIntervalMs,
+    'TRILIUM_SESSION_SWEEP_INTERVAL',
+    file.sessionSweepIntervalMs,
+    undefined
+  );
+  const maxSessions = intSetting(
+    cli.maxSessions,
+    'TRILIUM_MAX_SESSIONS',
+    file.maxSessions,
+    D.maxSessions,
+    1
+  );
+  const triliumValidateTimeoutMs = durationSetting(
+    cli.triliumValidateTimeoutMs,
+    'TRILIUM_VALIDATE_TIMEOUT',
+    file.triliumValidateTimeoutMs,
+    D.triliumValidateTimeoutMs
+  );
+  const jwtClockToleranceSec = intSetting(
+    cli.jwtClockToleranceSec,
+    'TRILIUM_JWT_CLOCK_TOLERANCE',
+    file.jwtClockToleranceSec,
+    D.jwtClockToleranceSec,
+    0
+  );
+
   const metricsAuthRaw =
     cli.metricsAuth ??
     emptyToUndefined(process.env.TRILIUM_METRICS_AUTH) ??
@@ -1069,5 +1686,36 @@ export function loadConfig(args: string[] = process.argv.slice(2)): Config | nul
     requestTimeoutMs,
     busyCooldownMs,
     searchStrategy,
+    busyProbeTimeoutMs,
+    maxRetries,
+    retryDelayMs,
+    maxResponseBytes,
+    maxInlineAttachmentBytes,
+    maxNoteImageBytes,
+    maxNoteImagesTotalBytes,
+    maxExportBytes,
+    contentCharCap,
+    contentMaxCharsLimit,
+    contentFetchTimeoutMs,
+    progressIntervalMs,
+    defaultSearchLimit,
+    maxSearchLimit,
+    searchFastMinResults,
+    searchPreviewMaxResults,
+    fetchConcurrency,
+    treeMaxNotes,
+    fuzzyMaxTerms,
+    fuzzyRecallMultiplier,
+    fuzzyRecallCap,
+    noteMaxPaths,
+    noteMaxBacklinks,
+    historyLimit,
+    historyMaxLimit,
+    sseKeepaliveMs,
+    sessionIdleTtlMs,
+    sessionSweepIntervalMs,
+    maxSessions,
+    triliumValidateTimeoutMs,
+    jwtClockToleranceSec,
   };
 }

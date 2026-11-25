@@ -50,6 +50,27 @@ export class TriliumClientError extends Error {
   }
 }
 
+/**
+ * A Trilium response body was larger than the caller (or the client-wide
+ * `maxResponseBytes`) allows. Raised before the body is fully buffered, so an
+ * oversized blob never sits in memory. `sizeBytes` is the declared
+ * Content-Length, or the bytes read when the read was cut off (a lower bound).
+ */
+export class TriliumResponseTooLargeError extends TriliumClientError {
+  constructor(
+    public readonly sizeBytes: number,
+    public readonly maxBytes: number,
+    what: string
+  ) {
+    super(
+      413,
+      'RESPONSE_TOO_LARGE',
+      `Trilium's response to ${what} is ${sizeBytes} bytes or more, over the ${maxBytes}-byte limit.`
+    );
+    this.name = 'TriliumResponseTooLargeError';
+  }
+}
+
 /** Transport-level tuning for {@link TriliumClient}. All fields are optional. */
 export interface TriliumClientOptions {
   /** Per-request timeout in ms (default 60s). Export/import get 5x this. */
@@ -66,6 +87,12 @@ export interface TriliumClientOptions {
   /** Timeout for cheap requests while the host is marked busy (default 5s). */
   busyProbeTimeoutMs?: number;
   /**
+   * Largest response body any request may buffer (default 64 MiB). Bodies over
+   * this are refused from their Content-Length, or cut off mid-stream, instead
+   * of being read into memory. Per-call `maxBytes` caps can only lower it.
+   */
+  maxResponseBytes?: number;
+  /**
    * fetch implementation used for every request (default: the global `fetch`,
    * resolved per call). Lets the host inject an SSRF-guarded fetch.
    */
@@ -75,13 +102,27 @@ export interface TriliumClientOptions {
 export const DEFAULT_TIMEOUT_MS = 60_000;
 export const DEFAULT_BUSY_COOLDOWN_MS = 30_000;
 export const DEFAULT_BUSY_PROBE_TIMEOUT_MS = 5_000;
+export const DEFAULT_MAX_RETRIES = 2;
+export const DEFAULT_RETRY_DELAY_MS = 250;
+export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
 
 /** Map server config onto client options; unset fields keep the client defaults. */
 export function clientOptionsFromConfig(config: {
   requestTimeoutMs?: number;
   busyCooldownMs?: number;
+  busyProbeTimeoutMs?: number;
+  maxRetries?: number;
+  retryDelayMs?: number;
+  maxResponseBytes?: number;
 }): TriliumClientOptions {
-  return { timeoutMs: config.requestTimeoutMs, busyCooldownMs: config.busyCooldownMs };
+  return {
+    timeoutMs: config.requestTimeoutMs,
+    busyCooldownMs: config.busyCooldownMs,
+    busyProbeTimeoutMs: config.busyProbeTimeoutMs,
+    maxRetries: config.maxRetries,
+    retryDelayMs: config.retryDelayMs,
+    maxResponseBytes: config.maxResponseBytes,
+  };
 }
 
 /** Percent-encode an ID before it is interpolated into an ETAPI URL path. */
@@ -113,6 +154,61 @@ const RETRYABLE_STATUSES = new Set([502, 503, 504]);
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/** Error bodies are a few hundred bytes of JSON; anything bigger is not worth reading. */
+const ERROR_BODY_MAX_BYTES = 64 * 1024;
+
+type ResponseType = 'json' | 'text' | 'buffer';
+
+/**
+ * Read and decode a response body, refusing it as soon as it is known to be
+ * over `maxBytes`: up front from Content-Length, otherwise while streaming
+ * (Content-Length can be absent or lie). This is what keeps one huge blob from
+ * being buffered whole — and then copied again as text or base64.
+ */
+async function readBodyCapped<T>(
+  response: Response,
+  responseType: ResponseType,
+  maxBytes: number,
+  what: string
+): Promise<T> {
+  const declared = Number(response.headers?.get?.('content-length') ?? NaN);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new TriliumResponseTooLargeError(declared, maxBytes, what);
+  }
+
+  const body = response.body;
+  if (!body || typeof body.getReader !== 'function') {
+    // No stream to meter (an empty body, or a minimal fetch shim): use the
+    // whole-body readers, still enforcing the cap on what came back.
+    if (responseType === 'json') return (await response.json()) as T;
+    const buf =
+      responseType === 'buffer'
+        ? Buffer.from(await response.arrayBuffer())
+        : Buffer.from(await response.text(), 'utf8');
+    if (buf.length > maxBytes) throw new TriliumResponseTooLargeError(buf.length, maxBytes, what);
+    return (responseType === 'buffer' ? buf : buf.toString('utf8')) as T;
+  }
+
+  const reader = body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new TriliumResponseTooLargeError(total, maxBytes, what);
+    }
+    chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength));
+  }
+  const buf = Buffer.concat(chunks, total);
+  if (responseType === 'buffer') return buf as T;
+  const text = buf.toString('utf8');
+  return (responseType === 'text' ? text : JSON.parse(text)) as T;
+}
+
 export class TriliumClient {
   private readonly baseUrl: string;
   private readonly token: string;
@@ -122,6 +218,7 @@ export class TriliumClient {
   private readonly retryDelayMs: number;
   private readonly busyCooldownMs: number;
   private readonly busyProbeTimeoutMs: number;
+  private readonly maxResponseBytes: number;
   /** In-flight requests are only shared between callers holding the same token. */
   private readonly dedupeScope: string;
   private readonly fetchImpl?: typeof fetch;
@@ -143,8 +240,9 @@ export class TriliumClient {
     this.token = token;
     this.webBaseUrl = (webBaseUrl ?? baseUrl).replace(/\/etapi\/*$/i, '').replace(/\/+$/, '');
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = options.maxRetries ?? 2;
-    this.retryDelayMs = options.retryDelayMs ?? 250;
+    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
+    this.maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
     this.fetchImpl = options.fetchImpl;
     this.busyCooldownMs = options.busyCooldownMs ?? DEFAULT_BUSY_COOLDOWN_MS;
     this.busyProbeTimeoutMs = options.busyProbeTimeoutMs ?? DEFAULT_BUSY_PROBE_TIMEOUT_MS;
@@ -260,9 +358,11 @@ export class TriliumClient {
       body?: unknown;
       query?: Record<string, string | number | boolean | undefined>;
       contentType?: string;
-      responseType?: 'json' | 'text' | 'arraybuffer';
+      responseType?: ResponseType;
       /** Multiplier on the client timeout for slow endpoints (export/import). */
       timeoutFactor?: number;
+      /** Refuse a response body larger than this (never above `maxResponseBytes`). */
+      maxBytes?: number;
       /**
        * Slow on Trilium's side (a full-text search). Refused outright while the
        * host is marked busy, because it would queue behind the request that is
@@ -280,6 +380,7 @@ export class TriliumClient {
       responseType = 'json',
       timeoutFactor = 1,
       expensive = false,
+      maxBytes,
     } = options;
 
     let url = `${this.baseUrl}${path}`;
@@ -322,7 +423,12 @@ export class TriliumClient {
     };
 
     const send = (): Promise<T> =>
-      this.send<T>(method, path, url, init, { responseType, timeoutFactor, expensive });
+      this.send<T>(method, path, url, init, {
+        responseType,
+        timeoutFactor,
+        expensive,
+        maxBytes: Math.min(maxBytes ?? Infinity, this.maxResponseBytes),
+      });
     if (options.dedupe && method === 'GET') {
       // Each caller gets its own copy: tool handlers decorate results in place.
       return dedupe(`${this.dedupeScope}|${url}`, send).then((value) => structuredClone(value));
@@ -336,12 +442,13 @@ export class TriliumClient {
     url: string,
     init: RequestInit,
     opts: {
-      responseType: 'json' | 'text' | 'arraybuffer';
+      responseType: ResponseType;
       timeoutFactor: number;
       expensive: boolean;
+      maxBytes: number;
     }
   ): Promise<T> {
-    const { responseType, timeoutFactor, expensive } = opts;
+    const { responseType, timeoutFactor, expensive, maxBytes } = opts;
     const busyBefore = getBusy(this.baseUrl);
     if (busyBefore && expensive) {
       throw this.busyError(busyBefore);
@@ -413,7 +520,14 @@ export class TriliumClient {
     if (!response.ok) {
       let errorData: Partial<EtapiError> = {};
       try {
-        errorData = (await response.json()) as EtapiError;
+        // Error bodies are small; never buffer a large one (a tenant-supplied
+        // URL may point at anything).
+        errorData = await readBodyCapped<EtapiError>(
+          response,
+          'json',
+          ERROR_BODY_MAX_BYTES,
+          `${method} ${path}`
+        );
       } catch {
         // Non-JSON error body (e.g. a reverse proxy's HTML page) — fall through.
       }
@@ -432,13 +546,7 @@ export class TriliumClient {
     // The timeout signal stays armed while the body streams, so a slow body
     // read aborts too — map it like a timeout on the request itself.
     try {
-      if (responseType === 'text') {
-        return (await response.text()) as T;
-      }
-      if (responseType === 'arraybuffer') {
-        return (await response.arrayBuffer()) as T;
-      }
-      return (await response.json()) as T;
+      return await readBodyCapped<T>(response, responseType, maxBytes, `${method} ${path}`);
     } catch (error) {
       if (
         error instanceof Error &&
@@ -466,6 +574,14 @@ export class TriliumClient {
 
   async getNoteContent(noteId: EntityId): Promise<string> {
     return this.request<string>('GET', `/notes/${seg(noteId)}/content`, { responseType: 'text' });
+  }
+
+  /** Raw stored bytes of a note, refused when larger than `maxBytes`. */
+  async getNoteContentBinary(noteId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/notes/${seg(noteId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
+    });
   }
 
   async updateNote(noteId: EntityId, patch: PatchNoteDef): Promise<Note> {
@@ -629,11 +745,11 @@ export class TriliumClient {
     });
   }
 
-  async getRevisionContentBinary(revisionId: EntityId): Promise<Buffer> {
-    const buffer = await this.request<ArrayBuffer>('GET', `/revisions/${seg(revisionId)}/content`, {
-      responseType: 'arraybuffer',
+  async getRevisionContentBinary(revisionId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/revisions/${seg(revisionId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
     });
-    return Buffer.from(buffer);
   }
 
   // ==================== Backup ====================
@@ -644,11 +760,17 @@ export class TriliumClient {
 
   // ==================== Export / Import ====================
 
-  async exportNote(noteId: EntityId, format: 'html' | 'markdown' = 'html'): Promise<ArrayBuffer> {
-    return this.request<ArrayBuffer>('GET', `/notes/${seg(noteId)}/export`, {
+  /** Export a subtree as a ZIP, refused (before buffering) when larger than `maxBytes`. */
+  async exportNote(
+    noteId: EntityId,
+    format: 'html' | 'markdown' = 'html',
+    maxBytes?: number
+  ): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/notes/${seg(noteId)}/export`, {
       query: { format },
-      responseType: 'arraybuffer',
+      responseType: 'buffer',
       timeoutFactor: 5,
+      maxBytes,
     });
   }
 
@@ -684,24 +806,27 @@ export class TriliumClient {
     });
   }
 
-  /** Raw stored bytes of an attachment, exactly as Trilium returns them. */
-  async getAttachmentContentBinary(attachmentId: EntityId): Promise<Buffer> {
-    const buffer = await this.request<ArrayBuffer>(
-      'GET',
-      `/attachments/${seg(attachmentId)}/content`,
-      { responseType: 'arraybuffer' }
-    );
-    return Buffer.from(buffer);
+  /**
+   * Raw stored bytes of an attachment, exactly as Trilium returns them. With
+   * `maxBytes`, a larger body is refused with {@link TriliumResponseTooLargeError}
+   * before it is buffered.
+   */
+  async getAttachmentContentBinary(attachmentId: EntityId, maxBytes?: number): Promise<Buffer> {
+    return this.request<Buffer>('GET', `/attachments/${seg(attachmentId)}/content`, {
+      responseType: 'buffer',
+      maxBytes,
+    });
   }
 
   /**
    * Attachment content as base64. Attachments uploaded as bytes are encoded
    * here; attachments created through ETAPI with a base64 *string* body are
    * stored as that text, so those are returned as-is. Text formats such as
-   * SVG are never mistaken for pre-encoded base64.
+   * SVG are never mistaken for pre-encoded base64. `maxBytes` bounds the
+   * stored bytes (see {@link getAttachmentContentBinary}).
    */
-  async getAttachmentContentAsBase64(attachmentId: EntityId): Promise<string> {
-    const bytes = await this.getAttachmentContentBinary(attachmentId);
+  async getAttachmentContentAsBase64(attachmentId: EntityId, maxBytes?: number): Promise<string> {
+    const bytes = await this.getAttachmentContentBinary(attachmentId, maxBytes);
     // Recognisable binary formats (PNG, JPEG, ...) are raw bytes by definition.
     if (await fileTypeFromBuffer(bytes)) {
       return bytes.toString('base64');

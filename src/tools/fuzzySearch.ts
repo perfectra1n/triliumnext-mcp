@@ -36,8 +36,35 @@ export const FUZZY_RECALL_CAP = 200;
 /** Results returned when the caller expressed no preference. */
 export const DEFAULT_FUZZY_RESULT_LIMIT = 50;
 
-/** Matches `searchLimitSchema.max` in validators.ts. */
+/** Default for the search_notes `limit` ceiling (see configureSearch). */
 const SEARCH_LIMIT_CEILING = 10000;
+
+interface FuzzyLimits {
+  maxTerms: number;
+  recallMultiplier: number;
+  recallCap: number;
+  searchLimitCeiling: number;
+}
+
+const DEFAULT_FUZZY_LIMITS: FuzzyLimits = {
+  maxTerms: MAX_FUZZY_TERMS,
+  recallMultiplier: FUZZY_RECALL_MULTIPLIER,
+  recallCap: FUZZY_RECALL_CAP,
+  searchLimitCeiling: SEARCH_LIMIT_CEILING,
+};
+
+let fuzzyLimits: FuzzyLimits = { ...DEFAULT_FUZZY_LIMITS };
+
+/**
+ * Process-wide fuzzy-fallback tuning (TRILIUM_FUZZY_*); unset fields keep the
+ * exported defaults. `searchLimitCeiling` mirrors search_notes' max `limit`.
+ */
+export function configureFuzzySearch(options: Partial<FuzzyLimits>): void {
+  fuzzyLimits = { ...DEFAULT_FUZZY_LIMITS };
+  for (const [key, value] of Object.entries(options) as Array<[keyof FuzzyLimits, number]>) {
+    if (value !== undefined) fuzzyLimits[key] = value;
+  }
+}
 
 export type FuzzyMode = 'auto' | 'off' | 'force';
 
@@ -119,7 +146,7 @@ export function extractFuzzyTerms(query: string): string[] {
     seen.add(key);
     terms.push(term);
 
-    if (terms.length === MAX_FUZZY_TERMS) break;
+    if (terms.length >= fuzzyLimits.maxTerms) break;
   }
 
   return terms;
@@ -282,10 +309,11 @@ export function rankNotes(notes: Note[], terms: string[]): RankedNote[] {
  */
 export function resolveFuzzyLimit(callerLimit?: number): { fetchLimit: number; sliceTo: number } {
   const sliceTo = callerLimit ?? DEFAULT_FUZZY_RESULT_LIMIT;
+  const { recallMultiplier, recallCap, searchLimitCeiling } = fuzzyLimits;
   const fetchLimit = Math.min(
-    Math.max(sliceTo * FUZZY_RECALL_MULTIPLIER, sliceTo),
-    Math.max(FUZZY_RECALL_CAP, sliceTo),
-    SEARCH_LIMIT_CEILING
+    Math.max(sliceTo * recallMultiplier, sliceTo),
+    Math.max(recallCap, sliceTo),
+    searchLimitCeiling
   );
   return { fetchLimit, sliceTo };
 }

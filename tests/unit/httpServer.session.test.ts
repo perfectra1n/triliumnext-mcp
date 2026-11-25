@@ -269,6 +269,60 @@ describe('session lifecycle limits', () => {
     expect(res.status).toBe(404);
     expect(((await res.json()) as { error: string }).error).toBe('unknown_session');
   });
+
+  it('keeps a session alive while it holds a GET stream open, then expires it once closed', async () => {
+    const s = await startTestServer({}, { sessionIdleTtlMs: 100, sweepIntervalMs: 25 });
+    const sid = await openStreamableSession(s, 'token-a');
+    expect((await sendInitialized(s, sid, 'token-a')).status).toBe(202);
+
+    // A client that only listens: one standalone GET SSE stream, no POSTs.
+    const controller = new AbortController();
+    const stream = await fetch(s.url('/mcp'), {
+      headers: {
+        Accept: 'text/event-stream',
+        ...bearer('token-a'),
+        'MCP-Session-Id': sid,
+        'MCP-Protocol-Version': '2025-03-26',
+      },
+      signal: controller.signal,
+    });
+    expect(stream.status).toBe(200);
+
+    // Well past the idle TTL: the session must survive because the stream is open.
+    await new Promise((r) => setTimeout(r, 300));
+    const ping = (): Promise<Response> =>
+      fetch(s.url('/mcp'), {
+        method: 'POST',
+        headers: {
+          ...STREAMABLE_HEADERS,
+          ...bearer('token-a'),
+          'MCP-Session-Id': sid,
+          'MCP-Protocol-Version': '2025-03-26',
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'ping' }),
+      });
+    const alive = await ping();
+    expect(alive.status).toBe(200);
+    await alive.text();
+
+    // Once the stream closes, the idle clock runs again.
+    controller.abort();
+    await stream.body?.cancel().catch(() => undefined);
+    await new Promise((r) => setTimeout(r, 300));
+    const gone = await ping();
+    expect(gone.status).toBe(404);
+  });
+
+  it('takes the idle TTL and session cap from config when no options are passed', async () => {
+    const s = await startTestServer({ sessionIdleTtlMs: 100, sessionSweepIntervalMs: 25 });
+    const sid = await openStreamableSession(s, 'token-a');
+    await new Promise((r) => setTimeout(r, 300));
+    expect((await sendInitialized(s, sid, 'token-a')).status).toBe(404);
+
+    const capped = await startTestServer({ maxSessions: 1 });
+    await openStreamableSession(capped, 'token-a');
+    expect((await initStreamable(capped, 'token-a')).status).toBe(503);
+  });
 });
 
 describe('rate limiting', () => {

@@ -1512,15 +1512,15 @@ describe('System tools', () => {
     });
 
     it('action="export" returns the ZIP as an embedded resource', async () => {
-      const data = new Uint8Array([80, 75]);
-      (client.exportNote as ReturnType<typeof vi.fn>).mockResolvedValue(data.buffer);
+      const data = Buffer.from([80, 75]);
+      (client.exportNote as ReturnType<typeof vi.fn>).mockResolvedValue(data);
 
       const result = await handleSystemTool(client, 'manage_system', {
         action: 'export',
         noteId: 'root',
         format: 'markdown',
       });
-      expect(client.exportNote).toHaveBeenCalledWith('root', 'markdown');
+      expect(client.exportNote).toHaveBeenCalledWith('root', 'markdown', 10 * 1024 * 1024);
       const resource = result?.content[1] as { type: string; resource: { blob: string } };
       expect(resource.type).toBe('resource');
       expect(resource.resource.blob).toBe(Buffer.from(data).toString('base64'));
@@ -1764,7 +1764,8 @@ describe('Attachment tools', () => {
       const result = await handleAttachmentTool(client, 'get_attachment', { attachmentId: 'a1' });
       const payload = JSON.parse((result?.content[0] as { text: string }).text);
       expect(payload.attachmentId).toBe('a1');
-      expect(payload.notice).toContain('exceeds');
+      expect(payload.notice).toContain('too large to inline');
+      expect(payload.notice).toContain('open it in Trilium');
       expect(client.getAttachmentContentBinary).not.toHaveBeenCalled();
     });
 

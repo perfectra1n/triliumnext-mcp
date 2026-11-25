@@ -158,15 +158,6 @@ export const positionSchema = z
   .positive('Position must be positive');
 
 /**
- * Search limit validator
- */
-export const searchLimitSchema = z
-  .number()
-  .int('Limit must be an integer')
-  .min(1, 'Limit must be at least 1')
-  .max(10000, 'Limit cannot exceed 10000');
-
-/**
  * Non-empty string validator
  */
 export const nonEmptyStringSchema = z.string().min(1, 'Value cannot be empty');

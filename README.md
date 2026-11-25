@@ -6,7 +6,7 @@ A Model Context Protocol (MCP) server for interacting with [TriliumNext](https:/
 
 - [Features](#features)
 - [Installation](#installation)
-- [Configuration](#configuration) — CLI, env vars, config file
+- [Configuration](#configuration) — CLI, env vars, config file · [Limits and tuning](#limits-and-tuning)
 - [Logging](#logging) — what gets logged, where it goes, how to tune it
 - [Metrics](#metrics) — Prometheus `/metrics` endpoint, auth modes, exposed series
 - [Available Tools](#available-tools)
@@ -85,7 +85,7 @@ Options:
 - `--public-url <url>` — user-facing Trilium web URL used for the clickable note links returned to the user. Defaults to `--url` with `/etapi` stripped. Set this only when the MCP server reaches Trilium at a different address than the user's browser does (e.g. an internal ETAPI host behind a public reverse-proxy domain).
 - `--transport <type>` — Transport type: `stdio` or `http` (default: `stdio`)
 - `-p, --port <port>` — HTTP server port when using http transport (default: `3000`)
-- `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `500mb`). See [Request body size limits](#request-body-size-limits).
+- `--max-post-bytes <size>` — max size of a single MCP JSON-RPC POST body on the SSE transport. Accepts raw bytes or suffixed values like `500mb` / `1gb` (default: `64mb`). See [Request body size limits](#request-body-size-limits).
 - `-h, --help` — Show help message
 
 Content input options (see [Providing file content](#providing-file-content-paths-urls-base64)):
@@ -109,7 +109,7 @@ export TRILIUM_TOKEN=your-etapi-token
 export TRILIUM_PUBLIC_URL=https://trilium.example.com  # optional; web URL for note links (defaults to TRILIUM_URL without /etapi)
 export TRILIUM_TRANSPORT=stdio
 export TRILIUM_HTTP_PORT=3000
-export TRILIUM_MAX_POST_BYTES=500mb  # SSE POST body cap; see "Request body size limits"
+export TRILIUM_MAX_POST_BYTES=64mb   # SSE POST body cap; see "Request body size limits"
 export TRILIUM_REQUEST_TIMEOUT=60s   # per-request ETAPI timeout (ms, or 90s / 2m); see "Reliability"
 export TRILIUM_BUSY_COOLDOWN=30s     # how long a timed-out Trilium is treated as busy
 export TRILIUM_SEARCH_STRATEGY=auto  # search_notes default: auto | fast | full
@@ -154,6 +154,69 @@ For multi-tenant HTTP deployments, the same precedence applies (CLI > env > file
   "allowPrivateUrls": false
 }
 ```
+
+### Limits and tuning
+
+Every size cap, timeout, retry and search limit can be changed. Each setting follows the same precedence as everything else (CLI > env > config file > default). Sizes accept raw bytes or suffixed values (`512kb`, `5mb`, `1gb`); durations accept milliseconds or `500ms` / `90s` / `2m`. An unparseable CLI value is an error; an unparseable size/duration env var falls back to the default (like `TRILIUM_REQUEST_TIMEOUT`), and an invalid integer anywhere is an error. Config-file keys take plain numbers (bytes, milliseconds, or the integer).
+
+Tool descriptions that mention a limit (e.g. get_attachment's inline cap) are built from the configured value at startup.
+
+**Memory and payload caps** — on a small container (e.g. a 256 MiB limit) lower `TRILIUM_MAX_RESPONSE_BYTES` first: it bounds what any single Trilium response may occupy before it is refused.
+
+| Env var | CLI flag | Config-file key | Default | Meaning |
+|---------|----------|-----------------|---------|---------|
+| `TRILIUM_MAX_RESPONSE_BYTES` | `--max-response-bytes` | `maxResponseBytes` | `64mb` | Largest ETAPI response body buffered for any request. Larger bodies are refused from their `Content-Length`, or cut off mid-stream, instead of being read into memory (`RESPONSE_TOO_LARGE`). |
+| `TRILIUM_MAX_INLINE_ATTACHMENT_BYTES` | `--max-inline-attachment-bytes` | `maxInlineAttachmentBytes` | `5mb` | `get_attachment` returns image attachments as image blocks and other binaries as base64 resources up to this size; larger ones return metadata plus a notice telling the model to have the user open them in Trilium. Checked against the declared size before fetching and again on the bytes received. |
+| `TRILIUM_MAX_NOTE_IMAGE_BYTES` | `--max-note-image-bytes` | `maxNoteImageBytes` | `1mb` | `get_note` inlines each image embedded in the body (and the content of an image note) up to this size. |
+| `TRILIUM_MAX_NOTE_IMAGES_TOTAL_BYTES` | `--max-note-images-total-bytes` | `maxNoteImagesTotalBytes` | `4mb` | Total embedded-image bytes `get_note` inlines per call; the rest are listed for `get_attachment`. |
+| `TRILIUM_MAX_EXPORT_BYTES` | `--max-export-bytes` | `maxExportBytes` | `10mb` | Largest export ZIP `manage_system` returns inline (enforced while downloading). |
+| `TRILIUM_CONTENT_CHAR_CAP` | `--content-char-cap` | `contentCharCap` | `50000` | Text characters returned per read: `get_note`'s default page, and the truncation point for revision and text-attachment bodies. |
+| `TRILIUM_CONTENT_MAX_CHARS_LIMIT` | `--content-max-chars-limit` | `contentMaxCharsLimit` | `500000` | Highest `content_max_chars` a `get_note` call may request. |
+| `TRILIUM_MAX_CONTENT_FETCH_BYTES` | `--max-content-fetch-bytes` | `maxContentFetchBytes` | `50mb` | Max content file read / URL download for attachment and image inputs (existing). |
+| `TRILIUM_MAX_POST_BYTES` | `--max-post-bytes` | `maxPostBytes` | `64mb` | Max MCP POST body on the HTTP transport (existing). |
+
+**Timeouts and retries**
+
+| Env var | CLI flag | Config-file key | Default | Meaning |
+|---------|----------|-----------------|---------|---------|
+| `TRILIUM_REQUEST_TIMEOUT` | `--request-timeout` | `requestTimeoutMs` | `60s` | Per-request ETAPI timeout; export, import and backup get 5× (existing). |
+| `TRILIUM_BUSY_COOLDOWN` | `--busy-cooldown` | `busyCooldownMs` | `30s` | How long a timed-out Trilium is treated as busy (existing). |
+| `TRILIUM_BUSY_PROBE_TIMEOUT` | `--busy-probe-timeout` | `busyProbeTimeoutMs` | `5s` | Timeout for non-search requests while a Trilium is marked busy. |
+| `TRILIUM_MAX_RETRIES` | `--max-retries` | `maxRetries` | `2` | Retries for idempotent requests on network errors and 502/503/504 (`0` disables). |
+| `TRILIUM_RETRY_DELAY` | `--retry-delay` | `retryDelayMs` | `250ms` | Base retry backoff, doubled on each attempt. |
+| `TRILIUM_CONTENT_FETCH_TIMEOUT` | `--content-fetch-timeout` | `contentFetchTimeoutMs` | `30s` | Timeout for each http(s) download of attachment/image content. |
+| `TRILIUM_PROGRESS_INTERVAL` | `--progress-interval` | `progressIntervalMs` | `10s` | Progress heartbeat cadence during a tool call that sent a `progressToken`. |
+
+**Search and navigation**
+
+| Env var | CLI flag | Config-file key | Default | Meaning |
+|---------|----------|-----------------|---------|---------|
+| `TRILIUM_DEFAULT_SEARCH_LIMIT` | `--default-search-limit` | `defaultSearchLimit` | `50` | `search_notes` results when the call passes no `limit` (clamped to the maximum). |
+| `TRILIUM_MAX_SEARCH_LIMIT` | `--max-search-limit` | `maxSearchLimit` | `10000` | Highest `limit` a `search_notes` call may request; also caps the fuzzy recall window. |
+| `TRILIUM_SEARCH_FAST_MIN_RESULTS` | `--search-fast-min-results` | `searchFastMinResults` | `5` | Under `strategy: "auto"`, a title/label pass with at least this many hits (or `limit`, if smaller) skips the body search. |
+| `TRILIUM_SEARCH_PREVIEW_MAX_RESULTS` | `--search-preview-max-results` | `searchPreviewMaxResults` | `20` | Results that get a `contentPreview` (each costs one content fetch). |
+| `TRILIUM_FETCH_CONCURRENCY` | `--fetch-concurrency` | `fetchConcurrency` | `5` | Max in-flight ETAPI requests for search previews and `get_note_tree` fan-out. |
+| `TRILIUM_TREE_MAX_NOTES` | `--tree-max-notes` | `treeMaxNotes` | `200` | Notes fetched per `get_note_tree` call before it reports `truncated`. |
+| `TRILIUM_FUZZY_MAX_TERMS` | `--fuzzy-max-terms` | `fuzzyMaxTerms` | `8` | Fuzzy fallback: max words turned into the OR query. |
+| `TRILIUM_FUZZY_RECALL_MULTIPLIER` | `--fuzzy-recall-multiplier` | `fuzzyRecallMultiplier` | `4` | Fuzzy fallback: candidates fetched per result returned. |
+| `TRILIUM_FUZZY_RECALL_CAP` | `--fuzzy-recall-cap` | `fuzzyRecallCap` | `200` | Fuzzy fallback: candidate window cap (never below the caller's `limit`). |
+| `TRILIUM_NOTE_MAX_PATHS` | `--note-max-paths` | `noteMaxPaths` | `10` | `get_note include_path`: max tree placements walked. |
+| `TRILIUM_NOTE_MAX_BACKLINKS` | `--note-max-backlinks` | `noteMaxBacklinks` | `50` | `get_note include_backlinks`: max backlinks returned. |
+| `TRILIUM_HISTORY_LIMIT` | `--history-limit` | `historyLimit` | `100` | `get_note_history` default `limit` (clamped to the maximum). |
+| `TRILIUM_HISTORY_MAX_LIMIT` | `--history-max-limit` | `historyMaxLimit` | `1000` | Highest `limit` a `get_note_history` call may request. |
+
+**HTTP transport sessions** (ignored on stdio)
+
+| Env var | CLI flag | Config-file key | Default | Meaning |
+|---------|----------|-----------------|---------|---------|
+| `TRILIUM_SSE_KEEPALIVE` | `--sse-keepalive` | `sseKeepaliveMs` | `30s` | Keep-alive ping cadence on `/sse` streams. |
+| `TRILIUM_SESSION_IDLE_TTL` | `--session-idle-ttl` | `sessionIdleTtlMs` | `30m` | Close Streamable HTTP sessions with no requests for this long; a session holding a `GET /mcp` stream open counts as active. `0` disables expiry. |
+| `TRILIUM_SESSION_SWEEP_INTERVAL` | `--session-sweep-interval` | `sessionSweepIntervalMs` | min(60s, max(1s, TTL/2)) | How often idle sessions are swept. |
+| `TRILIUM_MAX_SESSIONS` | `--max-sessions` | `maxSessions` | `1000` | Max concurrently open sessions across `/sse` and `/mcp`; more get `503 too_many_sessions`. |
+| `TRILIUM_VALIDATE_TIMEOUT` | `--validate-timeout` | `triliumValidateTimeoutMs` | `10s` | Timeout of the Trilium probe made when a session connects. |
+| `TRILIUM_JWT_CLOCK_TOLERANCE` | `--jwt-clock-tolerance` | `jwtClockToleranceSec` | `30` | Seconds of clock skew tolerated on JWT `exp`/`nbf`. |
+| `TRILIUM_RATE_LIMIT_RPS` / `TRILIUM_RATE_LIMIT_BURST` | `--rate-limit-rps` / `--rate-limit-burst` | `rateLimitRps` / `rateLimitBurst` | `0` (off) | Per-IP and per-token rate limit (existing; see [Rate limiting](#rate-limiting)). |
+
 
 ## Logging
 
@@ -1014,16 +1077,16 @@ On `POST /message`:
 | `400`  | `missing_session_id`    | No `?sessionId=` query parameter. |
 | `400`  | `invalid_json`          | Body wasn't valid JSON. |
 | `404`  | `unknown_session`       | `sessionId` doesn't match any live SSE connection (typical after a disconnect / restart). |
-| `413`  | `payload_too_large`     | Body exceeded `--max-post-bytes` (default 500 MB). See [Request body size limits](#request-body-size-limits). |
+| `413`  | `payload_too_large`     | Body exceeded `--max-post-bytes` (default 64 MB). See [Request body size limits](#request-body-size-limits). |
 
 ### Request body size limits
 
-The HTTP/SSE transport caps each MCP JSON-RPC POST body at **500 MB by default**. Tune it with `--max-post-bytes <size>` or `TRILIUM_MAX_POST_BYTES` (e.g. `100mb`, `2gb`, or a raw byte count). On stdio there is no equivalent cap — your shell / OS pipe buffers are the limit.
+The HTTP/SSE transport caps each MCP JSON-RPC POST body at **64 MB by default**. Tune it with `--max-post-bytes <size>` or `TRILIUM_MAX_POST_BYTES` (e.g. `100mb`, `2gb`, or a raw byte count). On stdio there is no equivalent cap — your shell / OS pipe buffers are the limit.
 
 Why this exists, and a few caveats worth knowing:
 
 - **The MCP SDK has its own internal 4 MB cap** inside `handlePostMessage`. To honor anything larger, this server reads and JSON-parses the request body itself before handing it off, bypassing the SDK's read. If you fork or upgrade and bodies start failing at ~4 MB with `400` from the SDK, this read-and-pass-through is what's missing.
-- **Bodies are buffered in memory** before dispatch. A 500 MB cap means a single connection can ask for 500 MB of heap. On a multi-tenant deployment, set the cap to the smallest value your largest legitimate attachment needs.
+- **Bodies are buffered in memory** before dispatch. A 64 MB cap means a single connection can ask for 64 MB of heap (more while it is parsed). On a multi-tenant deployment, set the cap to the smallest value your largest legitimate attachment needs.
 - **Attachments are base64-encoded over JSON-RPC**, which inflates payload size by ~33%. A 100 MB binary becomes ~134 MB on the wire.
 - **413 is returned as soon as we can detect the overrun** — either from `Content-Length` upfront (no body drain) or mid-stream once accumulated bytes exceed the cap. Chunked uploads without `Content-Length` still get capped via the streaming check.
 - **Reverse proxies have their own limits.** Nginx defaults to `client_max_body_size 1m`; bump it (`client_max_body_size 600m;` or similar) or large requests die at the proxy with `413` before they reach this server. Caddy has no default cap.

@@ -333,7 +333,7 @@ describe('manage_system export', () => {
   it('returns the ZIP as an embedded resource plus a text summary', async () => {
     const bytes = new Uint8Array([0x50, 0x4b, 3, 4, 255]);
     const c = client();
-    (c.exportNote as Fn).mockResolvedValue(bytes.buffer);
+    (c.exportNote as Fn).mockResolvedValue(Buffer.from(bytes));
     const r = await handleSystemTool(c, 'manage_system', { action: 'export', noteId: 'n1' });
     expect(r?.content).toHaveLength(2);
     const summary = json(r);
@@ -350,14 +350,14 @@ describe('manage_system export', () => {
 
   it('accepts the spec-supported "share" format', async () => {
     const c = client();
-    (c.exportNote as Fn).mockResolvedValue(new ArrayBuffer(1));
+    (c.exportNote as Fn).mockResolvedValue(Buffer.alloc(1));
     await handleSystemTool(c, 'manage_system', { action: 'export', noteId: 'n1', format: 'share' });
-    expect(c.exportNote).toHaveBeenCalledWith('n1', 'share');
+    expect(c.exportNote).toHaveBeenCalledWith('n1', 'share', MAX_EXPORT_BYTES);
   });
 
   it('refuses oversized exports with an actionable error', async () => {
     const c = client();
-    (c.exportNote as Fn).mockResolvedValue(new ArrayBuffer(MAX_EXPORT_BYTES + 1));
+    (c.exportNote as Fn).mockResolvedValue(Buffer.alloc(MAX_EXPORT_BYTES + 1));
     await expect(
       handleSystemTool(c, 'manage_system', { action: 'export', noteId: 'root' })
     ).rejects.toThrow(/smaller subtree/);
@@ -570,7 +570,7 @@ describe('annotations', () => {
 describe('errors from TriliumClientError carry through', () => {
   it('export size error is a TriliumClientError with a code', async () => {
     const c = client();
-    (c.exportNote as Fn).mockResolvedValue(new ArrayBuffer(MAX_EXPORT_BYTES + 1));
+    (c.exportNote as Fn).mockResolvedValue(Buffer.alloc(MAX_EXPORT_BYTES + 1));
     const err = await handleSystemTool(c, 'manage_system', {
       action: 'export',
       noteId: 'n1',

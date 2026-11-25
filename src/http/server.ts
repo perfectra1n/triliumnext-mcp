@@ -30,14 +30,15 @@ import type { Logger } from '../utils/logger.js';
  *  so to honor anything larger we must read+parse the body here and pass it
  *  to the SDK as `parsedBody` (which short-circuits its size-limited read). */
 
-/** Keep-alive ping cadence for SSE streams; prevents idle proxies from
- *  closing the connection while the client is just waiting for server events. */
-const SSE_KEEPALIVE_INTERVAL_MS = 30_000;
+/** Default keep-alive ping cadence for SSE streams (TRILIUM_SSE_KEEPALIVE);
+ *  prevents idle proxies from closing the connection while the client is just
+ *  waiting for server events. */
+export const DEFAULT_SSE_KEEPALIVE_INTERVAL_MS = 30_000;
 
-/** Hard ceiling on the validation probe during /sse connect. Without this,
- *  a client pointing X-Trilium-Url at a black-hole host could park a
- *  connection indefinitely. */
-const TRILIUM_VALIDATE_TIMEOUT_MS = 10_000;
+/** Default ceiling on the validation probe during connect
+ *  (TRILIUM_VALIDATE_TIMEOUT). Without this, a client pointing X-Trilium-Url at
+ *  a black-hole host could park a connection indefinitely. */
+export const DEFAULT_TRILIUM_VALIDATE_TIMEOUT_MS = 10_000;
 
 /** Default idle TTL for StreamableHTTP sessions (no requests for this long → closed). */
 export const DEFAULT_SESSION_IDLE_TTL_MS = 30 * 60 * 1000;
@@ -61,9 +62,19 @@ interface StreamableSession {
   mcpServer: McpServer;
   identity: string;
   lastActivity: number;
+  /**
+   * Open GET (standalone SSE) streams on this session. A client may hold one
+   * open and send nothing else for longer than the idle TTL; while it is open
+   * the session is live, so the idle sweep skips it.
+   */
+  openStreams: number;
 }
 
-/** Tunables for tests / embedding. All optional. */
+/**
+ * Tunables for tests / embedding. All optional; each overrides the matching
+ * Config field (TRILIUM_SESSION_IDLE_TTL, TRILIUM_MAX_SESSIONS,
+ * TRILIUM_SESSION_SWEEP_INTERVAL), which in turn falls back to the default.
+ */
 export interface HttpServerOptions {
   /** Idle TTL for StreamableHTTP sessions. Default 30 min. `0` disables. */
   sessionIdleTtlMs?: number;
@@ -83,6 +94,8 @@ interface Ctx {
   metrics: Metrics | null;
   metricsAuth: MetricsAuth | null;
   maxSessions: number;
+  sseKeepaliveMs: number;
+  validateTimeoutMs: number;
 }
 
 /** Log-safe session id: first 8 chars only (the full id is a bearer capability for SSE). */
@@ -111,8 +124,9 @@ export async function startHttp(
 ): Promise<HttpServer> {
   const sessions = new Map<string, Session>();
   const streamableSessions = new Map<string, StreamableSession>();
-  const sessionIdleTtlMs = options.sessionIdleTtlMs ?? DEFAULT_SESSION_IDLE_TTL_MS;
-  const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const sessionIdleTtlMs =
+    options.sessionIdleTtlMs ?? config.sessionIdleTtlMs ?? DEFAULT_SESSION_IDLE_TTL_MS;
+  const maxSessions = options.maxSessions ?? config.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const bindHost = config.httpHost ?? DEFAULT_HTTP_HOST;
   const gatewayAuth =
     config.gatewayAuth === 'bearer' ? new GatewayAuth(config.gatewayTokens) : null;
@@ -124,6 +138,7 @@ export async function startHttp(
           issuer: config.jwtIssuer ?? undefined,
           audience: config.jwtAudience ?? undefined,
           principalClaim: config.jwtPrincipalClaim,
+          clockToleranceSec: config.jwtClockToleranceSec,
         })
       : null;
   const gatewayPolicy = new GatewayPolicy(config.gatewayAuth, gatewayAuth, jwtAuth);
@@ -153,6 +168,8 @@ export async function startHttp(
     metrics,
     metricsAuth,
     maxSessions,
+    sseKeepaliveMs: config.sseKeepaliveMs ?? DEFAULT_SSE_KEEPALIVE_INTERVAL_MS,
+    validateTimeoutMs: config.triliumValidateTimeoutMs ?? DEFAULT_TRILIUM_VALIDATE_TIMEOUT_MS,
   };
 
   if (config.allowPrivateUrls && config.multiTenant) {
@@ -247,11 +264,14 @@ export async function startHttp(
   let sweepTimer: NodeJS.Timeout | null = null;
   if (sessionIdleTtlMs > 0) {
     const interval =
-      options.sweepIntervalMs ?? Math.min(60_000, Math.max(1000, sessionIdleTtlMs / 2));
+      options.sweepIntervalMs ??
+      config.sessionSweepIntervalMs ??
+      Math.min(60_000, Math.max(1000, sessionIdleTtlMs / 2));
     sweepTimer = setInterval(() => {
       const cutoff = Date.now() - sessionIdleTtlMs;
       for (const [sid, s] of streamableSessions) {
-        if (s.lastActivity < cutoff) {
+        // A session holding a GET stream open is in use even if it sends nothing.
+        if (s.openStreams === 0 && s.lastActivity < cutoff) {
           streamableSessions.delete(sid);
           logger.info('mcp_session_expired', {
             session: shortSessionId(sid),
@@ -514,6 +534,15 @@ async function handleStreamable(
     if (existing) {
       if (!sessionOwnedBy(req, res, ctx, existing, sessionId, identity, 'streamable')) return;
       existing.lastActivity = Date.now();
+      if (method === 'GET') {
+        // Track the open stream so the idle sweep leaves the session alone
+        // while it lasts; the idle clock restarts when it closes.
+        existing.openStreams += 1;
+        res.once('close', () => {
+          existing.openStreams -= 1;
+          existing.lastActivity = Date.now();
+        });
+      }
       try {
         if (method === 'POST') {
           const parsedBody = await readJsonBody(req, config.maxPostBytes);
@@ -636,7 +665,7 @@ async function handleStreamable(
     clientOptionsFromConfig(config)
   );
   try {
-    await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
+    await withTimeout(client.getAppInfo(), ctx.validateTimeoutMs);
   } catch (err) {
     if (err instanceof TriliumClientError) {
       const status = err.status === 401 || err.status === 403 ? 401 : 502;
@@ -672,6 +701,7 @@ async function handleStreamable(
     sessionId: 'streamable-pending',
     metrics: metrics ?? undefined,
     principal: principal ?? undefined,
+    progressIntervalMs: config.progressIntervalMs,
   });
 
   let registeredId: string | null = null;
@@ -679,7 +709,13 @@ async function handleStreamable(
     sessionIdGenerator: () => randomUUID(),
     onsessioninitialized: (sid) => {
       registeredId = sid;
-      streamableSessions.set(sid, { transport, mcpServer, identity, lastActivity: Date.now() });
+      streamableSessions.set(sid, {
+        transport,
+        mcpServer,
+        identity,
+        lastActivity: Date.now(),
+        openStreams: 0,
+      });
       logger.info('mcp_session_opened', {
         session: shortSessionId(sid),
         host: triliumHost,
@@ -844,7 +880,7 @@ async function handleSseConnect(
     clientOptionsFromConfig(config)
   );
   try {
-    await withTimeout(client.getAppInfo(), TRILIUM_VALIDATE_TIMEOUT_MS);
+    await withTimeout(client.getAppInfo(), ctx.validateTimeoutMs);
   } catch (err) {
     if (err instanceof TriliumClientError) {
       const status = err.status === 401 || err.status === 403 ? 401 : 502;
@@ -880,6 +916,7 @@ async function handleSseConnect(
     sessionId,
     metrics: metrics ?? undefined,
     principal: principal ?? undefined,
+    progressIntervalMs: config.progressIntervalMs,
   });
 
   // 6. Register the session BEFORE awaiting connect(). server.connect() calls
@@ -891,7 +928,7 @@ async function handleSseConnect(
     } catch {
       // Stream may have closed between check and write; onclose will clean up.
     }
-  }, SSE_KEEPALIVE_INTERVAL_MS);
+  }, ctx.sseKeepaliveMs);
   // Never let the keep-alive timer hold the process open.
   keepAlive.unref?.();
 
