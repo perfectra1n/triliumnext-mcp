@@ -36,8 +36,12 @@ EXPOSE 3000
 
 # Busybox wget ships with alpine. The /health endpoint requires no auth
 # so we can probe it regardless of gateway-auth configuration.
+# Probe the IPv4 loopback literal, not "localhost": /etc/hosts maps localhost
+# to both 127.0.0.1 and ::1, busybox wget tries ::1 first without falling
+# back, and TRILIUM_HTTP_HOST=0.0.0.0 above only listens on IPv4 (#150).
+# tests/unit/dockerfile.test.ts keeps this in step with TRILIUM_HTTP_HOST.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
-  CMD wget --spider -q http://localhost:3000/health || exit 1
+  CMD wget --spider -q http://127.0.0.1:3000/health || exit 1
 
 # Stdio by default (matches historical behavior). Container users enable
 # HTTP via env (TRILIUM_TRANSPORT=http) or by passing flags to CMD.
