@@ -116,6 +116,19 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
 
+      # Build once into the local daemon and check that Docker's own
+      # HEALTHCHECK reports "healthy" before anything is pushed (#150).
+      - name: Build image for healthcheck smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          tags: triliumnext-mcp:ci-smoke
+          cache-from: type=gha
+
+      - name: Smoke-test container healthcheck
+        run: scripts/docker-healthcheck-smoke.sh triliumnext-mcp:ci-smoke 60
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
         with:
